@@ -262,6 +262,25 @@ the corrected live test passes.
   passes, record real turn/read/token evidence and mark Step 1 complete
   everywhere its acceptance state is documented.
 
+### 2026-07-26 — Public repository creation
+
+- What was done: Initialized Git on `main`, verified `.env` and dependencies
+  are ignored, scanned the publishable tree for common credential patterns,
+  reran type-check and the offline suite, created the initial commit, and
+  published the project as the public GitHub repository
+  `almamun4901/code-agent`.
+- What broke / had to be reworked: The existing GitHub CLI credential had
+  expired and required device-flow reauthentication. No project data was sent
+  until authentication completed.
+- Decisions made this session: The repository is public and uses `main` as its
+  default development branch. No architectural decisions changed.
+- Current status of the step in progress: Repository publication is complete.
+  Step 1 remains in progress only because the corrected live Anthropic
+  acceptance test has not yet passed.
+- Next session should start with: Rerun `bun run test:integration`; if it
+  passes, record the evidence, mark Phase 1 complete, commit the documentation
+  update, and push it to `main`.
+
 ---
 
 ## Template for future entries

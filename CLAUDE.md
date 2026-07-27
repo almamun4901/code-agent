@@ -78,6 +78,13 @@ and canned tool results to Anthropic. Normal `bun test` never makes that call.
   access.
 - `tests/loop.test.ts` covers the state machine and trust boundary offline.
 - `tests/anthropic.integration.test.ts` is the opt-in live acceptance gate.
+- `src/tools/dispatcher.ts` validates and routes all six real tools, invokes
+  the Step 6 policy seam, normalizes failures, and caps serialized results.
+- `src/tools/token-budget.ts` enforces the 4,000-token offline
+  `o200k_base` result budget.
+- `tests/support/temp-repo.ts` creates disposable worktrees and a local bare
+  remote without touching the project worktree.
+- `tests/tools.test.ts` covers the real dispatcher and all six tools.
 
 ## Current step
 

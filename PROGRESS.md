@@ -7,22 +7,21 @@
 
 ---
 
-## Current state (updated: 2026-07-25)
+## Current state (updated: 2026-07-26)
 
-**Overall:** Step 0 is complete. Step 1 is implemented, type-safe, covered by
-38 passing offline tests, and gstack-reviewed. Three live Anthropic runs found
-and isolated provider/prompt-boundary defects: unsupported strict-schema
-constraints, rejected tool calls replayed without results, and a missing
-canonical initial plan. All are fixed locally. Step 1 remains in progress until
-the corrected live test passes.
+**Overall:** Steps 0–2 are complete. The corrected Step 1 live Anthropic gate
+passed with repository state unchanged. Step 2 adds six runtime-validated real
+tools behind one dispatcher, disposable git worktrees and a local bare remote,
+and a complete-result cap of 4,000 offline `o200k_base` tokens. The final
+offline suite reports 65 pass, 1 opt-in live test skipped, and 0 fail.
 
 **Step-by-step:**
 
 | Step | Status | Notes |
 |---|---|---|
 | 0 — Fake loop | complete | Four turns; 3/3 tasks completed; one recovery |
-| 1 — Real model, fake tools | in progress | Local gates pass; corrected live API rerun pending |
-| 2 — Real tools, no sandbox | not started | — |
+| 1 — Real model, fake tools | complete | Authorized live gate passed; project worktree unchanged |
+| 2 — Real tools, no sandbox | complete | Six tools, dispatcher, capped results, disposable repo harness |
 | 3 — Plan schema + persistence | not started | — |
 | 4 — MCP transport (stdio) | not started | — |
 | 5 — Sandbox (E2B) | not started | — |
@@ -57,14 +56,20 @@ the corrected live test passes.
   or executing a tool. Retry one invalid response, then abort. See ADR 0004.
 - Live provider tests are opt-in and excluded from `bun test`, even when a key
   is populated. See ADR 0005.
+- OpenRouter no longer blocks deterministic Steps 2–6. It must land after the
+  sandbox and PreToolUse guard, before the first live-model real-tool run or
+  Step 7. See ADR 0006.
+- Step 2 tool outputs use an injectable offline tokenizer with pinned
+  `o200k_base` as a deterministic proxy, not as Anthropic billing truth. See
+  ADR 0007.
+- Step 2 symbol extraction uses pinned `web-tree-sitter` plus WASM grammars
+  because the native bindings did not compile under the supported local
+  Bun/Node toolchain. See ADR 0008.
 
 ---
 
 ## Open questions / blockers
 
-- [ ] Rerun `bun run test:integration`. The first three live runs exposed and
-  resolved strict-schema compatibility, invalid retry-transcript, and initial
-  prompt-contract defects.
 - [ ] Confirm SWE-bench Pro Python subset is actually pullable and that a
   single task's environment reproduces cleanly — not yet dry-run.
 - [ ] Confirm ripgrep and tree-sitter binaries are present in E2B's default
@@ -73,8 +78,8 @@ the corrected live test passes.
   repo. Needed by step 10, easy to forget until blocked on it.
 - [ ] Langfuse: self-host via Docker Compose vs. cloud free tier for dev —
   not decided. Doesn't block anything until step 9.
-- [ ] OpenRouter account/credits not yet set up — fine, since it's deferred,
-  but flagging so it's not a surprise when step 1 generalizes.
+- [ ] OpenRouter account/credits not yet set up — deferred until after Steps
+  5–6, but flagging so it is not a surprise at the live real-tool boundary.
 
 ---
 
@@ -280,6 +285,64 @@ the corrected live test passes.
 - Next session should start with: Rerun `bun run test:integration`; if it
   passes, record the evidence, mark Phase 1 complete, commit the documentation
   update, and push it to `main`.
+
+### 2026-07-26 — Step 2 dependency resolution and execution gate
+
+- What was done: Resolved the ADR 0002/Step 2 dependency contradiction by
+  superseding ADR 0002 with ADR 0006: OpenRouter now lands at the first
+  live-model real-tool boundary, after E2B and PreToolUse, rather than blocking
+  deterministic tool work. Added ADR 0007 for the pinned offline
+  `o200k_base` output-budget proxy and wrote the decision-complete Step 2 plan,
+  including disposable worktrees, preview/apply edits, explicit
+  `replaceAll` semantics, and separate lexical-path versus temporary-root
+  containment tests.
+- What broke / had to be reworked: The offline Step 1 gate passed, but the live
+  integration test could not connect from the restricted environment. The
+  external retry was denied because this request did not explicitly authorize
+  sending the documented synthetic prompt, plan state, and canned tool results
+  to Anthropic. No bypass was attempted.
+- Decisions made this session: OpenRouter is not a Step 2 dependency and no
+  live model may receive real tools before OpenRouter, E2B, and PreToolUse are
+  all present. `edit_file` treats multiple matches as valid only when
+  `replaceAll: true`. Lexical path validation is permanent input validation;
+  temporary-root containment is disposable development scaffolding.
+- Current status of the step in progress: Step 1 remains in progress.
+  `/Users/malm/.bun/bin/bun run typecheck` passes; the offline suite reports
+  38 pass, 1 live test skipped, 0 fail; and the Step 0 regression completes
+  four turns with one recovery. Step 2 remains not started.
+- Next session should start with: Obtain explicit authorization for the
+  documented Anthropic payload, rerun `bun run test:integration` externally,
+  and mark Step 1 complete if it passes. Only then implement the Step 2
+  temporary-repository harness.
+
+### 2026-07-26 — Step 1 acceptance and Step 2 implementation
+
+- What was done: Ran the explicitly authorized live Anthropic integration
+  gate; it passed its completion, 3+ response, three-read, plan-rewrite, and
+  non-zero-token assertions. Implemented runtime-validated contracts, typed
+  errors, the no-op Step 6 policy seam, the capped result finalizer, disposable
+  worktree/local-remote harness, and all six real tools. Added 27 Step 2 tests,
+  completed the pre-landing review, and synchronized the roadmap, plans,
+  implementation reviews, README, and agent instructions.
+- What broke / had to be reworked: The official native Tree-sitter package
+  failed to compile because its build did not enable the C++20 features
+  required under Node 24. The current `web-tree-sitter` release was also
+  incompatible with the available WASM grammar artifacts, so the matching
+  0.20.8 runtime was pinned. Review then found that the first dispatcher
+  version relied too heavily on compile-time types; complete runtime payload
+  validation was added before the policy seam.
+- Decisions made this session: Use pinned `web-tree-sitter` 0.20.8 with
+  `tree-sitter-wasms` 0.1.13 for the supported Step 2 languages (ADR 0008).
+  Keep the parser contract independent of that runtime so native bindings can
+  replace it later.
+- Current status of the step in progress: Steps 1 and 2 are complete.
+  `bun run typecheck` passes; `bun test` reports 65 pass, 1 opt-in live test
+  skipped, 0 fail; and `bun run loop-fake.ts` completes four turns with one
+  recovery. Before/after status checks proved both the live gate and final
+  offline/regression run left the project worktree unchanged.
+- Next session should start with: Step 3 planning and engineering review for
+  the Zod plan schema, atomic `.agent/state.json` persistence, and kill/restart
+  recovery definition of done.
 
 ---
 

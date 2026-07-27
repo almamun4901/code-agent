@@ -1,7 +1,7 @@
 # 0002 — Direct Claude API for steps 0–3, OpenRouter deferred
 
 **Date:** 2026-07-24
-**Status:** accepted
+**Status:** superseded by 0006
 
 ## Context
 
@@ -39,6 +39,5 @@ provider.
 
 ## Revisit when
 
-Immediately after step 1 is verified done — generalize `callModel()` to
-route through OpenRouter before starting step 2, so later steps aren't built
-against an interface that has to change again.
+Superseded by ADR 0006. Step 2 is a deterministic tool-correctness phase and
+does not call a model, so OpenRouter is no longer a Step 2 entry gate.

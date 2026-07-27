@@ -8,10 +8,10 @@ creation.
 
 ## Current status
 
-Step 0, the deterministic fake loop, is complete. Step 1, a real Claude model
-driving fake typed tools, is implemented and locally verified. It remains
-`in progress` until the explicitly authorized live Anthropic acceptance test
-completes.
+Steps 0–2 are complete. The deterministic fake loop, live Claude loop with
+fake tools, and six real local tools have all passed their acceptance gates.
+The real tools have only been exercised by deterministic tests against
+disposable repositories; no model has received them.
 
 The code currently proves:
 
@@ -25,6 +25,13 @@ The code currently proves:
 - ordered, ID-correlated results for `rewrite_plan` and `read_file`;
 - one protocol retry followed by a hard failure;
 - deterministic fake file reads with no host filesystem access.
+- a transport-neutral real-tool dispatcher with runtime input validation and
+  a no-op policy seam for Step 6;
+- real `read_file`, preview/apply `edit_file`, `ripgrep`,
+  `tree_sitter_symbols`, `run_shell`, and typed git operations;
+- disposable git worktrees and a local bare remote for tool tests;
+- complete success and error results capped at 4,000 offline
+  `o200k_base` tokens.
 
 ## Current architecture
 
@@ -41,14 +48,27 @@ src/loop.ts
     |                                Anthropic Messages API
     |
     +---- validated read_file ------> src/tools/fake-read-file.ts
-                                           |
-                                           v
-                                      canned result only
+    |                                      |
+    |                                      v
+    |                                 canned result only
+    |
+deterministic tests
+    |
+    v
+src/tools/dispatcher.ts
+    |
+    +---- runtime validation + policy seam
+    +---- six typed real tools
+    +---- capped serialized ToolResult
+    |
+    v
+disposable git worktree + local bare remote
 ```
 
-Later roadmap steps replace the fake tool with six real tools, move dispatch
-over MCP, run those tools in an E2B worktree, add safety hooks and telemetry,
-and expose the loop through an Ink terminal UI.
+Later roadmap steps add persistent plans, move dispatch over MCP, run the tools
+inside E2B, add safety hooks and telemetry, and expose the loop through an Ink
+terminal UI. The Step 1 model loop and Step 2 real-tool dispatcher remain
+deliberately disconnected until those safety layers exist.
 
 ## Setup
 
@@ -74,6 +94,9 @@ bun run typecheck
 # Offline deterministic suite; never calls Anthropic
 bun test
 
+# Full offline suite, including any explicitly skipped integration files
+bun run test:all
+
 # Step 0 regression baseline
 bun run loop-fake.ts
 
@@ -96,10 +119,15 @@ keeps the live integration test skipped even when a key is present.
   history, and next action.
 - [`docs/plans/phase-1-real-model-fake-tools.md`](docs/plans/phase-1-real-model-fake-tools.md):
   detailed Step 1 design, implementation tasks, test map, and acceptance gate.
+- [`docs/plans/phase-2-real-tools-no-sandbox.md`](docs/plans/phase-2-real-tools-no-sandbox.md):
+  real-tool contracts, disposable repository harness, test matrix, and
+  completion evidence.
 - [`docs/decisions/`](docs/decisions/): architectural decision records explaining
   what was chosen, alternatives, consequences, and revisit triggers.
 - [`docs/reviews/phase-1-implementation-review.md`](docs/reviews/phase-1-implementation-review.md):
   gstack review findings, fixes, and verification evidence.
+- [`docs/reviews/phase-2-implementation-review.md`](docs/reviews/phase-2-implementation-review.md):
+  Step 2 scope audit, review fix, and final verification evidence.
 
 Read `PROGRESS.md` first when resuming work. It is intentionally more current
 than the roadmap.

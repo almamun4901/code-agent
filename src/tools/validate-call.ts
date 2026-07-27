@@ -1,0 +1,122 @@
+import type { ToolCall } from "./contracts";
+import { ToolExecutionError } from "./errors";
+
+type UnknownRecord = Record<string, unknown>;
+
+function isRecord(value: unknown): value is UnknownRecord {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function invalid(message: string): never {
+  throw new ToolExecutionError(message, "INVALID_TOOL_CALL");
+}
+
+function requireRecord(value: unknown, label: string): UnknownRecord {
+  if (!isRecord(value)) invalid(`${label} must be an object.`);
+  return value;
+}
+
+function requireString(
+  input: UnknownRecord,
+  key: string,
+  options: { nullable?: boolean; nonEmpty?: boolean } = {},
+): void {
+  const value = input[key];
+  if (options.nullable && value === null) return;
+  if (typeof value !== "string") invalid(`${key} must be a string.`);
+  if (options.nonEmpty && value.length === 0) {
+    invalid(`${key} must not be empty.`);
+  }
+}
+
+function optionalString(input: UnknownRecord, key: string): void {
+  if (input[key] !== undefined && typeof input[key] !== "string") {
+    invalid(`${key} must be a string when provided.`);
+  }
+}
+
+function optionalBoolean(input: UnknownRecord, key: string): void {
+  if (input[key] !== undefined && typeof input[key] !== "boolean") {
+    invalid(`${key} must be a boolean when provided.`);
+  }
+}
+
+function optionalInteger(input: UnknownRecord, key: string): void {
+  if (
+    input[key] !== undefined &&
+    (typeof input[key] !== "number" || !Number.isInteger(input[key]))
+  ) {
+    invalid(`${key} must be an integer when provided.`);
+  }
+}
+
+export function validateToolCall(value: unknown): ToolCall {
+  const call = requireRecord(value, "Tool call");
+  if (typeof call.name !== "string" || !("input" in call)) {
+    invalid("Tool call requires string name and object input.");
+  }
+  const input = requireRecord(call.input, "Tool input");
+  requireString(input, "repoPath");
+
+  switch (call.name) {
+    case "read_file":
+      requireString(input, "path", { nonEmpty: true });
+      optionalInteger(input, "startLine");
+      optionalInteger(input, "endLine");
+      break;
+    case "edit_file":
+      requireString(input, "path", { nonEmpty: true });
+      if (input.mode !== "preview" && input.mode !== "apply") {
+        invalid("mode must be preview or apply.");
+      }
+      requireString(input, "oldText", { nullable: true });
+      requireString(input, "newText");
+      optionalBoolean(input, "replaceAll");
+      optionalString(input, "baseVersion");
+      break;
+    case "ripgrep":
+      requireString(input, "pattern", { nonEmpty: true });
+      optionalString(input, "path");
+      optionalString(input, "glob");
+      optionalBoolean(input, "caseSensitive");
+      optionalBoolean(input, "fixedString");
+      break;
+    case "tree_sitter_symbols":
+      requireString(input, "path", { nonEmpty: true });
+      break;
+    case "run_shell":
+      requireString(input, "cwd", { nonEmpty: true });
+      requireString(input, "command", { nonEmpty: true });
+      optionalInteger(input, "timeoutMs");
+      break;
+    case "git":
+      if (
+        input.subcommand !== "status" &&
+        input.subcommand !== "diff" &&
+        input.subcommand !== "commit" &&
+        input.subcommand !== "push"
+      ) {
+        invalid("git subcommand must be status, diff, commit, or push.");
+      }
+      if (input.subcommand === "diff") {
+        optionalBoolean(input, "staged");
+        optionalString(input, "path");
+      } else if (input.subcommand === "commit") {
+        requireString(input, "message", { nonEmpty: true });
+        if (typeof input.addAll !== "boolean") {
+          invalid("addAll must be a boolean.");
+        }
+      } else if (input.subcommand === "push") {
+        requireString(input, "remote", { nonEmpty: true });
+        requireString(input, "branch", { nonEmpty: true });
+      }
+      break;
+    default:
+      throw new ToolExecutionError(
+        `Unknown tool: ${String(call.name)}`,
+        "UNKNOWN_TOOL",
+      );
+  }
+
+  return value as ToolCall;
+}

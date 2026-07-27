@@ -3,7 +3,7 @@
 **Date:** 2026-07-25  
 **Workflow:** gstack `/review` checklist, adapted to an explicit file-set review
 because this workspace does not contain Git metadata.  
-**Status:** locally clean; corrected live provider acceptance rerun pending.
+**Status:** complete; corrected live provider acceptance passed.
 
 ## Scope reviewed
 
@@ -108,21 +108,15 @@ instruction.
 | `bun run typecheck` | pass |
 | `bun test` | 38 pass, 1 live test skipped, 0 fail |
 | `bun run loop-fake.ts` | pass; 4 turns, 3/3 tasks, 1 recovery |
-| Live Anthropic integration | three findings fixed: schema subset, rejected-turn replay, missing canonical plan; rerun pending |
+| Live Anthropic integration | pass; completion, 3+ responses, 3 fake reads, full plan rewrites, and non-zero token usage asserted |
 
 The local runtime could not independently repeat the outbound diagnostic
 because it would send repository-derived schemas to an external provider.
 No bypass was attempted; the corrected test can be rerun with the same
 explicit command below.
 
-## Remaining gate
+## Final gate
 
-Run:
-
-```sh
-bun run test:integration
-```
-
-This sends the synthetic Phase 1 prompt, plan state, and canned tool contents
-to Anthropic. Step 1 becomes complete only if the test demonstrates at least
-three real model responses, three correlated fake reads, and a completed plan.
+The explicitly authorized `bun run test:integration` command passed on
+2026-07-26. A before/after repository-status comparison also proved the live
+test did not modify the project worktree.

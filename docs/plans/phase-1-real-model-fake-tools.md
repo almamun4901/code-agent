@@ -300,8 +300,8 @@ scenario should normally finish in three to six turns.
 Phase 1 is complete only when all of the following are evidenced:
 
 - [x] `bun test` passes and makes no network call.
-- [ ] The live test passes with a locally supplied key.
-- [ ] One run contains at least three real model responses.
+- [x] The live test passes with a locally supplied key.
+- [x] One run contains at least three real model responses.
 - [x] Deterministic coverage proves every accepted turn contains a validated
   full-plan replacement.
 - [x] Deterministic coverage proves three typed `read_file` calls receive
@@ -342,9 +342,8 @@ an invalid-but-well-formed tool turn. The retry path appended that rejected
 assistant turn plus correction text, violating Anthropic's requirement that
 every replayed `tool_use` receive an immediate `tool_result`. The rejected
 assistant content is now omitted exactly as ADR 0004 originally required. A
-regression test proves rejected tool IDs do not enter the retry request. Per
-the definition of done, Step 1 remains in progress until the corrected live
-test passes.
+regression test proves rejected tool IDs do not enter the retry request. The
+later corrected live acceptance run passed.
 
 The third live run then failed local validation twice because task descriptions
 were not preserved. The validator was correct, but the first model request
@@ -354,10 +353,16 @@ as the authoritative plan. The same audit found and removed contradictory
 guidance that allowed only one status field change even though advancing after
 a successful read legitimately completes one task and starts the next.
 
+The corrected live run passed on 2026-07-26. The integration assertions proved
+completion, at least three real model responses, one full plan rewrite per
+accepted turn, three correlated fake reads, a fully completed plan, and
+non-zero input and output token usage. Repository status was identical before
+and after the live command.
+
 ## NOT in scope
 
-- OpenRouter or multi-provider normalization: revisit immediately after this
-phase per ADR 0002.
+- OpenRouter or multi-provider normalization: after Steps 5–6, before the
+first live-model/real-tool run or Step 7, per ADR 0006.
 - Real filesystem access or the other five tools: Step 2.
 - Zod TodoWrite persistence and crash recovery: Step 3. Phase 1 validates the
 smaller turn contract only.

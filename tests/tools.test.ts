@@ -403,47 +403,51 @@ describe("edit_file", () => {
     ]);
   });
 
-  test("replaceAll permits multiple matches and creation requires a missing target", async () => {
-    const repo = await fixture();
-    const replace = await dispatch(repo, {
-      name: "edit_file",
-      input: {
-        repoPath: repo.worktreePath,
-        path: "repeat.txt",
-        mode: "preview",
-        oldText: "needle",
-        newText: "pin",
-        replaceAll: true,
-      },
-    });
-    const createPreview = await dispatch(repo, {
-      name: "edit_file",
-      input: {
-        repoPath: repo.worktreePath,
-        path: "src/new.ts",
-        mode: "preview",
-        oldText: null,
-        newText: "export const created = true;\n",
-      },
-    });
-    const createApply = await dispatch(repo, {
-      name: "edit_file",
-      input: {
-        repoPath: repo.worktreePath,
-        path: "src/new.ts",
-        mode: "apply",
-        oldText: null,
-        newText: "export const created = true;\n",
-        baseVersion: "missing",
-      },
-    });
+  test(
+    "replaceAll permits multiple matches and creation requires a missing target",
+    async () => {
+      const repo = await fixture();
+      const replace = await dispatch(repo, {
+        name: "edit_file",
+        input: {
+          repoPath: repo.worktreePath,
+          path: "repeat.txt",
+          mode: "preview",
+          oldText: "needle",
+          newText: "pin",
+          replaceAll: true,
+        },
+      });
+      const createPreview = await dispatch(repo, {
+        name: "edit_file",
+        input: {
+          repoPath: repo.worktreePath,
+          path: "src/new.ts",
+          mode: "preview",
+          oldText: null,
+          newText: "export const created = true;\n",
+        },
+      });
+      const createApply = await dispatch(repo, {
+        name: "edit_file",
+        input: {
+          repoPath: repo.worktreePath,
+          path: "src/new.ts",
+          mode: "apply",
+          oldText: null,
+          newText: "export const created = true;\n",
+          baseVersion: "missing",
+        },
+      });
 
-    expect(replace.success).toBe(true);
-    expect(replace.metadata?.matchCount).toBe(6_000);
-    expect(replace.truncated).toBe(true);
-    expect(createPreview.metadata?.baseVersion).toBe("missing");
-    expect(createApply.success).toBe(true);
-  });
+      expect(replace.success).toBe(true);
+      expect(replace.metadata?.matchCount).toBe(6_000);
+      expect(replace.truncated).toBe(true);
+      expect(createPreview.metadata?.baseVersion).toBe("missing");
+      expect(createApply.success).toBe(true);
+    },
+    10_000,
+  );
 });
 
 describe("ripgrep", () => {

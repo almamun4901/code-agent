@@ -7,13 +7,13 @@
 
 ---
 
-## Current state (updated: 2026-07-26)
+## Current state (updated: 2026-07-28)
 
-**Overall:** Steps 0–2 are complete. The corrected Step 1 live Anthropic gate
-passed with repository state unchanged. Step 2 adds six runtime-validated real
-tools behind one dispatcher, disposable git worktrees and a local bare remote,
-and a complete-result cap of 4,000 offline `o200k_base` tokens. The final
-offline suite reports 65 pass, 1 opt-in live test skipped, and 0 fail.
+**Overall:** Steps 0–4 are complete. Step 4 adds exact six-tool MCP discovery,
+a persistent stdio server/client boundary around the unchanged dispatcher,
+canonical direct-versus-MCP result parity, strict malformed-result handling,
+and owned child-process lifecycle. The final offline suite reports 95 pass,
+1 opt-in live test skipped, and 0 fail.
 
 **Step-by-step:**
 
@@ -22,8 +22,8 @@ offline suite reports 65 pass, 1 opt-in live test skipped, and 0 fail.
 | 0 — Fake loop | complete | Four turns; 3/3 tasks completed; one recovery |
 | 1 — Real model, fake tools | complete | Authorized live gate passed; project worktree unchanged |
 | 2 — Real tools, no sandbox | complete | Six tools, dispatcher, capped results, disposable repo harness |
-| 3 — Plan schema + persistence | not started | — |
-| 4 — MCP transport (stdio) | not started | — |
+| 3 — Plan schema + persistence | complete | Repeated hard-kill recovery passed without committed-read replay |
+| 4 — MCP transport (stdio) | complete | Six tools have canonical direct/MCP parity; lifecycle and mutation checks pass |
 | 5 — Sandbox (E2B) | not started | — |
 | 6 — PreToolUse safety hook | not started | — |
 | 7 — TUI (Ink) | not started | — |
@@ -65,6 +65,16 @@ offline suite reports 65 pass, 1 opt-in live test skipped, and 0 fail.
 - Step 2 symbol extraction uses pinned `web-tree-sitter` plus WASM grammars
   because the native bindings did not compile under the supported local
   Bun/Node toolchain. See ADR 0008.
+- A turn is committed only after validation, tool completion, observation and
+  transcript capture, and durable checkpoint replacement. Terminal protocol
+  failure survives restart. See ADR 0009.
+- Before a model receives mutating real tools, add idempotency, write-ahead
+  journaling, or operation-specific reconciliation. Repository snapshots alone
+  cannot cover shell side effects or remote pushes. See ADR 0009.
+- MCP uses pinned stable SDK v1.30 over one persistent stdio connection.
+  Results are one text block containing canonical JSON `ToolResult`, semantic
+  validation stays in the dispatcher, and disconnected mutations are never
+  retried. See ADR 0010.
 
 ---
 
@@ -80,6 +90,8 @@ offline suite reports 65 pass, 1 opt-in live test skipped, and 0 fail.
   not decided. Doesn't block anything until step 9.
 - [ ] OpenRouter account/credits not yet set up — deferred until after Steps
   5–6, but flagging so it is not a surprise at the live real-tool boundary.
+- [ ] Choose and verify mutation-recovery reconciliation before the first
+  live-model real-tool run after Steps 5–6; this is a blocking ADR 0009 revisit.
 
 ---
 
@@ -343,6 +355,74 @@ offline suite reports 65 pass, 1 opt-in live test skipped, and 0 fail.
 - Next session should start with: Step 3 planning and engineering review for
   the Zod plan schema, atomic `.agent/state.json` persistence, and kill/restart
   recovery definition of done.
+
+### 2026-07-27 — Step 3 plan schema and crash-safe persistence
+
+- What was done: Added strict Zod TodoWrite and provider-neutral runtime-state
+  schemas; extracted the loop into a versioned checkpointed state machine;
+  added injectable memory and durable filesystem stores; implemented
+  mode-0600 temporary writes, file and directory sync, atomic rename, orphan
+  cleanup, symlink rejection, automatic/required/fresh startup policies,
+  terminal failure persistence, and cross-field recovery validation. Added 15
+  Step 3 tests, including two deterministic `SIGKILL`/restart cycles.
+- What broke / had to be reworked: Bun dependency installation initially
+  lacked temp-cache permission. Recovery after a rejected first response needed
+  a narrow all-pending initial-state exception. Gstack review found that Zod
+  trimming weakened exact task identity, terminal retry exhaustion could be
+  bypassed by restarting, and checkpoint fields needed semantic correlation;
+  all three were fixed with regressions.
+- Decisions made this session: A committed turn ends only after durable
+  checkpoint replacement. Interrupted uncommitted read work may replay;
+  committed work may not. Exactly-once mutation recovery is deferred but is a
+  blocking gate before live real tools, as recorded in ADR 0009.
+- Current status of the step in progress: Step 3 complete. `bun run typecheck`
+  passes; `bun test` reports 81 pass, 1 opt-in live test skipped, 0 fail;
+  repeated hard-kill recovery passes; the Step 0 regression completes four
+  turns with one recovery; and `git diff --check` passes.
+- Next session should start with: Step 4 planning and engineering review for
+  MCP stdio transport around the unchanged six-tool dispatcher, including
+  direct-vs-MCP behavior parity tests.
+
+### 2026-07-28 — Step 4 MCP transport over stdio
+
+- What was done: Pinned `@modelcontextprotocol/sdk` 1.30.0; added exact
+  discovery and wire-result schemas; implemented the six-tool MCP server,
+  persistent typed client, and root-validating stdio entry point; added 14
+  MCP tests covering discovery, protocol behavior, direct-result parity,
+  independent edit/shell/Git mutations, all tool-family failures, containment,
+  the 4,000-token budget, malformed results, startup, concurrent close, and
+  child loss. Added ADR 0010 plus the Step 4 plan and implementation review,
+  and synchronized README, PLAN, and agent instructions.
+- What broke / had to be reworked: The SDK's safe child environment omitted
+  macOS `TMPDIR`, which changed Git warning output in tests; the launcher now
+  forwards only that variable in addition to the SDK allowlist. MCP SDK v1.30
+  advertised a top-level Zod discriminated union as an empty object, so Git
+  uses an object-shaped compatibility wrapper that retains and publishes all
+  four strict branches. Review also found premature semantic schema checks,
+  incomplete mutation parity, asynchronous close coalescing, and missing
+  malformed-result coverage; each received a regression test. The final run
+  also exposed the pre-existing 6,000-match edit test exceeding Bun's default
+  5-second timeout on this machine; its explicit test timeout is now 10
+  seconds, and both the isolated and full reruns pass. Gstack
+  `/document-release` preflight could not formally continue on the `main`
+  branch, so no branch or commit was created and the requested factual
+  documentation sync was completed in place.
+- Decisions made this session: Use stable MCP v1.30 and text-only canonical
+  JSON results; omit duplicated structured content; retain dispatcher
+  validation authority; use a 60-second MCP request timeout; never retry an
+  ambiguous disconnected mutation. Raw SDK invalid-tool requests are
+  normalized to `isError` results, while the typed client rejects their
+  non-`ToolResult` payloads. See ADR 0010.
+- Current status of the step in progress: Step 4 complete. `bun run typecheck`
+  passes; `bun test` reports 95 pass, 1 opt-in live test skipped, 0 fail; the
+  focused MCP suite reports 14 pass; `bun run loop-fake.ts` completes four
+  turns with one recovery; and `git diff --check` passes. Gstack `/review`
+  is recorded clean with no unresolved findings.
+- Next session should start with: Step 5 planning and `/plan-eng-review` for
+  moving this MCP server into E2B. First verify the E2B image has Bun (or a
+  supported Node runtime), Git, ripgrep, and the pinned Tree-sitter WASM
+  assets; then define the host-filesystem-unreachable probe and preserve the
+  Step 4 parity suite across the sandbox boundary.
 
 ---
 

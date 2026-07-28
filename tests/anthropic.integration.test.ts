@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { runAgentLoop } from "../src/loop";
+import { MemoryCheckpointStore, runAgentLoop } from "../src/loop";
 import { createAnthropicModel } from "../src/model/anthropic";
 
 const liveEnabled =
@@ -12,6 +12,7 @@ liveTest(
   async () => {
     const result = await runAgentLoop({
       callModel: createAnthropicModel(),
+      checkpointStore: new MemoryCheckpointStore(),
       logger: () => {},
     });
 

@@ -108,7 +108,7 @@ transport) until the logic they wrap is already trustworthy.
 | 0   | Fake loop                 | —          | The plan/act/observe/recover state machine shape is right             | Hardcoded plan → hardcoded tool call → hardcoded observation cycles N times in a plain script, no deps                                                                                                                                         | 2          |
 | 1   | Real model, fake tools    | 0          | Model can rewrite full plan state each turn; tool-call parsing works  | Single hardcoded model (Claude API direct, no OpenRouter yet) drives 3+ real turns against a fake `read_file` tool that returns canned strings                                                                                                 | 4          |
 | 2   | Real tools, no sandbox    | 1          | The 6 tools work correctly against a real repo, truncation is correct | `read_file`, `edit_file`, `ripgrep`, `tree_sitter_symbols`, `run_shell`, `git` run locally, each capped at 4k tokens/call, verified against a repo with a file that overflows the cap                                                          | 6          |
-| 3   | Plan schema + persistence | 2          | Crash recovery actually works                                         | Zod-validated TodoWrite schema; `.agent/state.json` written every turn; `kill -9` mid-turn + restart resumes from last committed plan                                                                                                          | 3          |
+| 3   | Plan schema + persistence | 2          | Crash recovery actually works                                         | Zod-validated TodoWrite schema; `.agent/state.json` written every turn; repeated `kill -9` mid-turn + restart resumes from the last committed plan without replaying committed reads                                                            | 6          |
 | 4   | MCP transport (stdio)     | 2          | Tool dispatch works transport-agnostically                            | Same 6 tools from step 2, now called over MCP stdio instead of direct function calls, identical behavior verified                                                                                                                              | 4          |
 | 5   | Sandbox (E2B)             | 4          | Isolation is structural, not a permission check                       | Tools execute inside E2B; worktree created per task; a probe test confirms host filesystem is unreachable from inside a tool call                                                                                                              | 5          |
 | 6   | PreToolUse safety hook    | 5          | The destructive-command guard actually holds under attack             | `rm -rf` outside worktree blocked; symlink-escape attempt blocked; `..`-traversal blocked; each has a written red-team test case                                                                                                               | 4          |
@@ -161,6 +161,7 @@ order above.
 | Cost of iterating with a frontier model during development           | Steps 1–9      | Use Haiku or a cheap model for all dev-loop debugging; reserve Sonnet/Opus for the actual step-10 eval run          |
 | PreToolUse guard has a bypass (symlinks, absolute paths, env tricks) | Step 6         | Red-team test cases written alongside the hook, not after; this is 20% of the rubric — budget real time here        |
 | Context/plan drift over long sessions                                | Step 8         | `PreCompact` is a hook, not an afterthought — test it explicitly at the 150k boundary with a synthetic long session |
+| Crash recovery replays an interrupted mutating tool                  | Steps 5–6      | Before the first live-model real-tool run, add idempotency keys, write-ahead journaling, or operation-specific reconciliation; ADR 0009 makes this a blocking revisit |
 
 
 ---
@@ -186,8 +187,8 @@ sandbox choice, transport ordering), written at decision time.
 | 0 — Fake loop                 | complete                                              |
 | 1 — Real model, fake tools    | complete                                              |
 | 2 — Real tools, no sandbox    | complete                                              |
-| 3 — Plan schema + persistence | not started                                           |
-| 4 — MCP transport (stdio)     | not started                                           |
+| 3 — Plan schema + persistence | complete                                              |
+| 4 — MCP transport (stdio)     | complete                                              |
 | 5 — Sandbox (E2B)             | not started                                           |
 | 6 — PreToolUse safety hook    | not started                                           |
 | 7 — TUI (Ink)                 | not started                                           |

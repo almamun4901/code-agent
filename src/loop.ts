@@ -13,14 +13,24 @@ import {
   fakeReadFile,
   type FakeReadFileResult,
 } from "./tools/fake-read-file";
+import {
+  TodoWriteInputSchema,
+  type AgentStateV1,
+  type TaskStatus,
+  type TodoItem,
+} from "./plan/schema";
+import {
+  FileCheckpointStore,
+  IncompatibleCheckpointError,
+  MemoryCheckpointStore,
+  MissingCheckpointError,
+  type CheckpointStore,
+  type StartupPolicy,
+} from "./state/checkpoint";
 
-export type TaskStatus = "pending" | "in_progress" | "completed";
-
-export type PlanTask = {
-  id: string;
-  description: string;
-  status: TaskStatus;
-};
+export type PlanTask = TodoItem;
+export type { AgentStateV1, CheckpointStore, StartupPolicy, TaskStatus };
+export { MemoryCheckpointStore };
 
 type TaskDefinition = {
   id: string;
@@ -48,11 +58,14 @@ export type LoopResult = {
   transcript: ConversationMessage[];
 };
 
-type LoopOptions = {
+export type LoopOptions = {
   callModel: CallModel;
   readFile?: (path: string) => FakeReadFileResult;
   maxModelTurns?: number;
   logger?: (message: string) => void;
+  checkpointStore?: CheckpointStore;
+  repoPath?: string;
+  startupPolicy?: StartupPolicy;
 };
 
 export class TurnProtocolError extends Error {
@@ -86,6 +99,8 @@ export const PHASE_ONE_TASKS: readonly TaskDefinition[] = [
     path: "tests/loop.test.ts",
   },
 ] as const;
+
+export const PHASE_ONE_RUN_IDENTITY = "phase-1-fixtures-v1";
 
 export const SYSTEM_PROMPT = [
   "You are driving Phase 1 of a terminal coding agent through a strict tool protocol.",
@@ -186,57 +201,82 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
   const readFile = options.readFile ?? fakeReadFile;
   const maxModelTurns = options.maxModelTurns ?? 8;
   const logger = options.logger ?? console.log;
-  const transcript: ConversationMessage[] = [
-    { role: "user", content: INITIAL_USER_PROMPT },
-  ];
+  const checkpointStore =
+    options.checkpointStore ??
+    new FileCheckpointStore(options.repoPath ?? process.cwd());
+  const startupPolicy = options.startupPolicy ?? "auto";
+  let state = await initializeState(checkpointStore, startupPolicy);
 
-  let plan = createInitialPlan();
-  let lastReadSucceeded: boolean | null = null;
-  let modelTurns = 0;
-  let acceptedTurns = 0;
-  let protocolRetries = 0;
-  let invalidAttemptsForTurn = 0;
-  let readCalls = 0;
-  let planRewrites = 0;
-  let inputTokens = 0;
-  let outputTokens = 0;
+  if (state.lifecycle === "failed") {
+    throw new TurnProtocolError(
+      `Checkpoint contains a terminal protocol failure: ${state.terminalError ?? "unknown failure"}`,
+    );
+  }
 
-  while (!isPlanComplete(plan)) {
-    if (modelTurns >= maxModelTurns) {
+  if (state.lifecycle === "completed") {
+    const completedResult = toLoopResult(state);
+    printSummary(completedResult, logger);
+    return completedResult;
+  }
+
+  while (!isPlanComplete(state.plan)) {
+    if (state.counters.modelTurns >= maxModelTurns) {
       throw new LoopLimitError(
         `Maximum model turn limit of ${maxModelTurns} exceeded.`,
       );
     }
 
-    modelTurns += 1;
-    logger(`\n=== MODEL TURN ${modelTurns} ===`);
+    const modelTurnNumber = state.counters.modelTurns + 1;
+    logger(`\n=== MODEL TURN ${modelTurnNumber} ===`);
 
     const turn = await options.callModel(
-      createModelRequest(transcript),
+      createModelRequest(state.transcript),
     );
-    inputTokens += turn.usage.inputTokens;
-    outputTokens += turn.usage.outputTokens;
+    const countersAfterModel = {
+      ...state.counters,
+      modelTurns: modelTurnNumber,
+      inputTokens: state.counters.inputTokens + turn.usage.inputTokens,
+      outputTokens: state.counters.outputTokens + turn.usage.outputTokens,
+    };
 
     let validated: ValidatedTurn;
 
     try {
-      validated = validateTurn(turn, plan, lastReadSucceeded);
+      validated = validateTurn(
+        turn,
+        state.plan,
+        state.lastReadSucceeded,
+      );
     } catch (error) {
       if (!(error instanceof TurnProtocolError)) {
         throw error;
       }
 
-      if (invalidAttemptsForTurn >= 1) {
-        throw new TurnProtocolError(
-          `Model violated the turn protocol twice: ${error.message}`,
-        );
+      if (state.consecutiveInvalidAttempts >= 1) {
+        const terminalError =
+          `Model violated the turn protocol twice: ${error.message}`;
+        state = {
+          ...state,
+          lifecycle: "failed",
+          counters: countersAfterModel,
+          terminalError,
+        };
+        await checkpointStore.save(state);
+        throw new TurnProtocolError(terminalError);
       }
 
-      invalidAttemptsForTurn += 1;
-      protocolRetries += 1;
       logger(`PROTOCOL RETRY: ${error.message}`);
-      transcript.push(
-        {
+      state = {
+        ...state,
+        counters: {
+          ...countersAfterModel,
+          protocolRetries: countersAfterModel.protocolRetries + 1,
+        },
+        consecutiveInvalidAttempts: state.consecutiveInvalidAttempts + 1,
+        terminalError: null,
+        transcript: [
+          ...state.transcript,
+          {
           role: "user",
           content:
             `Your previous response was rejected without executing any tool: ${error.message} ` +
@@ -244,15 +284,16 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
             "descriptions, and advance only according to the most recent read result. " +
             "Then call read_file with the exact path for the current in_progress task, " +
             "unless the plan is fully complete.",
-        },
-      );
+          },
+        ],
+      };
+      await checkpointStore.save(state);
       continue;
     }
 
-    invalidAttemptsForTurn = 0;
-    acceptedTurns += 1;
-    planRewrites += 1;
-    plan = validated.plan;
+    const nextPlan = validated.plan;
+    let lastReadSucceeded: boolean | null = null;
+    let readCallIncrement = 0;
 
     const results: ToolResultBlock[] = [
       {
@@ -260,20 +301,20 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
         toolUseId: validated.planTool.id,
         content: JSON.stringify({
           accepted: true,
-          completedTasks: countCompleted(plan),
-          totalTasks: plan.length,
+          completedTasks: countCompleted(nextPlan),
+          totalTasks: nextPlan.length,
         }),
       },
     ];
 
     logger("PLAN");
-    for (const task of plan) {
+    for (const task of nextPlan) {
       const marker = task.status === "completed" ? "x" : " ";
       logger(`  [${marker}] ${task.description} (${task.status})`);
     }
 
     if (validated.readTool && validated.readPath) {
-      readCalls += 1;
+      readCallIncrement = 1;
       const readResult = readFile(validated.readPath);
       lastReadSucceeded = readResult.success;
       results.push({
@@ -284,31 +325,373 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
       });
       logger(`ACT: read_file ${validated.readPath}`);
       logger(`OBSERVE: ${readResult.success ? "success" : "failure"}`);
-    } else {
-      lastReadSucceeded = null;
     }
 
-    transcript.push(
-      { role: "assistant", content: turn.content },
-      { role: "user", content: results },
+    state = {
+      ...state,
+      lifecycle: isPlanComplete(nextPlan) ? "completed" : "running",
+      plan: nextPlan,
+      lastReadSucceeded,
+      consecutiveInvalidAttempts: 0,
+      terminalError: null,
+      counters: {
+        ...countersAfterModel,
+        committedTurns: countersAfterModel.committedTurns + 1,
+        readCalls: countersAfterModel.readCalls + readCallIncrement,
+        planRewrites: countersAfterModel.planRewrites + 1,
+      },
+      transcript: [
+        ...state.transcript,
+        { role: "assistant", content: turn.content },
+        { role: "user", content: results },
+      ],
+    };
+    await checkpointStore.save(state);
+  }
+
+  const result = toLoopResult(state);
+  printSummary(result, logger);
+  return result;
+}
+
+async function initializeState(
+  checkpointStore: CheckpointStore,
+  startupPolicy: StartupPolicy,
+): Promise<AgentStateV1> {
+  const existing =
+    startupPolicy === "fresh" ? null : await checkpointStore.load();
+
+  if (startupPolicy === "required" && !existing) {
+    const path =
+      checkpointStore instanceof FileCheckpointStore
+        ? checkpointStore.statePath
+        : "<checkpoint store>";
+    throw new MissingCheckpointError(path);
+  }
+
+  if (existing) {
+    validateRecoveredState(existing);
+    return existing;
+  }
+
+  const initialState: AgentStateV1 = {
+    version: 1,
+    runIdentity: PHASE_ONE_RUN_IDENTITY,
+    lifecycle: "running",
+    plan: createInitialPlan(),
+    transcript: [{ role: "user", content: INITIAL_USER_PROMPT }],
+    lastReadSucceeded: null,
+    counters: {
+      modelTurns: 0,
+      committedTurns: 0,
+      protocolRetries: 0,
+      readCalls: 0,
+      planRewrites: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+    },
+    consecutiveInvalidAttempts: 0,
+    terminalError: null,
+  };
+  await checkpointStore.save(initialState);
+  return initialState;
+}
+
+function validateRecoveredState(state: AgentStateV1): void {
+  if (state.runIdentity !== PHASE_ONE_RUN_IDENTITY) {
+    throw new IncompatibleCheckpointError(
+      `Checkpoint run identity "${state.runIdentity}" does not match "${PHASE_ONE_RUN_IDENTITY}".`,
     );
   }
 
-  const result: LoopResult = {
-    status: "completed",
-    modelTurns,
-    acceptedTurns,
-    protocolRetries,
-    readCalls,
-    planRewrites,
-    inputTokens,
-    outputTokens,
-    plan,
-    transcript,
-  };
+  if (!isPristineInitialPlan(state)) {
+    try {
+      validatePlanShape(state.plan);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "invalid plan";
+      throw new IncompatibleCheckpointError(
+        `Checkpoint plan is incompatible with this run: ${message}`,
+      );
+    }
+  }
 
-  printSummary(result, logger);
-  return result;
+  if (state.lifecycle === "completed" && !isPlanComplete(state.plan)) {
+    throw new IncompatibleCheckpointError(
+      "Checkpoint lifecycle is completed, but its plan is incomplete.",
+    );
+  }
+  if (state.lifecycle === "running" && isPlanComplete(state.plan)) {
+    throw new IncompatibleCheckpointError(
+      "Checkpoint lifecycle is running, but its plan is complete.",
+    );
+  }
+  if (state.lifecycle === "failed" && !state.terminalError) {
+    throw new IncompatibleCheckpointError(
+      "Checkpoint lifecycle is failed, but no terminal error is recorded.",
+    );
+  }
+  if (state.lifecycle !== "failed" && state.terminalError) {
+    throw new IncompatibleCheckpointError(
+      "Checkpoint records a terminal error without a failed lifecycle.",
+    );
+  }
+
+  validateCheckpointConsistency(state);
+}
+
+function validateCheckpointConsistency(state: AgentStateV1): void {
+  const [initialMessage] = state.transcript;
+  if (
+    !initialMessage ||
+    initialMessage.role !== "user" ||
+    initialMessage.content !== INITIAL_USER_PROMPT
+  ) {
+    throw new IncompatibleCheckpointError(
+      "Checkpoint does not contain the canonical initial request.",
+    );
+  }
+
+  let committedTurns = 0;
+  let planRewrites = 0;
+  let protocolRetries = 0;
+  let readCalls = 0;
+  let lastReadSucceeded: boolean | null = null;
+  let latestPlan: PlanTask[] | null = null;
+  let historicalPlan = createInitialPlan();
+  let historicalObservation: boolean | null = null;
+
+  for (let index = 1; index < state.transcript.length; index += 1) {
+    const message = state.transcript[index];
+    if (!message) {
+      throw new IncompatibleCheckpointError(
+        "Checkpoint transcript contains a missing message.",
+      );
+    }
+
+    if (message.role === "user" && typeof message.content === "string") {
+      if (
+        !message.content.startsWith(
+          "Your previous response was rejected without executing any tool:",
+        )
+      ) {
+        throw new IncompatibleCheckpointError(
+          "Checkpoint transcript contains an unknown user correction.",
+        );
+      }
+      protocolRetries += 1;
+      continue;
+    }
+
+    if (message.role !== "assistant") {
+      throw new IncompatibleCheckpointError(
+        "Checkpoint contains tool results without a preceding assistant turn.",
+      );
+    }
+
+    const resultMessage = state.transcript[index + 1];
+    if (
+      !resultMessage ||
+      resultMessage.role !== "user" ||
+      !Array.isArray(resultMessage.content) ||
+      resultMessage.content.some((block) => block.type !== "tool_result")
+    ) {
+      throw new IncompatibleCheckpointError(
+        "Checkpoint assistant turn is missing its correlated tool results.",
+      );
+    }
+    const resultBlocks = resultMessage.content;
+
+    const toolCalls = message.content.filter(
+      (block): block is ToolUseBlock => block.type === "tool_use",
+    );
+    const planCalls = toolCalls.filter(
+      (block) => block.name === "rewrite_plan",
+    );
+    const readToolCalls = toolCalls.filter(
+      (block) => block.name === "read_file",
+    );
+    const [planCall] = planCalls;
+    if (
+      planCalls.length !== 1 ||
+      !planCall ||
+      toolCalls[0] !== planCall ||
+      readToolCalls.length > 1 ||
+      toolCalls.length !== resultBlocks.length ||
+      toolCalls.some(
+        (toolCall, toolIndex) => {
+          const resultBlock = resultBlocks[toolIndex];
+          return (
+            resultBlock?.type !== "tool_result" ||
+            resultBlock.toolUseId !== toolCall.id
+          );
+        },
+      )
+    ) {
+      throw new IncompatibleCheckpointError(
+        "Checkpoint tool calls and results are not exactly correlated.",
+      );
+    }
+
+    const parsedPlan = TodoWriteInputSchema.safeParse(planCall.input);
+    if (!parsedPlan.success) {
+      throw new IncompatibleCheckpointError(
+        "Checkpoint transcript contains an invalid historical plan rewrite.",
+      );
+    }
+    try {
+      validateTurn(
+        {
+          content: message.content,
+          stopReason: "tool_use",
+          usage: { inputTokens: 0, outputTokens: 0 },
+        },
+        historicalPlan,
+        historicalObservation,
+      );
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "invalid turn";
+      throw new IncompatibleCheckpointError(
+        `Checkpoint contains an invalid historical model turn: ${detail}`,
+      );
+    }
+
+    latestPlan = parsedPlan.data.plan;
+    historicalPlan = latestPlan;
+    committedTurns += 1;
+    planRewrites += 1;
+    const readTool = readToolCalls[0];
+    if (readTool) {
+      readCalls += 1;
+      const resultIndex = toolCalls.indexOf(readTool);
+      const readResult = resultBlocks[resultIndex];
+      if (!readResult || readResult.type !== "tool_result") {
+        throw new IncompatibleCheckpointError(
+          "Checkpoint read call is missing its observation.",
+        );
+      }
+      lastReadSucceeded = readResult.isError !== true;
+    } else {
+      lastReadSucceeded = null;
+    }
+    historicalObservation = lastReadSucceeded;
+
+    index += 1;
+  }
+
+  const terminalAttempts = state.lifecycle === "failed" ? 1 : 0;
+
+  if (
+    state.counters.committedTurns !== committedTurns ||
+    state.counters.planRewrites !== planRewrites
+  ) {
+    throw new IncompatibleCheckpointError(
+      "Checkpoint committed-turn, plan-rewrite, and transcript counts disagree.",
+    );
+  }
+  if (state.counters.protocolRetries !== protocolRetries) {
+    throw new IncompatibleCheckpointError(
+      "Checkpoint retry count does not match its correction transcript.",
+    );
+  }
+  if (
+    state.counters.modelTurns !==
+    state.counters.committedTurns +
+      state.counters.protocolRetries +
+      terminalAttempts
+  ) {
+    throw new IncompatibleCheckpointError(
+      "Checkpoint model-turn accounting is inconsistent.",
+    );
+  }
+
+  if (state.counters.readCalls !== readCalls) {
+    throw new IncompatibleCheckpointError(
+      "Checkpoint read count does not match its tool-result transcript.",
+    );
+  }
+
+  const expectedTranscriptLength =
+    1 +
+    state.counters.committedTurns * 2 +
+    state.counters.protocolRetries;
+  if (state.transcript.length !== expectedTranscriptLength) {
+    throw new IncompatibleCheckpointError(
+      "Checkpoint transcript length is inconsistent with its counters.",
+    );
+  }
+  if (
+    latestPlan &&
+    JSON.stringify(latestPlan) !== JSON.stringify(state.plan)
+  ) {
+    throw new IncompatibleCheckpointError(
+      "Checkpoint plan does not match the latest committed rewrite.",
+    );
+  }
+  if (state.lastReadSucceeded !== lastReadSucceeded) {
+    throw new IncompatibleCheckpointError(
+      "Checkpoint observation does not match the latest committed tool result.",
+    );
+  }
+  const finalMessage = state.transcript.at(-1);
+  const endsWithCorrection =
+    finalMessage?.role === "user" &&
+    typeof finalMessage.content === "string" &&
+    state.transcript.length > 1;
+  if (
+    (state.consecutiveInvalidAttempts === 1) !== endsWithCorrection
+  ) {
+    throw new IncompatibleCheckpointError(
+      "Checkpoint consecutive-invalid state does not match its transcript.",
+    );
+  }
+  if (
+    state.lifecycle === "completed" &&
+    (state.counters.committedTurns === 0 ||
+      state.lastReadSucceeded !== null ||
+      state.consecutiveInvalidAttempts !== 0)
+  ) {
+    throw new IncompatibleCheckpointError(
+      "Completed checkpoint has inconsistent progress or retry state.",
+    );
+  }
+  if (
+    state.lifecycle === "failed" &&
+    state.consecutiveInvalidAttempts !== 1
+  ) {
+    throw new IncompatibleCheckpointError(
+      "Failed checkpoint does not preserve the exhausted retry state.",
+    );
+  }
+}
+
+function isPristineInitialPlan(state: AgentStateV1): boolean {
+  const initialPlan = createInitialPlan();
+  return (
+    state.counters.committedTurns === 0 &&
+    state.lastReadSucceeded === null &&
+    state.plan.length === initialPlan.length &&
+    state.plan.every(
+      (task, index) =>
+        task.id === initialPlan[index]?.id &&
+        task.description === initialPlan[index]?.description &&
+        task.status === "pending",
+    )
+  );
+}
+
+function toLoopResult(state: AgentStateV1): LoopResult {
+  return {
+    status: "completed",
+    modelTurns: state.counters.modelTurns,
+    acceptedTurns: state.counters.committedTurns,
+    protocolRetries: state.counters.protocolRetries,
+    readCalls: state.counters.readCalls,
+    planRewrites: state.counters.planRewrites,
+    inputTokens: state.counters.inputTokens,
+    outputTokens: state.counters.outputTokens,
+    plan: state.plan,
+    transcript: state.transcript,
+  };
 }
 
 export function createInitialPlan(): PlanTask[] {
@@ -425,35 +808,15 @@ function createModelRequest(
 }
 
 function parsePlanInput(input: unknown): PlanTask[] {
-  if (
-    !isRecord(input) ||
-    !hasExactKeys(input, ["plan"]) ||
-    !Array.isArray(input.plan)
-  ) {
+  const parsed = TodoWriteInputSchema.safeParse(input);
+  if (!parsed.success) {
     throw new TurnProtocolError(
-      "rewrite_plan input must contain only a plan array.",
+      `rewrite_plan input failed validation: ${parsed.error.issues
+        .map((issue) => `${issue.path.join(".") || "<root>"}: ${issue.message}`)
+        .join("; ")}`,
     );
   }
-
-  return input.plan.map((task, index): PlanTask => {
-    if (
-      !isRecord(task) ||
-      !hasExactKeys(task, ["id", "description", "status"]) ||
-      typeof task.id !== "string" ||
-      typeof task.description !== "string" ||
-      !isTaskStatus(task.status)
-    ) {
-      throw new TurnProtocolError(
-        `Plan task at index ${index} has invalid fields.`,
-      );
-    }
-
-    return {
-      id: task.id,
-      description: task.description,
-      status: task.status,
-    };
-  });
+  return parsed.data.plan;
 }
 
 function validatePlanShape(plan: PlanTask[]): void {
@@ -538,14 +901,6 @@ function parseReadPath(input: unknown): string {
     );
   }
   return input.path;
-}
-
-function isTaskStatus(value: unknown): value is TaskStatus {
-  return (
-    value === "pending" ||
-    value === "in_progress" ||
-    value === "completed"
-  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

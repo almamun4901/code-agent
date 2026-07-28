@@ -8,8 +8,9 @@ creation.
 
 ## Current status
 
-Steps 0–2 are complete. The deterministic fake loop, live Claude loop with
-fake tools, and six real local tools have all passed their acceptance gates.
+Steps 0–4 are complete. The deterministic fake loop, live Claude loop with
+fake tools, six real local tools, crash-safe plan persistence, and MCP stdio
+transport have passed their acceptance gates.
 The real tools have only been exercised by deterministic tests against
 disposable repositories; no model has received them.
 
@@ -24,11 +25,21 @@ The code currently proves:
 - atomic turn rejection before state mutation or tool execution;
 - ordered, ID-correlated results for `rewrite_plan` and `read_file`;
 - one protocol retry followed by a hard failure;
-- deterministic fake file reads with no host filesystem access.
+- deterministic fake file reads with no host filesystem access;
+- strict Zod TodoWrite and versioned runtime-state schemas;
+- atomic mode-0600 `.agent/state.json` checkpoints with fail-closed recovery;
+- transcript, observation, retry, turn, and token continuity across repeated
+  `SIGKILL` restarts;
+- terminal protocol failures and cross-field checkpoint corruption rejected
+  before any resumed model call;
 - a transport-neutral real-tool dispatcher with runtime input validation and
   a no-op policy seam for Step 6;
 - real `read_file`, preview/apply `edit_file`, `ripgrep`,
   `tree_sitter_symbols`, `run_shell`, and typed git operations;
+- exact MCP discovery schemas for those six tools, including four
+  discriminated Git operations;
+- persistent MCP stdio client/server transport with canonical direct-call
+  parity, strict result decoding, and child-process lifecycle handling;
 - disposable git worktrees and a local bare remote for tool tests;
 - complete success and error results capped at 4,000 offline
   `o200k_base` tokens.
@@ -52,22 +63,37 @@ src/loop.ts
     |                                      v
     |                                 canned result only
     |
+    +---- AgentStateV1 ------------> src/state/checkpoint.ts
+                                           |
+                                           v
+                                atomic .agent/state.json
+    |
 deterministic tests
+    |
+    v
+McpToolClient
+    |
+    | JSON-RPC over stdin/stdout
+    v
+src/mcp/stdio-server.ts
+    |
+    v
+src/mcp/server.ts
     |
     v
 src/tools/dispatcher.ts
     |
-    +---- runtime validation + policy seam
-    +---- six typed real tools
-    +---- capped serialized ToolResult
+    +---- runtime validation + development-root containment
+    +---- policy seam + six typed real tools
+    +---- capped, canonical serialized ToolResult
     |
     v
 disposable git worktree + local bare remote
 ```
 
-Later roadmap steps add persistent plans, move dispatch over MCP, run the tools
-inside E2B, add safety hooks and telemetry, and expose the loop through an Ink
-terminal UI. The Step 1 model loop and Step 2 real-tool dispatcher remain
+Later roadmap steps run the MCP tool server inside E2B, add safety hooks and
+telemetry, and expose the loop through an Ink terminal UI.
+The model loop and Step 2 real-tool dispatcher remain
 deliberately disconnected until those safety layers exist.
 
 ## Setup
@@ -94,6 +120,9 @@ bun run typecheck
 # Offline deterministic suite; never calls Anthropic
 bun test
 
+# Focused MCP stdio suite
+bun run test:mcp
+
 # Full offline suite, including any explicitly skipped integration files
 bun run test:all
 
@@ -105,11 +134,23 @@ bun run phase1
 
 # Explicit live acceptance test
 bun run test:integration
+
+# Start the MCP stdio server for an absolute development root
+bun run mcp:stdio -- --development-root /absolute/path/to/development-root
 ```
 
 `bun run phase1` and `bun run test:integration` send the synthetic Phase 1
 prompt, plan state, and canned tool results to Anthropic. Standard `bun test`
 keeps the live integration test skipped even when a key is present.
+
+`bun run phase1` resumes a valid `.agent/state.json` checkpoint automatically.
+Invalid, incompatible, or unsupported state is preserved and reported instead
+of being silently reset.
+
+The MCP server reserves stdout for JSON-RPC. Startup and runtime diagnostics go
+to stderr. Its development root must be an existing absolute directory. MCP
+tool failures are returned as JSON `ToolResult` values; connection, protocol,
+timeout, and malformed-result failures reject the client call.
 
 ## Documentation map
 
@@ -122,12 +163,22 @@ keeps the live integration test skipped even when a key is present.
 - [`docs/plans/phase-2-real-tools-no-sandbox.md`](docs/plans/phase-2-real-tools-no-sandbox.md):
   real-tool contracts, disposable repository harness, test matrix, and
   completion evidence.
+- [`docs/plans/phase-3-plan-schema-persistence.md`](docs/plans/phase-3-plan-schema-persistence.md):
+  checkpoint architecture, recovery contract, test matrix, and deferred
+  mutation-safety gate.
+- [`docs/plans/phase-4-mcp-stdio.md`](docs/plans/phase-4-mcp-stdio.md):
+  stdio architecture, wire/error contract, parity matrix, and completion
+  evidence.
 - [`docs/decisions/`](docs/decisions/): architectural decision records explaining
   what was chosen, alternatives, consequences, and revisit triggers.
 - [`docs/reviews/phase-1-implementation-review.md`](docs/reviews/phase-1-implementation-review.md):
   gstack review findings, fixes, and verification evidence.
 - [`docs/reviews/phase-2-implementation-review.md`](docs/reviews/phase-2-implementation-review.md):
   Step 2 scope audit, review fix, and final verification evidence.
+- [`docs/reviews/phase-3-implementation-review.md`](docs/reviews/phase-3-implementation-review.md):
+  Step 3 trust-boundary findings, fixes, and recovery verification.
+- [`docs/reviews/phase-4-implementation-review.md`](docs/reviews/phase-4-implementation-review.md):
+  Step 4 schema, lifecycle, mutation-parity, and result-boundary review.
 
 Read `PROGRESS.md` first when resuming work. It is intentionally more current
 than the roadmap.

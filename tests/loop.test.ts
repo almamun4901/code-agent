@@ -3,6 +3,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import {
   createInitialPlan,
   LoopLimitError,
+  MemoryCheckpointStore,
   PHASE_ONE_TOOLS,
   PHASE_ONE_TASKS,
   runAgentLoop,
@@ -97,7 +98,7 @@ describe("validateTurn", () => {
       turn: makeRawTurn([
         tool("plan", "rewrite_plan", { tasks: makePlan(0) }),
       ]),
-      message: "only a plan array",
+      message: "failed validation",
     },
     {
       name: "unexpected rewrite_plan field",
@@ -107,7 +108,7 @@ describe("validateTurn", () => {
           untrusted: true,
         }),
       ]),
-      message: "only a plan array",
+      message: "failed validation",
     },
     {
       name: "unexpected plan task field",
@@ -118,7 +119,7 @@ describe("validateTurn", () => {
           ),
         }),
       ]),
-      message: "invalid fields",
+      message: "failed validation",
     },
     {
       name: "malformed read input",
@@ -164,6 +165,23 @@ describe("validateTurn", () => {
     const firstTask = changed[0];
     if (!firstTask) throw new Error("Missing first test task");
     changed[0] = { ...firstTask, description: "Different task" };
+
+    expect(() =>
+      validateTurn(
+        makeRawTurn([
+          tool("plan", "rewrite_plan", { plan: changed }),
+          tool("read", "read_file", { path: "package.json" }),
+        ]),
+        createInitialPlan(),
+      ),
+    ).toThrow("preserve its original ID and description");
+  });
+
+  test("does not normalize canonical plan text before comparison", () => {
+    const changed = makePlan(0);
+    const firstTask = changed[0];
+    if (!firstTask) throw new Error("Missing first test task");
+    changed[0] = { ...firstTask, id: ` ${firstTask.id}` };
 
     expect(() =>
       validateTurn(
@@ -226,6 +244,7 @@ describe("runAgentLoop", () => {
 
     const result = await runAgentLoop({
       callModel,
+      checkpointStore: new MemoryCheckpointStore(),
       readFile: (path) => {
         reads.push(path);
         return fakeReadFile(path);
@@ -279,6 +298,7 @@ describe("runAgentLoop", () => {
     const requests: ModelRequest[] = [];
 
     await runAgentLoop({
+      checkpointStore: new MemoryCheckpointStore(),
       callModel: queuedModel(
         [makeTurn(0), makeTurn(1), makeTurn(2), makeTurn(3)],
         requests,
@@ -317,6 +337,7 @@ describe("runAgentLoop", () => {
 
     const result = await runAgentLoop({
       callModel,
+      checkpointStore: new MemoryCheckpointStore(),
       readFile: (path) => {
         reads.push(path);
         return fakeReadFile(path);
@@ -346,6 +367,7 @@ describe("runAgentLoop", () => {
     ]);
 
     await runAgentLoop({
+      checkpointStore: new MemoryCheckpointStore(),
       callModel: queuedModel(
         [
           invalid,
@@ -381,6 +403,7 @@ describe("runAgentLoop", () => {
     await expect(
       runAgentLoop({
         callModel: queuedModel([invalid, invalid]),
+        checkpointStore: new MemoryCheckpointStore(),
         readFile: () => {
           readCount += 1;
           return { success: true, content: "unexpected" };
@@ -395,6 +418,7 @@ describe("runAgentLoop", () => {
     await expect(
       runAgentLoop({
         callModel: queuedModel([makeTurn(0)]),
+        checkpointStore: new MemoryCheckpointStore(),
         maxModelTurns: 1,
         logger: () => {},
       }),

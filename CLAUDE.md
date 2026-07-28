@@ -61,6 +61,7 @@ editing any code.
 - Runtime: Bun 1.3+
 - Type check: `bun run typecheck`
 - Offline deterministic suite: `bun test`
+- Focused MCP stdio suite: `bun run test:mcp`
 - Step 0 regression: `bun run loop-fake.ts`
 - Explicit live Phase 1 gate: `bun run test:integration`
 
@@ -72,19 +73,35 @@ and canned tool results to Anthropic. Normal `bun test` never makes that call.
 
 - `src/loop.ts` owns plan/act/observe/recover orchestration and all semantic
   validation of model turns.
+- `src/plan/schema.ts` owns strict Zod schemas for TodoWrite input and the
+  provider-neutral versioned runtime checkpoint.
+- `src/state/checkpoint.ts` owns fail-closed loading and durable atomic
+  `.agent/state.json` replacement.
 - `src/model/anthropic.ts` translates the provider-neutral loop contract to the
   Anthropic Messages API and sanitizes provider errors.
 - `src/tools/fake-read-file.ts` returns canned fixture data without filesystem
   access.
 - `tests/loop.test.ts` covers the state machine and trust boundary offline.
+- `tests/checkpoint.test.ts` covers state validation, filesystem safety,
+  repeated hard-kill recovery, and committed-tool non-replay.
 - `tests/anthropic.integration.test.ts` is the opt-in live acceptance gate.
 - `src/tools/dispatcher.ts` validates and routes all six real tools, invokes
   the Step 6 policy seam, normalizes failures, and caps serialized results.
 - `src/tools/token-budget.ts` enforces the 4,000-token offline
   `o200k_base` result budget.
+- `src/mcp/schemas.ts` owns exact MCP discovery schemas and strict
+  JSON-safe `ToolResult` decoding.
+- `src/mcp/server.ts` registers the six existing tools and delegates every
+  valid call to the unchanged dispatcher.
+- `src/mcp/client.ts` owns the persistent connection, 60-second request
+  timeout, result validation, and idempotent shutdown.
+- `src/mcp/stdio-server.ts` requires an absolute `--development-root` and
+  reserves stdout for MCP messages.
 - `tests/support/temp-repo.ts` creates disposable worktrees and a local bare
   remote without touching the project worktree.
 - `tests/tools.test.ts` covers the real dispatcher and all six tools.
+- `tests/mcp.test.ts` covers discovery, direct/MCP parity, mutations, failures,
+  result budgets, and stdio lifecycle.
 
 ## Current step
 

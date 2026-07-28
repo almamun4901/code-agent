@@ -75,6 +75,10 @@ and owned child-process lifecycle. The final offline suite reports 95 pass,
   Results are one text block containing canonical JSON `ToolResult`, semantic
   validation stays in the dispatcher, and disconnected mutations are never
   retried. See ADR 0010.
+- Every roadmap step starts from a freshly pulled `main` on its own branch.
+  Each explicit substep is checked and committed separately; the completed
+  branch is pushed, merged only after all gates pass, reverified on `main`,
+  and then `main` is pushed. See `AGENTS.md` and `CLAUDE.md`.
 
 ---
 
@@ -423,6 +427,33 @@ and owned child-process lifecycle. The final offline suite reports 95 pass,
   supported Node runtime), Git, ripgrep, and the pinned Tree-sitter WASM
   assets; then define the host-filesystem-unreachable probe and preserve the
   Step 4 parity suite across the sandbox boundary.
+
+### 2026-07-28 — Step 4 documentation and branch-workflow finalization
+
+- What was done: Pulled `origin/main` with `--ff-only`, created
+  `codex/step-4-documentation-finalization`, and committed the new mandatory
+  per-step Git workflow separately in `AGENTS.md` and `CLAUDE.md`. Ran the
+  formal gstack `/document-release` audit across all 24 Markdown files, added
+  README discoverability and task guidance, synchronized `PLAN.md` maintenance
+  rules, corrected the stale Phase 1 live-gate status and T6 checklist, and
+  replaced the obsolete Step 4 document-release preflight note.
+- What broke / had to be reworked: The first Step 4 document-release attempt
+  had correctly stopped on `main`. The feature-branch rerun exposed two pieces
+  of factual drift: Phase 1 still claimed its already-passed live gate was
+  pending, and the Step 4 review still described the earlier preflight stop as
+  the final documentation state. Both are corrected without changing their
+  historical failure narratives.
+- Decisions made this session: Every future roadmap step must use the sequence
+  pull `main` → create a dedicated branch → verify and commit each substep →
+  run full acceptance/review/docs → push the branch → merge into updated
+  `main` → reverify → push `main`. A step is not complete before that sequence
+  finishes.
+- Current status of the step in progress: Step 4 implementation, review, and
+  documentation are complete. The finalization uses scoped commits on its
+  dedicated branch; branch and merge evidence is preserved in Git history.
+- Next session should start with: Pull the now-updated `main`, create a new
+  dedicated Step 5 branch, and run `/plan-eng-review` before any E2B
+  implementation. Do not reuse the Step 4 finalization branch.
 
 ---
 

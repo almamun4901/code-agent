@@ -51,7 +51,8 @@ Steps 5–6 and ADR 0009.
 ## gstack maintenance note
 
 The `/review` result was persisted as clean after all findings were fixed.
-`/document-release` was invoked, but its preflight requires a feature branch
-and this worktree is on `main` with pre-existing Step 3 changes. No branch or
-commit was created implicitly; the requested factual documentation sync was
-completed in place.
+The initial `/document-release` invocation stopped because its preflight
+requires a feature branch and the implementation worktree was on `main`.
+The final audit ran on `codex/step-4-documentation-finalization`, corrected
+cross-document drift, and verified the required per-step branch workflow
+before merge.

@@ -4,6 +4,28 @@ This file is read by Claude Code, Cursor, and similar tools at the start of a
 session. Read it, then read the three files it points to, before writing or
 editing any code.
 
+## Required Git workflow for every roadmap step
+
+Follow this sequence for each step in `PLAN.md`:
+
+1. Start from a clean worktree on `main` and run `git pull --ff-only origin
+   main` before doing any step work. If local changes prevent a safe pull, stop
+   and resolve them instead of carrying them into the new step.
+2. Create a dedicated branch from the updated `main` for that step. Do not
+   implement a roadmap step directly on `main`.
+3. Break the step into explicit substeps. After each substep, run its relevant
+   type checks, tests, linters, and acceptance checks. Commit that substep only
+   after its checks pass; keep commits scoped and independently understandable.
+4. After every substep is committed, run the step's complete definition of
+   done, gstack review, and documentation checks. Push the completed step
+   branch only when all required checks pass.
+5. Merge the step branch into an up-to-date `main` only after the pushed branch
+   has passed all reviews and acceptance gates. Reverify the merged result,
+   then push `main`.
+
+Do not mark a roadmap step complete until this branch, verification, push, and
+merge sequence is finished. Never silently reuse a branch from an earlier step.
+
 ## Read in this order
 
 1. **`PLAN.md`** — the overall roadmap: architecture, build order (steps

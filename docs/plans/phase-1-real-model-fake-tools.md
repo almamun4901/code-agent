@@ -1,7 +1,6 @@
 # Phase 1 Plan — Real Model, Fake Tools
 
-**Status:** implemented and locally verified. Live verification is pending
-explicit authorization for the outbound Anthropic test.
+**Status:** complete; live verification passed 2026-07-26.
 
 ## Outcome
 
@@ -212,7 +211,7 @@ append assistant blocks
   - Assert that the second invalid response aborts.
   - Assert exact `tool_use_id` correlation in the next `tool_result`.
 
-- [ ] **T6 — Run the implemented live acceptance test**
+- [x] **T6 — Run the implemented live acceptance test**
   - The first authorized run reached Anthropic but returned HTTP 400 because
     the strict wire schema included unsupported constraints. The wire schema
     was corrected.
@@ -221,8 +220,8 @@ append assistant blocks
     Rejected turns no longer enter the provider transcript.
   - The third authorized run exposed a prompt-contract gap: validation required
     canonical task descriptions that the first request never supplied. The
-    canonical initial plan is now included, and contradictory status-change
-    guidance was aligned with the validator. Rerun remains required.
+    canonical initial plan is now included, contradictory status-change
+    guidance was aligned with the validator, and the corrected rerun passed.
   - Skip with an explicit message when `ANTHROPIC_API_KEY` is absent.
   - With the key present, assert at least three model turns, three fake reads,
   a full valid plan on every turn, and a completed terminal plan.

@@ -26,6 +26,29 @@ Follow this sequence for each step in `PLAN.md`:
 Do not mark a roadmap step complete until this branch, verification, push, and
 merge sequence is finished. Never silently reuse a branch from an earlier step.
 
+### Branch and commit naming
+
+- Never include `codex`, an agent name, or an AI/vendor prefix in a branch
+  name. Name branches for the actual change using
+  `<type>/step-<number>-<short-description>`, for example
+  `feat/step-5-e2b-sandbox`, `fix/mcp-client-close`, or
+  `docs/step-4-finalization`.
+- Use a valid Conventional Commit message:
+  `<type>(<optional-scope>): <imperative summary>`.
+- Select the type from the actual primary change:
+  - `feat` for a new product capability;
+  - `fix` for a bug correction;
+  - `docs` for documentation-only changes;
+  - `refactor` for code restructuring without a behavior change;
+  - `test` for test-only changes;
+  - `perf` for performance improvements;
+  - `build`, `ci`, or `chore` for their corresponding maintenance work.
+- Keep the subject specific, imperative, and concise. Do not use vague messages
+  such as `update code`, mislabel documentation as a feature, or combine
+  unrelated changes in one commit.
+- Never add `codex`, agent branding, AI-generation notices, or automatic
+  agent-attribution trailers to a commit message.
+
 ## Read in this order
 
 1. **`PLAN.md`** — the overall roadmap: architecture, build order (steps

@@ -171,11 +171,19 @@ order above.
 ## 6. How this plan is maintained
 
 - `PLAN.md` (this file) — written now, edited only when scope or ordering
-actually changes. Update the Status column below when a step completes.
+  actually changes. Update the Status column below when a step completes.
 - `PROGRESS.md` — updated every session; fine-grained "what's next," current
-blockers, what broke.
+  blockers, what broke.
 - `docs/decisions/` — one file per non-obvious choice (model provider,
-sandbox choice, transport ordering), written at decision time.
+  sandbox choice, transport ordering), written at decision time.
+- Every roadmap step starts by pulling `main` with `--ff-only`, then creates a
+  dedicated branch from that updated base.
+- Each explicit substep is verified and committed independently. The completed
+  step branch is pushed only after its full definition of done, gstack review,
+  and documentation audit pass.
+- A step is complete only after its branch is merged into an updated `main`,
+  the merged result is reverified, and `main` is pushed. `AGENTS.md` and
+  `CLAUDE.md` contain the authoritative operational sequence.
 
 
 

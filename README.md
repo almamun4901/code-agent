@@ -152,8 +152,21 @@ to stderr. Its development root must be an existing absolute directory. MCP
 tool failures are returned as JSON `ToolResult` values; connection, protocol,
 timeout, and malformed-result failures reject the client call.
 
+## Roadmap-step workflow
+
+Every roadmap step starts from an updated `main` and uses its own branch. Break
+the step into explicit substeps, run the relevant checks after each one, and
+commit each verified substep separately. After the complete definition of done,
+gstack review, and documentation audit pass, push the step branch, merge it
+into an updated `main`, reverify the merged result, and then push `main`.
+
+The authoritative agent instructions and exact sequence are in
+[`AGENTS.md`](AGENTS.md) and [`CLAUDE.md`](CLAUDE.md).
+
 ## Documentation map
 
+- [`AGENTS.md`](AGENTS.md) and [`CLAUDE.md`](CLAUDE.md): mandatory per-step
+  Git workflow, reading order, project conventions, and verification commands.
 - [`PLAN.md`](PLAN.md): target architecture, build order, definitions of done,
   scope, and risks.
 - [`PROGRESS.md`](PROGRESS.md): authoritative current state, blockers, session

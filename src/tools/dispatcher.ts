@@ -53,7 +53,7 @@ export async function dispatchTool(
     const validatedCall = validateToolCall(call);
     const repoPath = await validateRepoPath(validatedCall.input.repoPath);
     assertInsideDevelopmentRoot(repoPath, context.developmentRoot);
-    await (context.beforeToolUse ?? allowAll)(validatedCall, context);
+    await (context.preToolUse ?? allowAll)(validatedCall, context);
     const raw = await execute(validatedCall);
     return finalizeToolResult(true, raw, { codec, tokenLimit });
   } catch (error) {

@@ -111,7 +111,7 @@ describe("dispatcher and development containment", () => {
         input: { repoPath: repo.worktreePath, path: "src/sample.ts" },
       },
       {
-        beforeToolUse: async () => {
+        preToolUse: async () => {
           policyRan = true;
         },
       },
@@ -141,7 +141,7 @@ describe("dispatcher and development containment", () => {
         },
       },
       {
-        beforeToolUse: async () => {
+        preToolUse: async () => {
           throw new Error("blocked by test policy");
         },
       },
@@ -177,7 +177,7 @@ describe("dispatcher and development containment", () => {
       { name: "read_file" } as never,
       {
         developmentRoot: repo.root,
-        beforeToolUse: async () => {
+        preToolUse: async () => {
           policyRan = true;
         },
       },
@@ -195,7 +195,7 @@ describe("dispatcher and development containment", () => {
       } as never,
       {
         developmentRoot: repo.root,
-        beforeToolUse: async () => {
+        preToolUse: async () => {
           policyRan = true;
         },
       },
@@ -207,7 +207,7 @@ describe("dispatcher and development containment", () => {
       } as never,
       {
         developmentRoot: repo.root,
-        beforeToolUse: async () => {
+        preToolUse: async () => {
           policyRan = true;
         },
       },

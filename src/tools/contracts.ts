@@ -84,14 +84,14 @@ export type RawToolResult = {
   metadata?: ToolMetadata;
 };
 
-export type BeforeToolUse = (
+export type PreToolUse = (
   call: ToolCall,
   context: DispatcherContext,
 ) => Promise<void>;
 
 export type DispatcherContext = {
   developmentRoot?: string;
-  beforeToolUse?: BeforeToolUse;
+  preToolUse?: PreToolUse;
   tokenLimit?: number;
   tokenCodec?: TokenCodec;
 };

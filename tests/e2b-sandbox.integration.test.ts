@@ -5,13 +5,12 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Sandbox } from "e2b";
 import { createE2bTaskSession } from "../src/sandbox/e2b-session";
+import { readLiveE2bConfig } from "./support/live-e2b-config";
 import { createTemporaryRepository } from "./support/temp-repo";
 
-const templateId = process.env.E2B_TEMPLATE_ID?.trim() ?? "";
-const LIVE_ENABLED =
-  process.env.RUN_LIVE_E2B_TEST === "1" &&
-  Boolean(process.env.E2B_API_KEY?.trim()) &&
-  Boolean(templateId);
+const liveConfig = readLiveE2bConfig();
+const templateId = liveConfig.templateRef;
+const LIVE_ENABLED = liveConfig.enabled;
 const projectRoot = fileURLToPath(new URL("..", import.meta.url));
 
 async function gitStatus(cwd: string): Promise<string> {

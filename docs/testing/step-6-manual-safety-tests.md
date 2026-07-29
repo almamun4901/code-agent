@@ -170,15 +170,18 @@ E2B_TEMPLATE_NAME=terminal-coding-agent-tools:step-6-v1 \
 Pass criteria:
 
 - the build succeeds;
-- the final JSON contains `templateId`, `buildId`, and the exact Step 6 name;
+- the final JSON contains `templateId`, `templateRef`, `buildId`, and the
+  exact Step 6 name;
 - the runtime checks find Bun, Git, ripgrep, and the pinned Tree-sitter WASM
   files;
 - no secret appears in the build log.
 
-Copy only the returned template ID into the ignored local `.env`:
+Copy the returned tagged `templateRef` into `E2B_TEMPLATE_ID` in the ignored
+local `.env`. Do not copy the bare `templateId`; E2B resolves an untagged ID
+as `:default`, but this project builds the `:step-6-v1` tag.
 
 ```text
-E2B_TEMPLATE_ID=<returned-template-id>
+E2B_TEMPLATE_ID=<returned-template-ref>
 ```
 
 Do not commit `.env`.

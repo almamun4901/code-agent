@@ -5,7 +5,9 @@ import {
   E2B_RUNTIME_ROOT,
   E2B_SHELL_WRAPPER,
   createAgentTemplate,
+  templateBuildOutput,
 } from "../src/sandbox/template";
+import { readLiveE2bConfig } from "./support/live-e2b-config";
 import {
   RUNTIME_MANIFEST_PATH,
   TOOL_RUNTIME_VERSION,
@@ -71,5 +73,39 @@ describe("E2B runtime template", () => {
     });
     expect(first.lockSha256).toMatch(/^[a-f0-9]{64}$/);
     expect(JSON.stringify(first)).not.toContain("API_KEY");
+  });
+
+  test("reports and requires a tagged runnable template reference", () => {
+    expect(
+      templateBuildOutput({
+        templateId: "template-id",
+        buildId: "build-id",
+        name: "terminal-coding-agent-tools:step-6-v1",
+      }),
+    ).toEqual({
+      templateId: "template-id",
+      templateRef: "terminal-coding-agent-tools:step-6-v1",
+      buildId: "build-id",
+      name: "terminal-coding-agent-tools:step-6-v1",
+    });
+
+    expect(() =>
+      readLiveE2bConfig({
+        RUN_LIVE_E2B_TEST: "1",
+        E2B_API_KEY: "configured",
+        E2B_TEMPLATE_ID: "template-id",
+      }),
+    ).toThrow("bare templateId defaults to the unrelated :default tag");
+    expect(
+      readLiveE2bConfig({
+        RUN_LIVE_E2B_TEST: "1",
+        E2B_API_KEY: "configured",
+        E2B_TEMPLATE_ID:
+          "terminal-coding-agent-tools:step-6-v1",
+      }),
+    ).toEqual({
+      enabled: true,
+      templateRef: "terminal-coding-agent-tools:step-6-v1",
+    });
   });
 });

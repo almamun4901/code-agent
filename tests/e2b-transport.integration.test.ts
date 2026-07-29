@@ -5,12 +5,11 @@ import {
   E2bStdioTransport,
   e2bCommandController,
 } from "../src/sandbox/e2b-stdio-transport";
+import { readLiveE2bConfig } from "./support/live-e2b-config";
 
-const LIVE_ENABLED =
-  process.env.RUN_LIVE_E2B_TEST === "1" &&
-  Boolean(process.env.E2B_API_KEY?.trim()) &&
-  Boolean(process.env.E2B_TEMPLATE_ID?.trim());
-const templateId = process.env.E2B_TEMPLATE_ID?.trim() ?? "";
+const liveConfig = readLiveE2bConfig();
+const LIVE_ENABLED = liveConfig.enabled;
+const templateId = liveConfig.templateRef;
 const sandboxes: Sandbox[] = [];
 const clients: McpToolClient[] = [];
 

@@ -94,17 +94,24 @@ export async function buildAgentTemplate(
   });
 }
 
+export function templateBuildOutput(result: {
+  templateId: string;
+  buildId: string;
+  name: string;
+}) {
+  return {
+    templateId: result.templateId,
+    templateRef: result.name,
+    buildId: result.buildId,
+    name: result.name,
+  };
+}
+
 if (import.meta.main) {
   if (process.argv.includes("--dry-run")) {
     process.stdout.write(`${Template.toDockerfile(createAgentTemplate())}\n`);
   } else {
     const result = await buildAgentTemplate();
-    process.stdout.write(
-      `${JSON.stringify({
-        templateId: result.templateId,
-        buildId: result.buildId,
-        name: result.name,
-      })}\n`,
-    );
+    process.stdout.write(`${JSON.stringify(templateBuildOutput(result))}\n`);
   }
 }

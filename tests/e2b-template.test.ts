@@ -29,7 +29,9 @@ describe("E2B runtime template", () => {
     expect(dockerfile).toContain("ca-certificates");
     expect(dockerfile).toContain("coreutils");
     expect(dockerfile).toContain("git");
+    expect(dockerfile).toContain("nodejs");
     expect(dockerfile).toContain("procps");
+    expect(dockerfile).toContain("python3-minimal");
     expect(dockerfile).toContain("ripgrep");
     expect(dockerfile).toContain("sudo");
     expect(dockerfile).toContain("util-linux");

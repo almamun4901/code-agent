@@ -10,7 +10,7 @@
 ## Current state (updated: 2026-07-28)
 
 **Overall:** Steps 0–4 are complete. Step 5 is in progress on
-`feat/step-5-e2b-sandbox`: the PreToolUse naming alignment, pinned E2B SDK,
+`feat/e2b-sandbox`: the PreToolUse naming alignment, pinned E2B SDK,
 remote stdio transport, runtime template definition, Git-bundle worktree
 provisioning, lifecycle cleanup, and offline/live-test harnesses are
 implemented locally. The focused offline sandbox suite reports 24 pass and
@@ -18,7 +18,8 @@ implemented locally. The focused offline sandbox suite reports 24 pass and
 pass. The full six-tool isolation gate also passes, including the randomized
 host-only sentinel and remote positive control. Every completed live run has
 been followed by an empty E2B sandbox listing. Review, documentation, scoped
-commits, push, merge, and merged-main verification remain.
+commits, and the feature-branch push are complete. Merge and merged-main
+verification remain.
 
 **Step-by-step:**
 
@@ -29,7 +30,7 @@ commits, push, merge, and merged-main verification remain.
 | 2 — Real tools, no sandbox | complete | Six tools, dispatcher, capped results, disposable repo harness |
 | 3 — Plan schema + persistence | complete | Repeated hard-kill recovery passed without committed-read replay |
 | 4 — MCP transport (stdio) | complete | Six tools have canonical direct/MCP parity; lifecycle and mutation checks pass |
-| 5 — Sandbox (E2B) | in progress | Offline, template, transport, and six-tool isolation gates pass; review and branch landing remain |
+| 5 — Sandbox (E2B) | in progress | Acceptance, review, documentation, commits, and branch push pass; merge verification remains |
 | 6 — PreToolUse safety hook | not started | — |
 | 7 — TUI (Ink) | not started | — |
 | 8 — Remaining hooks + budget | not started | — |
@@ -107,8 +108,9 @@ commits, push, merge, and merged-main verification remain.
   MCP handshake, six-tool discovery, read call, process-loss failure, and
   cleanup now pass.
 - [x] Run the full live six-tool isolation gate.
-- [ ] Complete Step 5 review, documentation, scoped commits, push, merge, and
-  merged-main verification.
+- [x] Complete Step 5 review, documentation, scoped commits, and feature-branch
+  push.
+- [ ] Merge and complete merged-main verification.
 
 ---
 
@@ -471,7 +473,7 @@ commits, push, merge, and merged-main verification remain.
 ### 2026-07-28 — Step 5 offline implementation and live-gate authorization stop
 
 - What was done: Preserved the existing branch/commit naming instructions in
-  their own commit, updated `main`, and created `feat/step-5-e2b-sandbox`.
+  their own commit, updated `main`, and created `feat/e2b-sandbox`.
   Renamed the dispatcher hook seam to `PreToolUse` and committed the verified
   refactor. Pinned E2B 2.14.1; implemented the remote stdio transport, pinned
   runtime-template definition and manifest, clean Git-bundle intake,

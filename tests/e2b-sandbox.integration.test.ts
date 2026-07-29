@@ -332,9 +332,16 @@ test.skipIf(!LIVE_ENABLED)(
           input: { cwd: ".", command },
         });
         expect(background.metadata?.exitCode).toBe(0);
-        expect(
-          (await observer.commands.run("pgrep -u runner")).exitCode,
-        ).toBe(1);
+        const runnerProcesses = await observer.commands.run(
+          [
+            "if pgrep -u runner >/dev/null; then",
+            "  printf 'RUNNER_PROCESS_FOUND\\n';",
+            "else",
+            "  printf 'NO_RUNNER_PROCESS\\n';",
+            "fi",
+          ].join(" "),
+        );
+        expect(runnerProcesses.stdout).toBe("NO_RUNNER_PROCESS\n");
       }
 
       await observer.commands.run(

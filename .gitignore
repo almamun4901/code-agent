@@ -8,6 +8,7 @@ node_modules/
 
 # Agent runtime state
 .agent/
+.gstack/
 
 # Operating-system files
 .DS_Store

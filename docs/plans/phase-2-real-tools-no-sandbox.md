@@ -21,7 +21,7 @@ deterministic test call
         v
 dispatchTool(call, context)
         |
-        +--> beforeToolUse()       # no-op seam; Step 6 implements policy
+        +--> preToolUse()          # no-op seam; Step 6 implements policy
         |
         +--> typed tool executor
         |

@@ -9,11 +9,16 @@
 
 ## Current state (updated: 2026-07-28)
 
-**Overall:** Steps 0–4 are complete. Step 4 adds exact six-tool MCP discovery,
-a persistent stdio server/client boundary around the unchanged dispatcher,
-canonical direct-versus-MCP result parity, strict malformed-result handling,
-and owned child-process lifecycle. The final offline suite reports 95 pass,
-1 opt-in live test skipped, and 0 fail.
+**Overall:** Steps 0–4 are complete. Step 5 is in progress on
+`feat/step-5-e2b-sandbox`: the PreToolUse naming alignment, pinned E2B SDK,
+remote stdio transport, runtime template definition, Git-bundle worktree
+provisioning, lifecycle cleanup, and offline/live-test harnesses are
+implemented locally. The focused offline sandbox suite reports 24 pass and
+0 fail. The corrected pinned template and focused live MCP transport gate now
+pass. The full six-tool isolation gate also passes, including the randomized
+host-only sentinel and remote positive control. Every completed live run has
+been followed by an empty E2B sandbox listing. Review, documentation, scoped
+commits, push, merge, and merged-main verification remain.
 
 **Step-by-step:**
 
@@ -24,7 +29,7 @@ and owned child-process lifecycle. The final offline suite reports 95 pass,
 | 2 — Real tools, no sandbox | complete | Six tools, dispatcher, capped results, disposable repo harness |
 | 3 — Plan schema + persistence | complete | Repeated hard-kill recovery passed without committed-read replay |
 | 4 — MCP transport (stdio) | complete | Six tools have canonical direct/MCP parity; lifecycle and mutation checks pass |
-| 5 — Sandbox (E2B) | not started | — |
+| 5 — Sandbox (E2B) | in progress | Offline, template, transport, and six-tool isolation gates pass; review and branch landing remain |
 | 6 — PreToolUse safety hook | not started | — |
 | 7 — TUI (Ink) | not started | — |
 | 8 — Remaining hooks + budget | not started | — |
@@ -86,8 +91,8 @@ and owned child-process lifecycle. The final offline suite reports 95 pass,
 
 - [ ] Confirm SWE-bench Pro Python subset is actually pullable and that a
   single task's environment reproduces cleanly — not yet dry-run.
-- [ ] Confirm ripgrep and tree-sitter binaries are present in E2B's default
-  sandbox template, or whether a custom image is needed.
+- [x] Confirm E2B runtime contents: the default image has Node and Git but
+  lacks Bun and ripgrep, so Step 5 uses the successfully built pinned template.
 - [ ] GitHub App not yet created — no fine-grained token, no scoped test
   repo. Needed by step 10, easy to forget until blocked on it.
 - [ ] Langfuse: self-host via Docker Compose vs. cloud free tier for dev —
@@ -96,6 +101,14 @@ and owned child-process lifecycle. The final offline suite reports 95 pass,
   5–6, but flagging so it is not a surprise at the live real-tool boundary.
 - [ ] Choose and verify mutation-recovery reconciliation before the first
   live-model real-tool run after Steps 5–6; this is a blocking ADR 0009 revisit.
+- [x] Resolve the focused live-gate failure. The initial ambiguous E2B create
+  response was followed by a successful bounded run. Template workspace
+  ownership and the newline-aware probe assertion were corrected; the real
+  MCP handshake, six-tool discovery, read call, process-loss failure, and
+  cleanup now pass.
+- [x] Run the full live six-tool isolation gate.
+- [ ] Complete Step 5 review, documentation, scoped commits, push, merge, and
+  merged-main verification.
 
 ---
 
@@ -454,6 +467,178 @@ and owned child-process lifecycle. The final offline suite reports 95 pass,
 - Next session should start with: Pull the now-updated `main`, create a new
   dedicated Step 5 branch, and run `/plan-eng-review` before any E2B
   implementation. Do not reuse the Step 4 finalization branch.
+
+### 2026-07-28 — Step 5 offline implementation and live-gate authorization stop
+
+- What was done: Preserved the existing branch/commit naming instructions in
+  their own commit, updated `main`, and created `feat/step-5-e2b-sandbox`.
+  Renamed the dispatcher hook seam to `PreToolUse` and committed the verified
+  refactor. Pinned E2B 2.14.1; implemented the remote stdio transport, pinned
+  runtime-template definition and manifest, clean Git-bundle intake,
+  branch-backed worktree provisioner, owned task-session lifecycle, and
+  opt-in transport/isolation integration tests. The E2B base image probe
+  confirmed Node and Git are present while Bun and ripgrep are absent.
+- What broke / had to be reworked: A queued-send lifecycle test initially
+  exposed a test-observation deadlock and was corrected without changing the
+  transport contract. The first live spike would have uploaded the runtime
+  into every sandbox, so it was narrowed to a single allowlisted template
+  build. Both attempts to run an external source upload were denied pending
+  explicit user authorization; no workaround was attempted.
+- Decisions made this session: Keep runtime source export limited to
+  `package.json`, `bun.lock`, and `src/` during the template build. Live tests
+  use that immutable template and upload only disposable fixture repositories.
+  Preserve no-retry transport semantics and fail-closed reverse-order cleanup.
+- Current status of the step in progress: Step 5 remains in progress. Typecheck
+  passes; the focused sandbox suite reports 21 pass and 0 fail; the full
+  offline suite reports 115 pass, 3 opt-in tests skipped, and 0 fail; the Step
+  0 regression and `git diff --check` pass. Transport/template/session changes
+  are intentionally uncommitted because their required live gates have not
+  passed.
+- Next session should start with: Obtain explicit authorization for the
+  allowlisted E2B template upload, build the template, record its immutable
+  ID locally, run both live E2B gates, then review and commit each verified
+  Step 5 substep.
+
+### 2026-07-28 — Step 5 template build and live-gate stop
+
+- What was done: Received explicit authorization for the allowlisted E2B
+  upload. Built the pinned `step-5-v1` runtime template after correcting its
+  build-user ordering. The image verified Bun 1.3.14, Git 2.47.3, ripgrep
+  14.1.1, and the pinned Tree-sitter WASM assets. Started the focused MCP
+  transport gate with the required tagged template reference.
+- What broke / had to be reworked: The first template build failed because
+  E2B's Bun base image selected its unprivileged `user` before creating
+  `/opt/agent`; the template now performs setup as root, transfers ownership,
+  and restores `user`. A bare template ID selected E2B's missing `default`
+  tag and was corrected to the pinned `step-5-v1` tag. The subsequent
+  create-sandbox request returned truncated JSON after about 122 seconds,
+  despite creating a running sandbox without returning its handle.
+- Decisions made this session: Honor the no-retry stop condition and free-tier
+  constraint. A read-only account listing found the exact orphaned sandbox;
+  it was explicitly killed, and a second listing confirmed zero running
+  sandboxes. No broad isolation suite was started and no transport fallback
+  was selected silently.
+- Current status of the step in progress: Step 5 remains in progress. The
+  template build gate passes, but the real MCP handshake and isolation gates
+  have not run because sandbox creation produced an ambiguous provider
+  response. Local typecheck, the 21-test focused sandbox suite, and the
+  116-pass full offline suite remain green.
+- Next session should start with: Review the measured E2B create failure and
+  choose whether to add unique-metadata orphan reconciliation and perform one
+  bounded retry, investigate the E2B account/service response, or invoke the
+  approved architectural fallback discussion. Do not start another sandbox
+  without that decision.
+
+### 2026-07-28 — Step 5 manual terminal test suite
+
+- What was done: Added a terminal test guide with six ordered cases covering
+  complete local verification, offline template inspection, account hygiene,
+  focused live transport, full isolation, and opt-in enforcement. Added named
+  package commands for each gate plus a guarded E2B administration CLI that
+  can list sandboxes read-only and terminate only an exact validated ID with
+  explicit `--yes`.
+- What broke / had to be reworked: Nothing. No live sandbox was started.
+- Decisions made this session: Keep all routine verification offline. Separate
+  the two live gates so free-tier users can stop after the cheaper transport
+  proof, and require an empty sandbox listing before and after every live run.
+- Current status of the step in progress: Step 5 remains in progress at the
+  previously recorded live create-response stop. The exact manual local
+  command passes with 118 tests passed, 3 opt-in tests skipped, and 0 failed;
+  the focused sandbox suite passes 23 tests.
+- Next session should start with: Use
+  `docs/testing/step-5-manual-terminal-tests.md`; do not run its live cases
+  until the E2B create-response decision is resolved.
+
+### 2026-07-28 — Manual test ripgrep preflight
+
+- What was done: Investigated the two ripgrep failures from a normal macOS
+  Terminal run. Added a local dependency preflight to the manual command,
+  documented Git/ripgrep prerequisites, and added regression coverage for
+  both the satisfied and missing-dependency cases.
+- What broke / had to be reworked: The Codex application environment exposes
+  its bundled `rg`, while the user's normal Terminal `PATH` did not. Removing
+  that bundled path reproduced the exact two attached failures. The tool and
+  tests were correct; the manual runner lacked an environment preflight.
+- Decisions made this session: Fail immediately with an actionable message
+  when Git or ripgrep is absent. Do not skip tool tests, silently substitute
+  another search implementation, or install system packages automatically.
+- Current status of the step in progress: The preflight regression tests pass,
+  the missing-`rg` reproduction now exits immediately with
+  `brew install ripgrep`, and the complete local command passes with 120 tests
+  passed, 3 live tests skipped, and 0 failed.
+- Next session should start with: Install ripgrep in the user's Terminal,
+  rerun `bun run test:manual:preflight`, then rerun
+  `bun run test:manual:local`. Step 5's live E2B blocker is unchanged.
+
+### 2026-07-28 — Focused E2B transport gate completion
+
+- What was done: Reproduced the user's live template failure, added a template
+  ownership regression, created `/workspace/tasks` during the root build
+  phase, assigned `/workspace` to the runtime user, rebuilt the pinned
+  template, and reran the focused MCP transport gate.
+- What broke / had to be reworked: The template owned `/opt/agent` correctly
+  but left `/workspace` absent, so the unprivileged runtime user could not
+  create the task root. After that fix, the live probe exposed a stale
+  assertion: newline-terminated files are canonically returned with a numbered
+  trailing empty line. The assertion now matches the established read contract.
+- Decisions made this session: Keep the final E2B runtime user unprivileged;
+  provision and transfer ownership of the fixed workspace root at image-build
+  time instead of elevating sandbox tool execution.
+- Current status of the step in progress: The focused E2B gate passes in about
+  four seconds, proving the real MCP handshake, exact six-tool discovery,
+  remote read, process-loss failure without retry, and cleanup. E2B reports
+  zero running sandboxes. The complete local command passes with 120 tests,
+  3 live tests skipped, and 0 failed.
+- Next session should start with: Run `bun run test:e2b:isolation`, verify the
+  final sandbox listing is empty, then proceed through Step 5 review,
+  documentation, commit, push, merge, and merged-main verification.
+
+### 2026-07-28 — Full E2B isolation gate completion
+
+- What was done: Corrected the isolation suite's newline-aware positive-control
+  assertion, exposed the session-owned MCP PID as read-only state, replaced
+  unstable process-command matching with exact-PID fault injection, and ran
+  the complete live gate.
+- What broke / had to be reworked: The first run stopped on the same stale
+  newline expectation already corrected in the transport probe. The second
+  reached all six tools and isolation checks but E2B's process listing did not
+  preserve the command text used by the test to rediscover the server. The
+  session already owned the exact transport PID, so command-text guessing was
+  removed.
+- Decisions made this session: Use the transport-owned PID for deterministic
+  lifecycle fault injection. Do not depend on provider-specific process-list
+  formatting.
+- Current status of the step in progress: The full E2B isolation test passes
+  all 25 assertions: exact six-tool discovery, all tool families, remote-only
+  mutation, randomized host-sentinel isolation, positive control, typed path
+  rejection, exact-PID process loss without replay, session shutdown, and
+  sandbox termination. E2B reports zero running sandboxes. The complete local
+  suite passes 120 tests with 3 live tests skipped and 0 failed.
+- Next session should start with: Run the required Step 5 review and
+  documentation audit, create the remaining scoped commits, push the feature
+  branch, merge into updated `main`, reverify all gates, and push `main`.
+
+### 2026-07-28 — Step 5 review and documentation
+
+- What was done: Ran the pre-landing engineering review and documentation
+  audit. Added ADR 0011, the Phase 5 implementation record, current README
+  architecture/setup guidance, the manual terminal test guide, and the
+  in-progress roadmap status. Created the scoped implementation commit.
+- What broke / had to be reworked: Review confirmed the observed ambiguous
+  create-response path could leave an orphan because the failed call returned
+  no handle. Each create request now carries a unique metadata token; create
+  failure performs exact-token reconciliation without retrying creation or any
+  tool call.
+- Decisions made this session: Keep provider-specific process text out of
+  lifecycle logic, use exact owned PIDs for fault injection, and use unique
+  creation metadata only for cleanup reconciliation.
+- Current status of the step in progress: Review is clean after the lifecycle
+  fix. The complete offline suite passes 121 tests with 3 live tests skipped;
+  the focused sandbox suite passes 24 tests; the final live isolation gate
+  passes all 25 assertions; E2B reports zero running sandboxes.
+- Next session should start with: Commit the synchronized documentation, push
+  the feature branch, merge into updated `main`, reverify the merged result,
+  then finalize Step 5 status and push `main`.
 
 ---
 

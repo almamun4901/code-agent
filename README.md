@@ -8,9 +8,11 @@ creation.
 
 ## Current status
 
-Steps 0–4 are complete. The deterministic fake loop, live Claude loop with
+Steps 0–4 are complete and Step 5 has passed its implementation acceptance
+gates pending branch landing. The deterministic fake loop, live Claude loop with
 fake tools, six real local tools, crash-safe plan persistence, and MCP stdio
-transport have passed their acceptance gates.
+transport have passed their acceptance gates. The same six tools now execute
+inside one short-lived E2B worktree per task.
 The real tools have only been exercised by deterministic tests against
 disposable repositories; no model has received them.
 
@@ -91,8 +93,10 @@ src/tools/dispatcher.ts
 disposable git worktree + local bare remote
 ```
 
-Later roadmap steps run the MCP tool server inside E2B, add safety hooks and
-telemetry, and expose the loop through an Ink terminal UI.
+`E2bTaskSession` now uploads an exact clean Git revision, provisions a
+branch-backed worktree under `/workspace/tasks`, and connects to the MCP server
+through streamed E2B stdin/stdout. Later roadmap steps add safety hooks,
+telemetry, and an Ink terminal UI.
 The model loop and Step 2 real-tool dispatcher remain
 deliberately disconnected until those safety layers exist.
 
@@ -101,7 +105,9 @@ deliberately disconnected until those safety layers exist.
 Requirements:
 
 - Bun 1.3 or newer
+- Git and ripgrep for the complete local tool suite
 - an Anthropic API key only for commands that intentionally call the live API
+- an E2B API key and pinned template ID only for explicit sandbox tests
 
 ```sh
 bun install
@@ -123,6 +129,12 @@ bun test
 # Focused MCP stdio suite
 bun run test:mcp
 
+# Complete local verification, including the focused sandbox suite
+bun run test:manual:local
+
+# Read-only list of currently running E2B sandboxes
+bun run e2b:sandboxes:list
+
 # Full offline suite, including any explicitly skipped integration files
 bun run test:all
 
@@ -138,6 +150,10 @@ bun run test:integration
 # Start the MCP stdio server for an absolute development root
 bun run mcp:stdio -- --development-root /absolute/path/to/development-root
 ```
+
+The [Step 5 manual terminal test guide](docs/testing/step-5-manual-terminal-tests.md)
+lists the safe execution order, expected results, explicit live E2B gates, and
+exact-ID cleanup procedure. Live sandbox tests remain opt-in.
 
 `bun run phase1` and `bun run test:integration` send the synthetic Phase 1
 prompt, plan state, and canned tool results to Anthropic. Standard `bun test`

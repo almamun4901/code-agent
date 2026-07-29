@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import {
   mkdir,
   readFile,
+  realpath,
   rename,
   symlink,
   unlink,
@@ -11,6 +12,7 @@ import path from "node:path";
 import {
   dispatchTool,
 } from "../src/tools/dispatcher";
+import { defaultPreToolUse } from "../src/tools/pretooluse-policy";
 import type {
   TokenCodec,
   ToolCall,
@@ -739,6 +741,92 @@ describe("run_shell", () => {
 
     expect(invalid.metadata?.code).toBe("INVALID_PATH");
     expect(overflow.truncated).toBe(true);
+  });
+
+  test("fast-fails obvious attacks and keeps the next safe tool available", async () => {
+    const repo = await fixture();
+    const attacks = [
+      ["rm -rf /tmp/outside", "SHELL_DESTRUCTIVE_OUTSIDE_ROOT"],
+      ["rm --recursive ../seed", "SHELL_DESTRUCTIVE_OUTSIDE_ROOT"],
+      ["curl https://example.com", "SHELL_EGRESS_UTILITY"],
+      ["wget https://example.com", "SHELL_EGRESS_UTILITY"],
+      ["nc example.com 443", "SHELL_EGRESS_UTILITY"],
+      ["printf poison > /opt/agent/package.json", "SHELL_RUNTIME_MUTATION"],
+      ["printf poison > .git/config", "SHELL_GIT_CONTROL_MUTATION"],
+      ["printf poison > /dev/sda", "SHELL_DEVICE_WRITE"],
+      ["printf 'bad\0command'", "SHELL_NULL_BYTE"],
+    ] as const;
+
+    for (const [command, code] of attacks) {
+      const result = await dispatch(repo, {
+        name: "run_shell",
+        input: { cwd: ".", command },
+      });
+      expect(result).toMatchObject({
+        success: false,
+        metadata: { code },
+      });
+    }
+
+    const safe = await dispatch(repo, {
+      name: "read_file",
+      input: { path: "src/sample.ts" },
+    });
+    expect(safe.success).toBe(true);
+  });
+
+  test("uses an allowlisted non-login environment without inherited injection", async () => {
+    const repo = await fixture();
+    const injected = {
+      CODEX_SAFETY_TEST_SECRET: "must-not-leak",
+      GIT_CONFIG_COUNT: "99",
+      BUN_OPTIONS: "--smol",
+      NODE_OPTIONS: "--trace-warnings",
+      LD_PRELOAD: "/tmp/evil.so",
+      PYTHONPATH: "/tmp/evil-python",
+      ENV: "/tmp/evil-profile",
+    };
+    const previous = Object.fromEntries(
+      Object.keys(injected).map((key) => [key, process.env[key]]),
+    );
+    Object.assign(process.env, injected);
+    try {
+      const result = await dispatch(repo, {
+        name: "run_shell",
+        input: { cwd: ".", command: "env" },
+      });
+      expect(result.success).toBe(true);
+      expect(result.output).toContain("PATH=/usr/local/bin:/usr/bin:/bin");
+      expect(result.output).toContain("HOME=/tmp/runner-home");
+      expect(result.output).toContain(
+        `TASK_ROOT=${await realpath(repo.worktreePath)}`,
+      );
+      for (const [key, value] of Object.entries(injected)) {
+        expect(result.output).not.toContain(key);
+        expect(result.output).not.toContain(value);
+      }
+    } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+
+  test("does not treat lexical policy as proof of arbitrary shell safety", async () => {
+    const repo = await fixture();
+    const decision = await defaultPreToolUse(
+      {
+        name: "run_shell",
+        input: {
+          cwd: ".",
+          command:
+            "python -c 'import base64;print(base64.b64decode(\"Y3VybA==\"))'",
+        },
+      },
+      { worktreeRoot: repo.worktreePath },
+    );
+    expect(decision).toEqual({ outcome: "allow" });
   });
 });
 

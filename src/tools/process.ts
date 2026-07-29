@@ -13,7 +13,10 @@ export type ProcessResult = {
 export async function runProcess(
   command: string[],
   cwd: string,
-  options: { timeoutMs?: number } = {},
+  options: {
+    timeoutMs?: number;
+    env?: Record<string, string>;
+  } = {},
 ): Promise<ProcessResult> {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const controller = new AbortController();
@@ -32,6 +35,7 @@ export async function runProcess(
       signal: controller.signal,
       killSignal: "SIGKILL",
       maxBuffer: MAX_RAW_OUTPUT_BYTES,
+      env: options.env,
     });
     const [stdout, stderr, exitCode] = await Promise.all([
       new Response(process.stdout).text(),

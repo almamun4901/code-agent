@@ -245,6 +245,11 @@ async function sessionFixture(options: {
   const factory: E2bSandboxFactory = {
     async create(_templateId, createOptions) {
       if (options.createError) throw options.createError;
+      expect(createOptions).toMatchObject({
+        secure: true,
+        allowInternetAccess: false,
+        lifecycle: { onTimeout: "kill" },
+      });
       sandbox.baseSha = createOptions.metadata.baseSha ?? "";
       sandbox.taskId = createOptions.metadata.taskId ?? "";
       expect(createOptions.metadata.creationId).toMatch(

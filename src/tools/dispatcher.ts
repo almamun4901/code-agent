@@ -11,11 +11,10 @@ import { gitTool } from "./git";
 import { readFileTool } from "./read-file";
 import { ripgrepTool } from "./ripgrep";
 import { runShellTool } from "./run-shell";
+import { defaultPreToolUse } from "./pretooluse-policy";
 import { finalizeToolResult } from "./token-budget";
 import { treeSitterSymbolsTool } from "./tree-sitter-symbols";
 import { validateToolCall } from "./validate-call";
-
-const allowAll = async () => ({ outcome: "allow" } as const);
 
 async function execute(call: RootedToolCall): Promise<RawToolResult> {
   switch (call.name) {
@@ -55,9 +54,14 @@ async function evaluatePolicy(
 ): Promise<void> {
   let decision;
   try {
-    decision = await (context.preToolUse ?? allowAll)(request, {
+    decision = await defaultPreToolUse(request, {
       worktreeRoot: context.worktreeRoot,
     });
+    if (decision.outcome === "allow" && context.preToolUse) {
+      decision = await context.preToolUse(request, {
+        worktreeRoot: context.worktreeRoot,
+      });
+    }
   } catch (error) {
     throw new ToolExecutionError(
       `PreToolUse policy failed: ${

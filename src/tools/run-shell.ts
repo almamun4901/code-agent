@@ -4,6 +4,18 @@ import { resolveRepoChild, validateRepoPath } from "./path-utils";
 import { runProcess } from "./process";
 
 const MAX_SHELL_TIMEOUT_MS = 30_000;
+const SAFE_PATH = "/usr/local/bin:/usr/bin:/bin";
+
+function shellEnvironment(repoPath: string): Record<string, string> {
+  return {
+    PATH: SAFE_PATH,
+    HOME: "/tmp/runner-home",
+    TMPDIR: "/tmp",
+    LANG: "C.UTF-8",
+    LC_ALL: "C.UTF-8",
+    TASK_ROOT: repoPath,
+  };
+}
 
 export async function runShellTool(input: RunShellInput): Promise<RawToolResult> {
   const repoPath = await validateRepoPath(input.repoPath);
@@ -36,6 +48,7 @@ export async function runShellTool(input: RunShellInput): Promise<RawToolResult>
     : ["/bin/sh", "-c", input.command];
   const result = await runProcess(command, wrapper ? repoPath : cwd, {
     timeoutMs: wrapper ? timeoutMs + 1_500 : timeoutMs,
+    env: shellEnvironment(repoPath),
   });
   const sections = [
     result.stdout ? `STDOUT\n${result.stdout.trimEnd()}` : "",

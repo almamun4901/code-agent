@@ -29,6 +29,7 @@ test.skipIf(!LIVE_ENABLED)(
     const sandbox = await Sandbox.create(templateId, {
       timeoutMs: 180_000,
       secure: true,
+      allowInternetAccess: false,
       lifecycle: { onTimeout: "kill" },
     });
     sandboxes.push(sandbox);

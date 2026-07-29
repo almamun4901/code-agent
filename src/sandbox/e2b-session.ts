@@ -88,6 +88,7 @@ export type E2bSandboxFactory = {
     options: {
       timeoutMs: number;
       secure: true;
+      allowInternetAccess: false;
       lifecycle: { onTimeout: "kill" };
       metadata: Record<string, string>;
     },
@@ -321,6 +322,7 @@ export async function createE2bTaskSession(
       sandbox = await sandboxFactory.create(options.templateId, {
         timeoutMs,
         secure: true,
+        allowInternetAccess: false,
         lifecycle: { onTimeout: "kill" },
         metadata: creationMetadata,
       });

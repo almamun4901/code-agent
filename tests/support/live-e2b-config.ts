@@ -30,3 +30,12 @@ export function readLiveE2bConfig(
 
   return { enabled: true, templateRef };
 }
+
+export function toolStdout(output: string): string {
+  if (!output.startsWith("STDOUT\n")) return "";
+  const stderrStart = output.indexOf("\n\nSTDERR\n");
+  return output.slice(
+    "STDOUT\n".length,
+    stderrStart === -1 ? undefined : stderrStart,
+  );
+}

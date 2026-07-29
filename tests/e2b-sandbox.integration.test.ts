@@ -5,7 +5,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Sandbox } from "e2b";
 import { createE2bTaskSession } from "../src/sandbox/e2b-session";
-import { readLiveE2bConfig } from "./support/live-e2b-config";
+import {
+  readLiveE2bConfig,
+  toolStdout,
+} from "./support/live-e2b-config";
 import { createTemporaryRepository } from "./support/temp-repo";
 
 const liveConfig = readLiveE2bConfig();
@@ -252,18 +255,47 @@ test.skipIf(!LIVE_ENABLED)(
       );
       const hexHost = Buffer.from("example.com").toString("hex");
       const networkAttempts = [
-        `bun -e 'await fetch(Buffer.from("${encodedUrl}","base64").toString()); console.log("NETWORK_REACHED")'`,
-        `node -e 'fetch(Buffer.from("${encodedUrl}","base64").toString()).then(()=>console.log("NETWORK_REACHED")).catch(()=>process.exit(2))'`,
-        `python3 -c 'import urllib.request; urllib.request.urlopen(bytes.fromhex("${Buffer.from("https://example.com").toString("hex")}").decode(),timeout=3); print("NETWORK_REACHED")'`,
-        `python3 -c 'import socket; socket.create_connection((bytes.fromhex("${hexHost}").decode(),443),3); print("NETWORK_REACHED")'`,
-        `python3 -c 'import socket; socket.gethostbyname(bytes.fromhex("${hexHost}").decode()); print("NETWORK_REACHED")'`,
+        {
+          name: "bun-http",
+          command:
+            `bun -e 'await fetch(Buffer.from("${encodedUrl}","base64").toString()); console.log("NETWORK_"+"REACHED")'`,
+        },
+        {
+          name: "node-http",
+          command:
+            `node -e 'fetch(Buffer.from("${encodedUrl}","base64").toString()).then(()=>console.log("NETWORK_"+"REACHED")).catch(()=>process.exit(2))'`,
+        },
+        {
+          name: "python-http",
+          command:
+            `python3 -c 'import urllib.request; urllib.request.urlopen(bytes.fromhex("${Buffer.from("https://example.com").toString("hex")}").decode(),timeout=3); print("NETWORK_"+"REACHED")'`,
+        },
+        {
+          name: "raw-tcp",
+          command:
+            `python3 -c 'import socket; socket.create_connection((bytes.fromhex("${hexHost}").decode(),443),3); print("NETWORK_"+"REACHED")'`,
+        },
+        {
+          name: "dns",
+          command:
+            `python3 -c 'import socket; socket.gethostbyname(bytes.fromhex("${hexHost}").decode()); print("NETWORK_"+"REACHED")'`,
+        },
       ];
-      for (const command of networkAttempts) {
+      for (const attempt of networkAttempts) {
         const result = await session.client.call({
           name: "run_shell",
-          input: { cwd: ".", command, timeoutMs: 6_000 },
+          input: {
+            cwd: ".",
+            command: attempt.command,
+            timeoutMs: 6_000,
+          },
         });
-        expect(result.output).not.toContain("NETWORK_REACHED");
+        expect(toolStdout(result.output)).not.toContain(
+          "NETWORK_REACHED",
+        );
+        if (attempt.name === "python-http") {
+          expect(result.output).not.toContain("ModuleNotFoundError");
+        }
         expect(
           result.metadata?.timedOut === true ||
             Number(result.metadata?.exitCode) !== 0,

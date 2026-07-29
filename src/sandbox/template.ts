@@ -31,7 +31,7 @@ export function createAgentTemplate() {
       "git",
       "nodejs",
       "procps",
-      "python3-minimal",
+      "python3",
       "ripgrep",
       "sudo",
       "util-linux",

@@ -8,7 +8,10 @@ import {
   createAgentTemplate,
   templateBuildOutput,
 } from "../src/sandbox/template";
-import { readLiveE2bConfig } from "./support/live-e2b-config";
+import {
+  readLiveE2bConfig,
+  toolStdout,
+} from "./support/live-e2b-config";
 import {
   RUNTIME_MANIFEST_PATH,
   TOOL_RUNTIME_VERSION,
@@ -34,7 +37,8 @@ describe("E2B runtime template", () => {
     expect(dockerfile).toContain("git");
     expect(dockerfile).toContain("nodejs");
     expect(dockerfile).toContain("procps");
-    expect(dockerfile).toContain("python3-minimal");
+    expect(dockerfile).toContain("python3");
+    expect(dockerfile).not.toContain("python3-minimal");
     expect(dockerfile).toContain("ripgrep");
     expect(dockerfile).toContain("sudo");
     expect(dockerfile).toContain("util-linux");
@@ -123,5 +127,22 @@ describe("E2B runtime template", () => {
       'timeout --signal=TERM --kill-after=1s "$timeout_duration"',
     );
     expect(wrapper).not.toContain('"${timeout_ms}ms"');
+  });
+
+  test("separates shell stdout from diagnostic stderr", () => {
+    expect(
+      toolStdout(
+        [
+          "STDOUT",
+          "safe output",
+          "",
+          "STDERR",
+          'Traceback source: print("NETWORK_REACHED")',
+        ].join("\n"),
+      ),
+    ).toBe("safe output");
+    expect(
+      toolStdout('STDERR\nTraceback source: print("NETWORK_REACHED")'),
+    ).toBe("");
   });
 });

@@ -1,6 +1,6 @@
 import type { RawToolResult, RipgrepInput } from "./contracts";
 import { ToolExecutionError } from "./errors";
-import { resolveRepoChild, validateRepoPath } from "./path-utils";
+import { assertSafeExistingPath, validateRepoPath } from "./path-utils";
 import { runProcess } from "./process";
 
 export async function ripgrepTool(input: RipgrepInput): Promise<RawToolResult> {
@@ -15,7 +15,7 @@ export async function ripgrepTool(input: RipgrepInput): Promise<RawToolResult> {
   if (input.glob) args.push("--glob", input.glob);
   args.push("--", input.pattern);
   if (input.path) {
-    resolveRepoChild(repoPath, input.path);
+    await assertSafeExistingPath(repoPath, input.path);
     args.push(input.path);
   } else {
     args.push(".");

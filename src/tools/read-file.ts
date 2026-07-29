@@ -1,16 +1,28 @@
-import { readFile } from "node:fs/promises";
 import type { RawToolResult, ReadFileInput } from "./contracts";
 import { ToolExecutionError } from "./errors";
-import { resolveRepoChild, validateRepoPath } from "./path-utils";
+import { openExistingNoFollow, validateRepoPath } from "./path-utils";
 
 export async function readFileTool(input: ReadFileInput): Promise<RawToolResult> {
   const repoPath = await validateRepoPath(input.repoPath);
-  const filePath = resolveRepoChild(repoPath, input.path);
   let bytes: Buffer;
 
   try {
-    bytes = await readFile(filePath);
+    const handle = await openExistingNoFollow(repoPath, input.path);
+    try {
+      bytes = await handle.readFile();
+    } finally {
+      await handle.close();
+    }
   } catch (error) {
+    if (error instanceof ToolExecutionError) {
+      if (error.code === "PATH_NOT_FOUND") {
+        throw new ToolExecutionError(
+          `File could not be read: ${input.path}`,
+          "FILE_NOT_FOUND",
+        );
+      }
+      throw error;
+    }
     const code =
       typeof error === "object" &&
       error !== null &&

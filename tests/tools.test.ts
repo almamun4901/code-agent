@@ -1,5 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { readFile } from "node:fs/promises";
+import {
+  mkdir,
+  readFile,
+  rename,
+  symlink,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import path from "node:path";
 import {
   dispatchTool,
@@ -349,6 +356,81 @@ describe("read_file", () => {
     expect(result.output).toContain("tokens omitted");
     expect(serializedTokenCount(result, O200K_CODEC)).toBeLessThanOrEqual(4_000);
   });
+
+  test("rejects malformed and symlinked read/search/symbol paths", async () => {
+    const repo = await fixture();
+    const outsideFile = path.join(repo.root, "outside.ts");
+    const outsideDirectory = path.join(repo.root, "outside");
+    await writeFile(outsideFile, "export const secret = true;\n");
+    await mkdir(outsideDirectory);
+    await writeFile(
+      path.join(outsideDirectory, "secret.ts"),
+      "export const hidden = true;\n",
+    );
+    await symlink(outsideFile, path.join(repo.worktreePath, "final-link.ts"));
+    await symlink(
+      path.join(repo.root, "missing.ts"),
+      path.join(repo.worktreePath, "dangling.ts"),
+    );
+    await symlink(outsideDirectory, path.join(repo.worktreePath, "parent-link"));
+
+    const malformedPaths = [
+      "",
+      ".",
+      "/etc/passwd",
+      "src\\sample.ts",
+      "src//sample.ts",
+      "src/./sample.ts",
+      "src/../sample.ts",
+      "src/\0sample.ts",
+    ];
+    for (const malformedPath of malformedPaths) {
+      const result = await dispatch(repo, {
+        name: "read_file",
+        input: { path: malformedPath },
+      });
+      expect(result.metadata?.code).toBe(
+        malformedPath === "" ? "INVALID_TOOL_CALL" : "INVALID_PATH",
+      );
+    }
+
+    for (const protectedPath of [
+      ".git",
+      ".git/config",
+      ".agent/state.json",
+      ".agents/policy.md",
+      ".codex/config.toml",
+    ]) {
+      const result = await dispatch(repo, {
+        name: "read_file",
+        input: { path: protectedPath },
+      });
+      expect(result.metadata?.code).toBe("PROTECTED_PATH");
+    }
+
+    for (const symlinkPath of [
+      "final-link.ts",
+      "dangling.ts",
+      "parent-link/secret.ts",
+    ]) {
+      const read = await dispatch(repo, {
+        name: "read_file",
+        input: { path: symlinkPath },
+      });
+      expect(read.metadata?.code).toBe("SYMLINK_PATH");
+    }
+
+    const search = await dispatch(repo, {
+      name: "ripgrep",
+      input: { pattern: "hidden", path: "parent-link" },
+    });
+    const symbols = await dispatch(repo, {
+      name: "tree_sitter_symbols",
+      input: { path: "final-link.ts" },
+    });
+    expect(search.metadata?.code).toBe("SYMLINK_PATH");
+    expect(symbols.metadata?.code).toBe("SYMLINK_PATH");
+  });
 });
 
 describe("edit_file", () => {
@@ -468,6 +550,99 @@ describe("edit_file", () => {
     },
     10_000,
   );
+
+  test("blocks protected paths, symlink creation parents, and symlink swaps", async () => {
+    const repo = await fixture();
+    const outsideDirectory = path.join(repo.root, "outside-edit");
+    const outsideFile = path.join(outsideDirectory, "target.ts");
+    await mkdir(outsideDirectory);
+    await writeFile(outsideFile, "outside\n");
+    await symlink(outsideDirectory, path.join(repo.worktreePath, "linked"));
+
+    for (const protectedPath of [
+      ".git/config",
+      ".agent/state.json",
+      ".agents/policy.md",
+      ".codex/config.toml",
+      "AGENTS.md",
+      "CLAUDE.md",
+    ]) {
+      const result = await dispatch(repo, {
+        name: "edit_file",
+        input: {
+          path: protectedPath,
+          mode: "preview",
+          oldText: null,
+          newText: "poisoned\n",
+        },
+      });
+      expect(result.metadata?.code).toBe("PROTECTED_PATH");
+    }
+
+    const linkedCreation = await dispatch(repo, {
+      name: "edit_file",
+      input: {
+        path: "linked/new.ts",
+        mode: "preview",
+        oldText: null,
+        newText: "escaped\n",
+      },
+    });
+    expect(linkedCreation.metadata?.code).toBe("SYMLINK_PATH");
+    expect(await readFile(outsideFile, "utf8")).toBe("outside\n");
+
+    const request = {
+      path: "src/sample.ts",
+      oldText: "Greeter",
+      newText: "Changed",
+    } as const;
+    const preview = await dispatch(repo, {
+      name: "edit_file",
+      input: { ...request, mode: "preview" },
+    });
+    const originalPath = path.join(repo.worktreePath, request.path);
+    await unlink(originalPath);
+    await symlink(outsideFile, originalPath);
+    const swapped = await dispatch(repo, {
+      name: "edit_file",
+      input: {
+        ...request,
+        mode: "apply",
+        baseVersion: String(preview.metadata?.baseVersion),
+      },
+    });
+    expect(swapped.metadata?.code).toBe("SYMLINK_PATH");
+    expect(await readFile(outsideFile, "utf8")).toBe("outside\n");
+
+    await unlink(originalPath);
+    await writeFile(originalPath, "export class Greeter {}\n");
+    const parentPreview = await dispatch(repo, {
+      name: "edit_file",
+      input: {
+        path: "src/sample.ts",
+        mode: "preview",
+        oldText: "Greeter",
+        newText: "Changed",
+      },
+    });
+    await rename(
+      path.join(repo.worktreePath, "src"),
+      path.join(repo.worktreePath, "src-original"),
+    );
+    await symlink(outsideDirectory, path.join(repo.worktreePath, "src"));
+    const parentSwapped = await dispatch(repo, {
+      name: "edit_file",
+      input: {
+        path: "src/sample.ts",
+        mode: "apply",
+        oldText: "Greeter",
+        newText: "Changed",
+        baseVersion: String(parentPreview.metadata?.baseVersion),
+      },
+    });
+    expect(parentSwapped.metadata?.code).toBe("SYMLINK_PATH");
+    expect(await readFile(outsideFile, "utf8")).toBe("outside\n");
+  });
 });
 
 describe("ripgrep", () => {

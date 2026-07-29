@@ -1,9 +1,15 @@
 import { createHash } from "node:crypto";
-import { readFile, writeFile } from "node:fs/promises";
+import { constants, type FileHandle } from "node:fs/promises";
 import { createTwoFilesPatch } from "diff";
 import type { EditFileInput, RawToolResult } from "./contracts";
 import { ToolExecutionError } from "./errors";
-import { resolveRepoChild, validateRepoPath } from "./path-utils";
+import {
+  assertSafeCreationPath,
+  assertWritableToolPath,
+  openExistingNoFollow,
+  openNewNoFollow,
+  validateRepoPath,
+} from "./path-utils";
 
 const MISSING_VERSION = "missing";
 
@@ -11,17 +17,29 @@ function hash(content: string): string {
   return `sha256:${createHash("sha256").update(content).digest("hex")}`;
 }
 
-async function readExisting(path: string): Promise<string | null> {
+async function readExisting(
+  repoPath: string,
+  childPath: string,
+  writable: boolean,
+): Promise<{ content: string | null; handle: FileHandle | null }> {
   try {
-    return await readFile(path, "utf8");
+    const handle = await openExistingNoFollow(
+      repoPath,
+      childPath,
+      writable ? constants.O_RDWR : constants.O_RDONLY,
+    );
+    try {
+      return { content: await handle.readFile("utf8"), handle };
+    } catch (error) {
+      await handle.close();
+      throw error;
+    }
   } catch (error) {
     if (
-      typeof error === "object" &&
-      error !== null &&
-      "code" in error &&
-      error.code === "ENOENT"
+      error instanceof ToolExecutionError &&
+      error.code === "PATH_NOT_FOUND"
     ) {
-      return null;
+      return { content: null, handle: null };
     }
     throw error;
   }
@@ -85,50 +103,79 @@ function buildEdit(
 
 export async function editFileTool(input: EditFileInput): Promise<RawToolResult> {
   const repoPath = await validateRepoPath(input.repoPath);
-  const filePath = resolveRepoChild(repoPath, input.path);
-  const current = await readExisting(filePath);
+  assertWritableToolPath(input.path);
+  const existing = await readExisting(
+    repoPath,
+    input.path,
+    input.mode === "apply",
+  );
+  const current = existing.content;
   const baseVersion = current === null ? MISSING_VERSION : hash(current);
 
-  if (input.mode === "apply") {
-    if (!input.baseVersion) {
-      throw new ToolExecutionError(
-        "apply mode requires the baseVersion returned by preview.",
-        "MISSING_BASE_VERSION",
-      );
+  try {
+    if (current === null && input.oldText === null) {
+      await assertSafeCreationPath(repoPath, input.path);
     }
-    if (input.baseVersion !== baseVersion) {
-      throw new ToolExecutionError(
-        `Stale edit: expected ${input.baseVersion}, current version is ${baseVersion}.`,
-        "STALE_EDIT",
-      );
+
+    if (input.mode === "apply") {
+      if (!input.baseVersion) {
+        throw new ToolExecutionError(
+          "apply mode requires the baseVersion returned by preview.",
+          "MISSING_BASE_VERSION",
+        );
+      }
+      if (input.baseVersion !== baseVersion) {
+        throw new ToolExecutionError(
+          `Stale edit: expected ${input.baseVersion}, current version is ${baseVersion}.`,
+          "STALE_EDIT",
+        );
+      }
     }
-  }
 
-  const edit = buildEdit(current, input);
-  const proposedVersion = hash(edit.next);
-  const diff = createTwoFilesPatch(
-    `a/${input.path}`,
-    `b/${input.path}`,
-    current ?? "",
-    edit.next,
-    baseVersion,
-    proposedVersion,
-  );
-
-  if (input.mode === "apply") {
-    await writeFile(filePath, edit.next, edit.created ? { flag: "wx" } : undefined);
-  }
-
-  return {
-    output: diff,
-    metadata: {
-      path: input.path,
-      mode: input.mode,
+    const edit = buildEdit(current, input);
+    const proposedVersion = hash(edit.next);
+    const diff = createTwoFilesPatch(
+      `a/${input.path}`,
+      `b/${input.path}`,
+      current ?? "",
+      edit.next,
       baseVersion,
       proposedVersion,
-      matchCount: edit.matchCount,
-      created: edit.created,
-      applied: input.mode === "apply",
-    },
-  };
+    );
+
+    if (input.mode === "apply") {
+      if (edit.created) {
+        const handle = await openNewNoFollow(repoPath, input.path);
+        try {
+          await handle.writeFile(edit.next, "utf8");
+        } finally {
+          await handle.close();
+        }
+      } else {
+        if (!existing.handle) {
+          throw new ToolExecutionError(
+            `Edit target disappeared: ${input.path}`,
+            "STALE_EDIT",
+          );
+        }
+        await existing.handle.truncate(0);
+        await existing.handle.write(edit.next, 0, "utf8");
+      }
+    }
+
+    return {
+      output: diff,
+      metadata: {
+        path: input.path,
+        mode: input.mode,
+        baseVersion,
+        proposedVersion,
+        matchCount: edit.matchCount,
+        created: edit.created,
+        applied: input.mode === "apply",
+      },
+    };
+  } finally {
+    await existing.handle?.close();
+  }
 }

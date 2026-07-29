@@ -50,8 +50,21 @@ function optionalInteger(input: UnknownRecord, key: string): void {
   }
 }
 
+function rejectUnknownKeys(
+  input: UnknownRecord,
+  allowed: readonly string[],
+  label: string,
+): void {
+  const allowedKeys = new Set(allowed);
+  const unknown = Object.keys(input).filter((key) => !allowedKeys.has(key));
+  if (unknown.length > 0) {
+    invalid(`${label} contains unknown fields: ${unknown.sort().join(", ")}.`);
+  }
+}
+
 export function validateToolCall(value: unknown): ModelToolRequest {
   const call = requireRecord(value, "Tool call");
+  rejectUnknownKeys(call, ["name", "input"], "Tool call");
   if (typeof call.name !== "string" || !("input" in call)) {
     invalid("Tool call requires string name and object input.");
   }
@@ -59,11 +72,28 @@ export function validateToolCall(value: unknown): ModelToolRequest {
 
   switch (call.name) {
     case "read_file":
+      rejectUnknownKeys(
+        input,
+        ["path", "startLine", "endLine"],
+        "read_file input",
+      );
       requireString(input, "path", { nonEmpty: true });
       optionalInteger(input, "startLine");
       optionalInteger(input, "endLine");
       break;
     case "edit_file":
+      rejectUnknownKeys(
+        input,
+        [
+          "path",
+          "mode",
+          "oldText",
+          "newText",
+          "replaceAll",
+          "baseVersion",
+        ],
+        "edit_file input",
+      );
       requireString(input, "path", { nonEmpty: true });
       if (input.mode !== "preview" && input.mode !== "apply") {
         invalid("mode must be preview or apply.");
@@ -74,6 +104,17 @@ export function validateToolCall(value: unknown): ModelToolRequest {
       optionalString(input, "baseVersion");
       break;
     case "ripgrep":
+      rejectUnknownKeys(
+        input,
+        [
+          "pattern",
+          "path",
+          "glob",
+          "caseSensitive",
+          "fixedString",
+        ],
+        "ripgrep input",
+      );
       requireString(input, "pattern", { nonEmpty: true });
       optionalString(input, "path");
       optionalString(input, "glob");
@@ -81,9 +122,15 @@ export function validateToolCall(value: unknown): ModelToolRequest {
       optionalBoolean(input, "fixedString");
       break;
     case "tree_sitter_symbols":
+      rejectUnknownKeys(input, ["path"], "tree_sitter_symbols input");
       requireString(input, "path", { nonEmpty: true });
       break;
     case "run_shell":
+      rejectUnknownKeys(
+        input,
+        ["cwd", "command", "timeoutMs"],
+        "run_shell input",
+      );
       requireString(input, "cwd", { nonEmpty: true });
       requireString(input, "command", { nonEmpty: true });
       optionalInteger(input, "timeoutMs");
@@ -97,13 +144,21 @@ export function validateToolCall(value: unknown): ModelToolRequest {
         invalid("git subcommand must be status, diff, or commit.");
       }
       if (input.subcommand === "diff") {
+        rejectUnknownKeys(input, ["subcommand", "staged", "path"], "git diff input");
         optionalBoolean(input, "staged");
         optionalString(input, "path");
       } else if (input.subcommand === "commit") {
+        rejectUnknownKeys(
+          input,
+          ["subcommand", "message", "addAll"],
+          "git commit input",
+        );
         requireString(input, "message", { nonEmpty: true });
         if (typeof input.addAll !== "boolean") {
           invalid("addAll must be a boolean.");
         }
+      } else {
+        rejectUnknownKeys(input, ["subcommand"], "git status input");
       }
       break;
     default:

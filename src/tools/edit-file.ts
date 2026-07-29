@@ -17,6 +17,29 @@ function hash(content: string): string {
   return `sha256:${createHash("sha256").update(content).digest("hex")}`;
 }
 
+async function writeAll(
+  handle: FileHandle,
+  content: string,
+): Promise<void> {
+  const bytes = Buffer.from(content, "utf8");
+  let offset = 0;
+  while (offset < bytes.length) {
+    const result = await handle.write(
+      bytes,
+      offset,
+      bytes.length - offset,
+      offset,
+    );
+    if (result.bytesWritten < 1) {
+      throw new ToolExecutionError(
+        "File write made no progress.",
+        "FILE_WRITE_FAILED",
+      );
+    }
+    offset += result.bytesWritten;
+  }
+}
+
 async function readExisting(
   repoPath: string,
   childPath: string,
@@ -159,7 +182,7 @@ export async function editFileTool(input: EditFileInput): Promise<RawToolResult>
           );
         }
         await existing.handle.truncate(0);
-        await existing.handle.write(edit.next, 0, "utf8");
+        await writeAll(existing.handle, edit.next);
       }
     }
 

@@ -271,10 +271,27 @@ describe("dispatcher and development containment", () => {
         },
       },
     );
+    const injectedRoot = await dispatchTool(
+      {
+        name: "read_file",
+        input: {
+          path: "src/sample.ts",
+          repoPath: "/tmp",
+        },
+      },
+      {
+        worktreeRoot: repo.worktreePath,
+        preToolUse: async () => {
+          policyRan = true;
+          return { outcome: "allow" };
+        },
+      },
+    );
 
     expect(malformed.metadata?.code).toBe("INVALID_TOOL_CALL");
     expect(invalidMode.metadata?.code).toBe("INVALID_TOOL_CALL");
     expect(unknown.metadata?.code).toBe("UNKNOWN_TOOL");
+    expect(injectedRoot.metadata?.code).toBe("INVALID_TOOL_CALL");
     expect(policyRan).toBe(false);
   });
 
@@ -488,8 +505,9 @@ describe("edit_file", () => {
       },
     });
     expect(applied.success).toBe(true);
-    expect(await readFile(path.join(repo.worktreePath, "src/sample.ts"), "utf8"))
-      .toContain("class Welcomer");
+    expect(
+      await readFile(path.join(repo.worktreePath, "src/sample.ts"), "utf8"),
+    ).toBe(original.replace("Greeter", "Welcomer"));
   });
 
   test("rejects stale, zero-match, ambiguous, and no-op edits", async () => {

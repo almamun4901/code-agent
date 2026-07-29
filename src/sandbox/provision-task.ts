@@ -51,6 +51,49 @@ async function git(cwd: string, args: string[]): Promise<string> {
   return stdout.trim();
 }
 
+async function runFixed(command: string, args: string[]): Promise<void> {
+  const process = Bun.spawn([command, ...args], {
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(process.stdout).text(),
+    new Response(process.stderr).text(),
+    process.exited,
+  ]);
+  if (exitCode !== 0) {
+    throw new Error(
+      `${command} failed: ${stderr.trim() || stdout.trim() || "No diagnostic output."}`,
+    );
+  }
+}
+
+async function applySandboxPermissions(
+  layout: ProvisionTaskLayout,
+  remoteRepoPath: string,
+): Promise<void> {
+  const taskGroup = process.env.AGENT_TASK_GROUP?.trim();
+  if (!taskGroup) return;
+
+  await runFixed("chmod", ["-R", "go-rwx", layout.seedPath]);
+  await runFixed("chgrp", ["-R", taskGroup, remoteRepoPath]);
+  await runFixed("chmod", ["-R", "g+rwX,o-rwx", remoteRepoPath]);
+  await runFixed("find", [
+    remoteRepoPath,
+    "-type",
+    "d",
+    "-exec",
+    "chmod",
+    "2770",
+    "{}",
+    "+",
+  ]);
+  await runFixed("chmod", ["3770", remoteRepoPath]);
+  await runFixed("chgrp", ["agent", `${remoteRepoPath}/.git`]);
+  await runFixed("chmod", ["0600", `${remoteRepoPath}/.git`]);
+}
+
 export async function provisionTask(
   config: ProvisionTaskInput,
   layout: ProvisionTaskLayout = {
@@ -87,6 +130,7 @@ export async function provisionTask(
     "user.name",
     "Terminal Coding Agent",
   ]);
+  await applySandboxPermissions(layout, remoteRepoPath);
 
   const checkedOutSha = await git(remoteRepoPath, ["rev-parse", "HEAD"]);
   if (checkedOutSha !== config.baseSha) {

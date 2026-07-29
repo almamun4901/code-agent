@@ -23,8 +23,19 @@ export async function runShellTool(input: RunShellInput): Promise<RawToolResult>
     );
   }
 
-  const result = await runProcess(["/bin/sh", "-lc", input.command], cwd, {
-    timeoutMs,
+  const wrapper = process.env.AGENT_SHELL_WRAPPER?.trim();
+  const command = wrapper
+    ? [
+        "sudo",
+        wrapper,
+        repoPath,
+        input.cwd,
+        String(timeoutMs),
+        input.command,
+      ]
+    : ["/bin/sh", "-c", input.command];
+  const result = await runProcess(command, wrapper ? repoPath : cwd, {
+    timeoutMs: wrapper ? timeoutMs + 1_500 : timeoutMs,
   });
   const sections = [
     result.stdout ? `STDOUT\n${result.stdout.trimEnd()}` : "",
@@ -35,7 +46,7 @@ export async function runShellTool(input: RunShellInput): Promise<RawToolResult>
     output: sections.join("\n\n"),
     metadata: {
       exitCode: result.exitCode,
-      timedOut: result.timedOut,
+      timedOut: result.timedOut || result.exitCode === 124,
       cwd: input.cwd,
     },
   };

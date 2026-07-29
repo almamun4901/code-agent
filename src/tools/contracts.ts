@@ -49,12 +49,6 @@ export type GitInput =
       subcommand: "commit";
       message: string;
       addAll: boolean;
-    }
-  | {
-      repoPath: string;
-      subcommand: "push";
-      remote: string;
-      branch: string;
     };
 
 export type RootedToolCall =

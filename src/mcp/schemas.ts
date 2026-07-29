@@ -67,13 +67,6 @@ export const gitOperationSchema = z.discriminatedUnion("subcommand", [
       addAll: z.boolean(),
     })
     .strict(),
-  z
-    .object({
-      subcommand: z.literal("push"),
-      remote: z.string(),
-      branch: z.string(),
-    })
-    .strict(),
 ]);
 
 const gitOperationJsonSchema = z.toJSONSchema(gitOperationSchema) as {
@@ -85,13 +78,11 @@ const gitOperationJsonSchema = z.toJSONSchema(gitOperationSchema) as {
 // the object schema emitted for discovery.
 export const gitInputSchema = z
   .object({
-    subcommand: z.enum(["status", "diff", "commit", "push"]),
+    subcommand: z.enum(["status", "diff", "commit"]),
     staged: z.boolean().optional(),
     path: z.string().optional(),
     message: z.string().optional(),
     addAll: z.boolean().optional(),
-    remote: z.string().optional(),
-    branch: z.string().optional(),
   })
   .strict()
   .superRefine((value, context) => {

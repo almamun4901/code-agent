@@ -92,10 +92,9 @@ export function validateToolCall(value: unknown): ModelToolRequest {
       if (
         input.subcommand !== "status" &&
         input.subcommand !== "diff" &&
-        input.subcommand !== "commit" &&
-        input.subcommand !== "push"
+        input.subcommand !== "commit"
       ) {
-        invalid("git subcommand must be status, diff, commit, or push.");
+        invalid("git subcommand must be status, diff, or commit.");
       }
       if (input.subcommand === "diff") {
         optionalBoolean(input, "staged");
@@ -105,9 +104,6 @@ export function validateToolCall(value: unknown): ModelToolRequest {
         if (typeof input.addAll !== "boolean") {
           invalid("addAll must be a boolean.");
         }
-      } else if (input.subcommand === "push") {
-        requireString(input, "remote", { nonEmpty: true });
-        requireString(input, "branch", { nonEmpty: true });
       }
       break;
     default:

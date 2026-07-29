@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
+  chmod,
   mkdir,
   readFile,
   realpath,
@@ -50,6 +51,27 @@ async function dispatch(
     worktreeRoot: repo.worktreePath,
     ...overrides,
   });
+}
+
+async function configureGit(
+  repo: TemporaryRepository,
+  key: string,
+  value: string,
+): Promise<void> {
+  const child = Bun.spawn(
+    ["/usr/bin/git", "config", key, value],
+    {
+      cwd: repo.worktreePath,
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
+  const [stderr, exitCode] = await Promise.all([
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  if (exitCode !== 0) throw new Error(stderr);
 }
 
 describe("tool result finalization", () => {
@@ -871,7 +893,7 @@ describe("git", () => {
     expect(staged.output).toContain("// changed");
   });
 
-  test("fails an empty commit, commits addAll with a SHA, and pushes locally", async () => {
+  test("fails an empty commit, commits addAll with a SHA, and rejects push", async () => {
     const repo = await fixture();
     const empty = await dispatch(repo, {
       name: "git",
@@ -890,37 +912,89 @@ describe("git", () => {
         addAll: true,
       },
     });
-    const push = await dispatch(repo, {
-      name: "git",
-      input: {
-        subcommand: "push",
-        remote: repo.bareRemotePath,
-        branch: "agent-step2",
+    const push = await dispatchTool(
+      {
+        name: "git",
+        input: {
+          subcommand: "push",
+          remote: repo.bareRemotePath,
+          branch: "agent-step2",
+        },
       },
-    });
-    const badPush = await dispatch(repo, {
-      name: "git",
-      input: {
-        subcommand: "push",
-        remote: path.join(repo.root, "missing.git"),
-        branch: "agent-step2",
-      },
-    });
-    const badBranch = await dispatch(repo, {
-      name: "git",
-      input: {
-        subcommand: "push",
-        remote: repo.bareRemotePath,
-        branch: "missing-branch",
-      },
-    });
+      { worktreeRoot: repo.worktreePath },
+    );
 
     expect(empty.success).toBe(false);
     expect(commit.success).toBe(true);
     expect(String(commit.metadata?.sha)).toMatch(/^[0-9a-f]{40}$/);
-    expect(push.success).toBe(true);
-    expect(badPush.success).toBe(false);
-    expect(badBranch.success).toBe(false);
+    expect(push.metadata?.code).toBe("INVALID_TOOL_CALL");
+  });
+
+  test("disables repository-controlled hooks, signing, pagers, and external diffs", async () => {
+    const repo = await fixture();
+    const sentinel = path.join(repo.root, "git-program-ran");
+    const probe = path.join(repo.root, "probe.sh");
+    const hooks = path.join(repo.root, "hooks");
+    await mkdir(hooks);
+    await writeFile(
+      probe,
+      `#!/bin/sh\nprintf 'executed\\n' >> '${sentinel}'\nexit 0\n`,
+    );
+    await chmod(probe, 0o755);
+    await writeFile(path.join(hooks, "pre-commit"), await readFile(probe));
+    await chmod(path.join(hooks, "pre-commit"), 0o755);
+    await configureGit(repo, "core.hooksPath", hooks);
+    await configureGit(repo, "commit.gpgSign", "true");
+    await configureGit(repo, "gpg.program", probe);
+    await configureGit(repo, "core.pager", probe);
+    await configureGit(repo, "diff.external", probe);
+    await configureGit(repo, "credential.helper", `!${probe}`);
+
+    await repo.write(".gitattributes", "*.ts diff=hostile\n");
+    await configureGit(repo, "diff.hostile.command", probe);
+    await repo.write(
+      "src/sample.ts",
+      `${await readFile(path.join(repo.worktreePath, "src/sample.ts"), "utf8")}// hardened\n`,
+    );
+
+    const injected = {
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "core.hooksPath",
+      GIT_CONFIG_VALUE_0: hooks,
+      GIT_EXTERNAL_DIFF: probe,
+      GIT_PAGER: probe,
+    };
+    const previous = Object.fromEntries(
+      Object.keys(injected).map((key) => [key, process.env[key]]),
+    );
+    Object.assign(process.env, injected);
+    try {
+      const status = await dispatch(repo, {
+        name: "git",
+        input: { subcommand: "status" },
+      });
+      const diff = await dispatch(repo, {
+        name: "git",
+        input: { subcommand: "diff", path: "src/sample.ts" },
+      });
+      const commit = await dispatch(repo, {
+        name: "git",
+        input: {
+          subcommand: "commit",
+          message: "test: verify hardened git",
+          addAll: true,
+        },
+      });
+      expect(status.success).toBe(true);
+      expect(diff.success).toBe(true);
+      expect(commit.success).toBe(true);
+      expect(await Bun.file(sentinel).exists()).toBe(false);
+    } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
   });
 
   test("caps a large diff", async () => {

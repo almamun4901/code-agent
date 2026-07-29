@@ -29,11 +29,6 @@ const mutatingAnnotations: ToolAnnotations = {
   openWorldHint: false,
 };
 
-const openWorldAnnotations: ToolAnnotations = {
-  ...mutatingAnnotations,
-  openWorldHint: true,
-};
-
 function toMcpResult(result: ToolResult): CallToolResult {
   return {
     content: [{ type: "text", text: JSON.stringify(result) }],
@@ -122,7 +117,10 @@ export function createMcpToolServer(
       title: "Run shell command",
       description: "Run a bounded shell command inside a repository-relative directory.",
       inputSchema: runShellInputSchema,
-      annotations: openWorldAnnotations,
+      annotations: {
+        ...mutatingAnnotations,
+        openWorldHint: true,
+      },
     },
     async (input) =>
       toMcpResult(await dispatchTool({ name: "run_shell", input }, serializedContext)),
@@ -132,9 +130,9 @@ export function createMcpToolServer(
     "git",
     {
       title: "Run Git operation",
-      description: "Run a typed Git status, diff, commit, or push operation.",
+      description: "Run a typed Git status, diff, or commit operation.",
       inputSchema: gitInputSchema,
-      annotations: openWorldAnnotations,
+      annotations: mutatingAnnotations,
     },
     async (input) =>
       toMcpResult(

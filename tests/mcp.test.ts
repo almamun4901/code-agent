@@ -134,15 +134,13 @@ const expectedDiscovery = {
   git: {
     properties: [
       "addAll",
-      "branch",
       "message",
       "path",
-      "remote",
       "staged",
       "subcommand",
     ],
     required: ["subcommand"],
-    annotations: [false, true, false, true],
+    annotations: [false, true, false, false],
   },
 } as const;
 
@@ -228,12 +226,12 @@ describe("MCP stdio discovery and protocol boundary", () => {
         properties?: { subcommand?: { const?: string } };
       }>;
     };
-    expect(gitSchema.oneOf).toHaveLength(4);
+    expect(gitSchema.oneOf).toHaveLength(3);
     expect(
       gitSchema.oneOf
         ?.map((branch) => branch.properties?.subcommand?.const)
         .sort(),
-    ).toEqual(["commit", "diff", "push", "status"]);
+    ).toEqual(["commit", "diff", "status"]);
     expect(
       gitSchema.oneOf?.every(
         (branch) => branch.additionalProperties === false,
@@ -422,7 +420,7 @@ describe("direct versus MCP behavior parity", () => {
     );
   });
 
-  test("matches final Git state for direct and MCP commit/push mutations", async () => {
+  test("matches final Git state for direct and MCP commits", async () => {
     const directRepo = await fixture();
     const mcpRepo = await fixture();
     const { client } = await connect(mcpRepo.root);
@@ -445,27 +443,8 @@ describe("direct versus MCP behavior parity", () => {
         addAll: true,
       },
     });
-    const directPush = await dispatchTool({
-      name: "git",
-      input: {
-        subcommand: "push",
-        remote: directRepo.bareRemotePath,
-        branch: "agent-step2",
-      },
-    }, { worktreeRoot: directRepo.worktreePath });
-    const mcpPush = await client.call({
-      name: "git",
-      input: {
-        subcommand: "push",
-        remote: mcpRepo.bareRemotePath,
-        branch: "agent-step2",
-      },
-    });
-
     expect(directCommit.success).toBe(true);
     expect(mcpCommit.success).toBe(true);
-    expect(directPush.success).toBe(true);
-    expect(mcpPush.success).toBe(true);
 
     const [directStatus, mcpStatus, directFile, mcpFile] = await Promise.all([
       gitOutput(directRepo.worktreePath, "status", "--porcelain"),
@@ -476,19 +455,6 @@ describe("direct versus MCP behavior parity", () => {
     expect(mcpStatus).toBe(directStatus);
     expect(mcpFile).toBe(directFile);
 
-    for (const repo of [directRepo, mcpRepo]) {
-      const [head, remoteHead] = await Promise.all([
-        gitOutput(repo.worktreePath, "rev-parse", "HEAD"),
-        gitOutput(
-          repo.worktreePath,
-          "--git-dir",
-          repo.bareRemotePath,
-          "rev-parse",
-          "refs/heads/agent-step2",
-        ),
-      ]);
-      expect(remoteHead).toBe(head);
-    }
   });
 
   test("matches dispatcher failures for every tool family", async () => {

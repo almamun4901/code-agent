@@ -9,17 +9,12 @@
 
 ## Current state (updated: 2026-07-28)
 
-**Overall:** Steps 0–4 are complete. Step 5 is in progress on
-`feat/e2b-sandbox`: the PreToolUse naming alignment, pinned E2B SDK,
-remote stdio transport, runtime template definition, Git-bundle worktree
-provisioning, lifecycle cleanup, and offline/live-test harnesses are
-implemented locally. The focused offline sandbox suite reports 24 pass and
-0 fail. The corrected pinned template and focused live MCP transport gate now
-pass. The full six-tool isolation gate also passes, including the randomized
-host-only sentinel and remote positive control. Every completed live run has
-been followed by an empty E2B sandbox listing. Review, documentation, scoped
-commits, and the feature-branch push are complete. Merge and merged-main
-verification remain.
+**Overall:** Steps 0–5 are complete. Step 5 landed on `main` with the pinned
+E2B runtime, remote stdio transport, exact Git-bundle worktrees, owned cleanup,
+and opt-in live gates. Merged-main verification reports 121 offline tests and
+24 focused sandbox tests passing, both live E2B gates passing, and zero running
+sandboxes afterward. Step 6 owns the deferred command, traversal, symlink, and
+environment defenses.
 
 **Step-by-step:**
 
@@ -30,7 +25,7 @@ verification remain.
 | 2 — Real tools, no sandbox | complete | Six tools, dispatcher, capped results, disposable repo harness |
 | 3 — Plan schema + persistence | complete | Repeated hard-kill recovery passed without committed-read replay |
 | 4 — MCP transport (stdio) | complete | Six tools have canonical direct/MCP parity; lifecycle and mutation checks pass |
-| 5 — Sandbox (E2B) | in progress | Acceptance, review, documentation, commits, and branch push pass; merge verification remains |
+| 5 — Sandbox (E2B) | complete | Six remote tools, exact task worktree, host-isolation sentinel, process-loss handling, and cleanup verified on merged `main` |
 | 6 — PreToolUse safety hook | not started | — |
 | 7 — TUI (Ink) | not started | — |
 | 8 — Remaining hooks + budget | not started | — |
@@ -110,7 +105,7 @@ verification remain.
 - [x] Run the full live six-tool isolation gate.
 - [x] Complete Step 5 review, documentation, scoped commits, and feature-branch
   push.
-- [ ] Merge and complete merged-main verification.
+- [x] Merge and complete merged-main verification.
 
 ---
 
@@ -641,6 +636,28 @@ verification remain.
 - Next session should start with: Commit the synchronized documentation, push
   the feature branch, merge into updated `main`, reverify the merged result,
   then finalize Step 5 status and push `main`.
+
+### 2026-07-28 — Sandbox branch landing and merged-main verification
+
+- What was done: Corrected the renamed feature-branch references and current
+  acceptance counts, pushed `feat/e2b-sandbox`, updated `main`, merged the
+  remaining documentation correction as `61af25f`, and pushed verified
+  `main`. Created `docs/sandbox-finalization` for the final roadmap status.
+- What broke / had to be reworked: `origin/main` already contained the feature
+  merge, so local `main` fast-forwarded to that state before merging only the
+  newer documentation correction. No code conflict or test failure occurred.
+- Decisions made this session: Preserve the reviewed feature commits and use a
+  separate documentation-finalization branch rather than edit status directly
+  on `main`.
+- Current status of the step in progress: Step 5 is complete. On merged
+  `main`, the offline suite passes 121 tests with 3 opt-in tests skipped, the
+  focused sandbox suite passes 24 tests, the live transport gate passes, the
+  live six-tool isolation gate passes all 25 assertions, and E2B reports zero
+  running sandboxes.
+- Next session should start with: Step 6 planning and engineering review.
+  Keep destructive-command, traversal, symlink, and environment defenses in
+  Step 6, and resolve ADR 0009 mutation reconciliation before any live model
+  receives real mutating tools.
 
 ---
 

@@ -8,11 +8,10 @@ creation.
 
 ## Current status
 
-Steps 0–4 are complete and Step 5 has passed its implementation acceptance
-gates pending branch landing. The deterministic fake loop, live Claude loop with
-fake tools, six real local tools, crash-safe plan persistence, and MCP stdio
-transport have passed their acceptance gates. The same six tools now execute
-inside one short-lived E2B worktree per task.
+Steps 0–5 are complete. The deterministic fake loop, live Claude loop with fake
+tools, six real local tools, crash-safe plan persistence, MCP stdio transport,
+and isolated E2B execution have passed their acceptance gates. The six tools
+execute inside one short-lived E2B worktree per task.
 The real tools have only been exercised by deterministic tests against
 disposable repositories; no model has received them.
 

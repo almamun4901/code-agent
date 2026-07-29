@@ -28,11 +28,11 @@ merge sequence is finished. Never silently reuse a branch from an earlier step.
 
 ### Branch and commit naming
 
-- Never include `codex`, an agent name, or an AI/vendor prefix in a branch
-  name. Name branches for the actual change using
-  `<type>/step-<number>-<short-description>`, for example
-  `feat/step-5-e2b-sandbox`, `fix/mcp-client-close`, or
-  `docs/step-4-finalization`.
+- Never include `codex`, `phase`, `step`, roadmap numbers, an agent name, or
+  an AI/vendor prefix in a repository name, branch name, or commit message.
+- Name branches for the actual change using `<type>/<short-description>`, for
+  example `feat/e2b-sandbox`, `fix/mcp-client-close`, or
+  `docs/sandbox-finalization`.
 - Use a valid Conventional Commit message:
   `<type>(<optional-scope>): <imperative summary>`.
 - Select the type from the actual primary change:

@@ -14,6 +14,7 @@ import {
   dispatchTool,
 } from "../src/tools/dispatcher";
 import { defaultPreToolUse } from "../src/tools/pretooluse-policy";
+import { shellCommand } from "../src/tools/run-shell";
 import type {
   TokenCodec,
   ToolCall,
@@ -729,6 +730,25 @@ describe("ripgrep", () => {
 });
 
 describe("run_shell", () => {
+  test("always selects the fixed runner wrapper for E2B task roots", () => {
+    expect(
+      shellCommand(
+        "/workspace/tasks/probe",
+        ".",
+        10_000,
+        "id -un",
+        "",
+      ).command,
+    ).toEqual([
+      "sudo",
+      "/usr/local/sbin/agent-run-shell",
+      "/workspace/tasks/probe",
+      ".",
+      "10000",
+      "id -un",
+    ]);
+  });
+
   test("captures stdout, stderr, nonzero exit, command-not-found, and timeout", async () => {
     const repo = await fixture();
     const mixed = await dispatch(repo, {

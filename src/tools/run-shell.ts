@@ -5,6 +5,8 @@ import { runProcess } from "./process";
 
 const MAX_SHELL_TIMEOUT_MS = 30_000;
 const SAFE_PATH = "/usr/local/bin:/usr/bin:/bin";
+const E2B_TASKS_ROOT = "/workspace/tasks";
+const E2B_SHELL_WRAPPER = "/usr/local/sbin/agent-run-shell";
 
 function shellEnvironment(repoPath: string): Record<string, string> {
   return {
@@ -35,17 +37,12 @@ export async function runShellTool(input: RunShellInput): Promise<RawToolResult>
     );
   }
 
-  const wrapper = process.env.AGENT_SHELL_WRAPPER?.trim();
-  const command = wrapper
-    ? [
-        "sudo",
-        wrapper,
-        repoPath,
-        input.cwd,
-        String(timeoutMs),
-        input.command,
-      ]
-    : ["/bin/sh", "-c", input.command];
+  const { command, wrapper } = shellCommand(
+    repoPath,
+    input.cwd,
+    timeoutMs,
+    input.command,
+  );
   const result = await runProcess(command, wrapper ? repoPath : cwd, {
     timeoutMs: wrapper ? timeoutMs + 1_500 : timeoutMs,
     env: shellEnvironment(repoPath),
@@ -62,5 +59,36 @@ export async function runShellTool(input: RunShellInput): Promise<RawToolResult>
       timedOut: result.timedOut || result.exitCode === 124,
       cwd: input.cwd,
     },
+  };
+}
+
+export function shellCommand(
+  repoPath: string,
+  cwd: string,
+  timeoutMs: number,
+  requestedCommand: string,
+  configuredWrapper = process.env.AGENT_SHELL_WRAPPER?.trim(),
+): {
+  command: string[];
+  wrapper: string | undefined;
+} {
+  const wrapper =
+    configuredWrapper ||
+    (repoPath.startsWith(`${E2B_TASKS_ROOT}/`)
+      ? E2B_SHELL_WRAPPER
+      : undefined);
+
+  return {
+    command: wrapper
+      ? [
+          "sudo",
+          wrapper,
+          repoPath,
+          cwd,
+          String(timeoutMs),
+          requestedCommand,
+        ]
+      : ["/bin/sh", "-c", requestedCommand],
+    wrapper,
   };
 }

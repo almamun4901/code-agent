@@ -73,7 +73,7 @@ async function applySandboxPermissions(
   layout: ProvisionTaskLayout,
   remoteRepoPath: string,
 ): Promise<void> {
-  const taskGroup = process.env.AGENT_TASK_GROUP?.trim();
+  const taskGroup = taskGroupForLayout(layout);
   if (!taskGroup) return;
 
   await runFixed("chmod", ["-R", "go-rwx", layout.seedPath]);
@@ -92,6 +92,21 @@ async function applySandboxPermissions(
   await runFixed("chmod", ["3770", remoteRepoPath]);
   await runFixed("chgrp", ["agent", `${remoteRepoPath}/.git`]);
   await runFixed("chmod", ["0600", `${remoteRepoPath}/.git`]);
+}
+
+export function taskGroupForLayout(
+  layout: ProvisionTaskLayout,
+  configuredGroup = process.env.AGENT_TASK_GROUP?.trim(),
+): string | undefined {
+  if (configuredGroup) return configuredGroup;
+  if (
+    layout.workspaceRoot === "/workspace" &&
+    layout.seedPath === "/workspace/seed" &&
+    layout.tasksRoot === "/workspace/tasks"
+  ) {
+    return "task";
+  }
+  return undefined;
 }
 
 export async function provisionTask(

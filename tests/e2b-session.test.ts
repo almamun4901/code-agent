@@ -22,7 +22,10 @@ import {
   RepositoryBundleError,
   createRepositoryBundle,
 } from "../src/sandbox/repository-bundle";
-import { provisionTask } from "../src/sandbox/provision-task";
+import {
+  provisionTask,
+  taskGroupForLayout,
+} from "../src/sandbox/provision-task";
 import {
   createTemporaryRepository,
   type TemporaryRepository,
@@ -66,6 +69,19 @@ async function git(cwd: string, ...args: string[]): Promise<string> {
 }
 
 describe("repository bundle intake", () => {
+  test("uses the fixed shared group for the E2B filesystem layout", () => {
+    expect(
+      taskGroupForLayout(
+        {
+          workspaceRoot: "/workspace",
+          seedPath: "/workspace/seed",
+          tasksRoot: "/workspace/tasks",
+        },
+        "",
+      ),
+    ).toBe("task");
+  });
+
   test("bundles the exact clean attached revision and cleans up idempotently", async () => {
     const repository = await fixture();
     const bundle = await createRepositoryBundle(repository.worktreePath);

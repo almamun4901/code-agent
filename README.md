@@ -154,6 +154,11 @@ The [Step 5 manual terminal test guide](docs/testing/step-5-manual-terminal-test
 lists the safe execution order, expected results, explicit live E2B gates, and
 exact-ID cleanup procedure. Live sandbox tests remain opt-in.
 
+The [Step 6 manual safety test guide](docs/testing/step-6-manual-safety-tests.md)
+adds the PreToolUse red-team matrix, two-identity runtime checks, network and
+environment isolation gates, process cleanup checks, and a reusable evidence
+record. Its live cases remain opt-in and must be run one at a time.
+
 `bun run phase1` and `bun run test:integration` send the synthetic Phase 1
 prompt, plan state, and canned tool results to Anthropic. Standard `bun test`
 keeps the live integration test skipped even when a key is present.

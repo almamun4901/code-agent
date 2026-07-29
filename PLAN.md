@@ -197,7 +197,7 @@ order above.
 | 2 — Real tools, no sandbox    | complete                                              |
 | 3 — Plan schema + persistence | complete                                              |
 | 4 — MCP transport (stdio)     | complete                                              |
-| 5 — Sandbox (E2B)             | not started                                           |
+| 5 — Sandbox (E2B)             | in progress — acceptance gates pass; landing pending |
 | 6 — PreToolUse safety hook    | not started                                           |
 | 7 — TUI (Ink)                 | not started                                           |
 | 8 — Remaining hooks + budget  | not started                                           |

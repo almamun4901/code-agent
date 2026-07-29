@@ -48,7 +48,7 @@ test.skipIf(!LIVE_ENABLED)(
     const transport = new E2bStdioTransport({
       commands: e2bCommandController(sandbox.commands),
       command:
-        "bun run /opt/agent/src/mcp/stdio-server.ts --development-root /workspace/tasks",
+        "bun run /opt/agent/src/mcp/stdio-server.ts --worktree-root /workspace/tasks/probe --allowed-parent /workspace/tasks",
       cwd: "/opt/agent",
     });
     const client = await McpToolClient.connect(transport);
@@ -66,7 +66,6 @@ test.skipIf(!LIVE_ENABLED)(
       await client.call({
         name: "read_file",
         input: {
-          repoPath: "/workspace/tasks/probe",
           path: "probe.txt",
         },
       }),
@@ -84,7 +83,6 @@ test.skipIf(!LIVE_ENABLED)(
       client.call({
         name: "read_file",
         input: {
-          repoPath: "/workspace/tasks/probe",
           path: "probe.txt",
         },
       }),

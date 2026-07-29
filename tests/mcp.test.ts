@@ -14,7 +14,8 @@ import {
   McpResultValidationError,
   McpToolClient,
 } from "../src/mcp/client";
-import { parseDevelopmentRoot } from "../src/mcp/stdio-server";
+import { createMcpToolServer } from "../src/mcp/server";
+import { parseWorktreeBoundary } from "../src/mcp/stdio-server";
 import type { ToolCall, ToolResult } from "../src/tools/contracts";
 import { dispatchTool } from "../src/tools/dispatcher";
 import { serializedTokenCount } from "../src/tools/token-budget";
@@ -52,7 +53,13 @@ function stdioTransport(
 ): StdioClientTransport {
   return new StdioClientTransport({
     command: process.execPath,
-    args: [serverPath, "--development-root", developmentRoot],
+    args: [
+      serverPath,
+      "--worktree-root",
+      path.join(developmentRoot, "worktree"),
+      "--allowed-parent",
+      developmentRoot,
+    ],
     cwd: path.dirname(serverPath),
     env: {
       ...getDefaultEnvironment(),
@@ -87,8 +94,8 @@ function canonical(result: ToolResult): ToolResult {
 
 const expectedDiscovery = {
   read_file: {
-    properties: ["endLine", "path", "repoPath", "startLine"],
-    required: ["path", "repoPath"],
+    properties: ["endLine", "path", "startLine"],
+    required: ["path"],
     annotations: [true, false, true, false],
   },
   edit_file: {
@@ -99,9 +106,8 @@ const expectedDiscovery = {
       "oldText",
       "path",
       "replaceAll",
-      "repoPath",
     ],
-    required: ["mode", "newText", "oldText", "path", "repoPath"],
+    required: ["mode", "newText", "oldText", "path"],
     annotations: [false, true, false, false],
   },
   ripgrep: {
@@ -111,19 +117,18 @@ const expectedDiscovery = {
       "glob",
       "path",
       "pattern",
-      "repoPath",
     ],
-    required: ["pattern", "repoPath"],
+    required: ["pattern"],
     annotations: [true, false, true, false],
   },
   tree_sitter_symbols: {
-    properties: ["path", "repoPath"],
-    required: ["path", "repoPath"],
+    properties: ["path"],
+    required: ["path"],
     annotations: [true, false, true, false],
   },
   run_shell: {
-    properties: ["command", "cwd", "repoPath", "timeoutMs"],
-    required: ["command", "cwd", "repoPath"],
+    properties: ["command", "cwd", "timeoutMs"],
+    required: ["command", "cwd"],
     annotations: [false, true, false, true],
   },
   git: {
@@ -133,11 +138,10 @@ const expectedDiscovery = {
       "message",
       "path",
       "remote",
-      "repoPath",
       "staged",
       "subcommand",
     ],
-    required: ["repoPath", "subcommand"],
+    required: ["subcommand"],
     annotations: [false, true, false, true],
   },
 } as const;
@@ -148,7 +152,7 @@ async function expectParity(
   call: ToolCall,
 ): Promise<ToolResult> {
   const direct = canonical(
-    await dispatchTool(call, { developmentRoot: repo.root }),
+    await dispatchTool(call, { worktreeRoot: repo.worktreePath }),
   );
   const transported = await client.call(call);
   expect(transported).toEqual(direct);
@@ -247,7 +251,7 @@ describe("MCP stdio discovery and protocol boundary", () => {
     });
     const malformed = await rawClient.callTool({
       name: "read_file",
-      arguments: { path: "src/sample.ts" },
+      arguments: {},
     });
 
     expect(unknown.isError).toBe(true);
@@ -257,7 +261,7 @@ describe("MCP stdio discovery and protocol boundary", () => {
     const { client } = await connect(repo.root);
     await expect(client.call({
       name: "read_file",
-      input: { path: "src/sample.ts" },
+      input: {},
     } as never)).rejects.toBeInstanceOf(McpResultValidationError);
     expect((await client.listTools()).tools).toHaveLength(6);
   });
@@ -271,7 +275,6 @@ describe("direct versus MCP behavior parity", () => {
     await expectParity(repo, client, {
       name: "read_file",
       input: {
-        repoPath: repo.worktreePath,
         path: "src/sample.ts",
         startLine: 1,
         endLine: 4,
@@ -280,7 +283,6 @@ describe("direct versus MCP behavior parity", () => {
     await expectParity(repo, client, {
       name: "ripgrep",
       input: {
-        repoPath: repo.worktreePath,
         pattern: "Greeter",
         path: "src",
         fixedString: true,
@@ -289,7 +291,6 @@ describe("direct versus MCP behavior parity", () => {
     await expectParity(repo, client, {
       name: "ripgrep",
       input: {
-        repoPath: repo.worktreePath,
         pattern: "not-present",
         path: "src",
         fixedString: true,
@@ -297,19 +298,18 @@ describe("direct versus MCP behavior parity", () => {
     });
     await expectParity(repo, client, {
       name: "tree_sitter_symbols",
-      input: { repoPath: repo.worktreePath, path: "src/sample.ts" },
+      input: { path: "src/sample.ts" },
     });
     await expectParity(repo, client, {
       name: "run_shell",
       input: {
-        repoPath: repo.worktreePath,
         cwd: ".",
         command: "printf 'out'; printf 'err' >&2; exit 7",
       },
     });
     await expectParity(repo, client, {
       name: "git",
-      input: { repoPath: repo.worktreePath, subcommand: "status" },
+      input: { subcommand: "status" },
     });
 
     await repo.write(
@@ -318,13 +318,12 @@ describe("direct versus MCP behavior parity", () => {
     );
     const dirtyStatus = await expectParity(repo, client, {
       name: "git",
-      input: { repoPath: repo.worktreePath, subcommand: "status" },
+      input: { subcommand: "status" },
     });
     expect(dirtyStatus.metadata?.clean).toBe(false);
     await expectParity(repo, client, {
       name: "git",
       input: {
-        repoPath: repo.worktreePath,
         subcommand: "diff",
         path: "src/sample.ts",
       },
@@ -346,14 +345,14 @@ describe("direct versus MCP behavior parity", () => {
       await dispatchTool(
         {
           name: "edit_file",
-          input: { repoPath: directRepo.worktreePath, ...previewInput },
+          input: { ...previewInput },
         },
-        { developmentRoot: directRepo.root },
+        { worktreeRoot: directRepo.worktreePath },
       ),
     );
     const mcpPreview = await client.call({
       name: "edit_file",
-      input: { repoPath: mcpRepo.worktreePath, ...previewInput },
+      input: { ...previewInput },
     });
     expect(mcpPreview).toEqual(directPreview);
 
@@ -363,19 +362,17 @@ describe("direct versus MCP behavior parity", () => {
         {
           name: "edit_file",
           input: {
-            repoPath: directRepo.worktreePath,
             ...previewInput,
             mode: "apply",
             baseVersion,
           },
         },
-        { developmentRoot: directRepo.root },
+        { worktreeRoot: directRepo.worktreePath },
       ),
     );
     const mcpApply = await client.call({
       name: "edit_file",
       input: {
-        repoPath: mcpRepo.worktreePath,
         ...previewInput,
         mode: "apply",
         baseVersion,
@@ -399,15 +396,13 @@ describe("direct versus MCP behavior parity", () => {
     const direct = await dispatchTool({
       name: "run_shell",
       input: {
-        repoPath: directRepo.worktreePath,
         cwd: ".",
         command,
       },
-    }, { developmentRoot: directRepo.root });
+    }, { worktreeRoot: directRepo.worktreePath });
     const transported = await client.call({
       name: "run_shell",
       input: {
-        repoPath: mcpRepo.worktreePath,
         cwd: ".",
         command,
       },
@@ -437,16 +432,14 @@ describe("direct versus MCP behavior parity", () => {
     const directCommit = await dispatchTool({
       name: "git",
       input: {
-        repoPath: directRepo.worktreePath,
         subcommand: "commit",
         message: "add new file over MCP",
         addAll: true,
       },
-    }, { developmentRoot: directRepo.root });
+    }, { worktreeRoot: directRepo.worktreePath });
     const mcpCommit = await client.call({
       name: "git",
       input: {
-        repoPath: mcpRepo.worktreePath,
         subcommand: "commit",
         message: "add new file over MCP",
         addAll: true,
@@ -455,16 +448,14 @@ describe("direct versus MCP behavior parity", () => {
     const directPush = await dispatchTool({
       name: "git",
       input: {
-        repoPath: directRepo.worktreePath,
         subcommand: "push",
         remote: directRepo.bareRemotePath,
         branch: "agent-step2",
       },
-    }, { developmentRoot: directRepo.root });
+    }, { worktreeRoot: directRepo.worktreePath });
     const mcpPush = await client.call({
       name: "git",
       input: {
-        repoPath: mcpRepo.worktreePath,
         subcommand: "push",
         remote: mcpRepo.bareRemotePath,
         branch: "agent-step2",
@@ -506,12 +497,11 @@ describe("direct versus MCP behavior parity", () => {
     const failures: ToolCall[] = [
       {
         name: "read_file",
-        input: { repoPath: repo.worktreePath, path: "missing.txt" },
+        input: { path: "missing.txt" },
       },
       {
         name: "edit_file",
         input: {
-          repoPath: repo.worktreePath,
           path: "src/sample.ts",
           mode: "apply",
           oldText: "Greeter",
@@ -521,16 +511,15 @@ describe("direct versus MCP behavior parity", () => {
       },
       {
         name: "ripgrep",
-        input: { repoPath: repo.worktreePath, pattern: "[" },
+        input: { pattern: "[" },
       },
       {
         name: "tree_sitter_symbols",
-        input: { repoPath: repo.worktreePath, path: "repeat.txt" },
+        input: { path: "repeat.txt" },
       },
       {
         name: "run_shell",
         input: {
-          repoPath: repo.worktreePath,
           cwd: "missing",
           command: "pwd",
         },
@@ -538,7 +527,6 @@ describe("direct versus MCP behavior parity", () => {
       {
         name: "git",
         input: {
-          repoPath: repo.worktreePath,
           subcommand: "commit",
           message: "empty",
           addAll: false,
@@ -554,7 +542,6 @@ describe("direct versus MCP behavior parity", () => {
     const timeout = await expectParity(repo, client, {
       name: "run_shell",
       input: {
-        repoPath: repo.worktreePath,
         cwd: ".",
         command: "sleep 1",
         timeoutMs: 10,
@@ -566,7 +553,6 @@ describe("direct versus MCP behavior parity", () => {
     const invalidTimeout = await expectParity(repo, client, {
       name: "run_shell",
       input: {
-        repoPath: repo.worktreePath,
         cwd: ".",
         command: "pwd",
         timeoutMs: 30_001,
@@ -575,21 +561,21 @@ describe("direct versus MCP behavior parity", () => {
     expect(invalidTimeout.metadata?.code).toBe("INVALID_TIMEOUT");
   });
 
-  test("matches outside-root rejection without weakening containment", async () => {
+  test("binds every request to the server's immutable worktree root", async () => {
     const allowed = await fixture();
-    const outside = await fixture();
     const { client } = await connect(allowed.root);
     const call: ToolCall = {
       name: "read_file",
-      input: { repoPath: outside.worktreePath, path: "src/sample.ts" },
+      input: { path: "src/sample.ts" },
     };
 
     const direct = canonical(
-      await dispatchTool(call, { developmentRoot: allowed.root }),
+      await dispatchTool(call, { worktreeRoot: allowed.worktreePath }),
     );
     const transported = await client.call(call);
     expect(transported).toEqual(direct);
-    expect(transported.metadata?.code).toBe("OUTSIDE_DEVELOPMENT_ROOT");
+    expect(transported.success).toBe(true);
+    expect(transported.output).toContain("export class Greeter");
   });
 
   test("preserves the complete serialized token budget through MCP", async () => {
@@ -597,7 +583,7 @@ describe("direct versus MCP behavior parity", () => {
     const { client } = await connect(repo.root);
     const result = await expectParity(repo, client, {
       name: "read_file",
-      input: { repoPath: repo.worktreePath, path: "repeat.txt" },
+      input: { path: "repeat.txt" },
     });
 
     expect(result.truncated).toBe(true);
@@ -607,6 +593,38 @@ describe("direct versus MCP behavior parity", () => {
 });
 
 describe("MCP stdio lifecycle", () => {
+  test("serializes concurrent tool execution within one server session", async () => {
+    const repo = await fixture();
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    let active = 0;
+    let maximumActive = 0;
+    const server = createMcpToolServer({
+      worktreeRoot: repo.worktreePath,
+      preToolUse: async () => {
+        active += 1;
+        maximumActive = Math.max(maximumActive, active);
+        await Bun.sleep(20);
+        active -= 1;
+        return { outcome: "allow" };
+      },
+    });
+    await server.connect(serverTransport);
+    const client = await McpToolClient.connect(clientTransport);
+    mcpClients.push(client);
+
+    const calls = Array.from({ length: 3 }, () =>
+      client.call({
+        name: "read_file",
+        input: { path: "src/sample.ts" },
+      })
+    );
+    const results = await Promise.all(calls);
+
+    expect(results.every((result) => result.success)).toBe(true);
+    expect(maximumActive).toBe(1);
+  });
+
   test("throws for malformed or contradictory server results", async () => {
     const responses = [
       {
@@ -646,23 +664,55 @@ describe("MCP stdio lifecycle", () => {
 
       await expect(client.call({
         name: "read_file",
-        input: { repoPath: "/unused", path: "unused" },
+        input: { path: "unused" },
       })).rejects.toBeInstanceOf(McpResultValidationError);
       await client.close();
       mcpClients.splice(mcpClients.indexOf(client), 1);
     }
   });
 
-  test("rejects relative, missing, and non-directory development roots", async () => {
+  test("rejects invalid worktree boundaries", async () => {
+    const repo = await fixture();
     await expect(
-      parseDevelopmentRoot(["--development-root", "relative"]),
+      parseWorktreeBoundary([
+        "--worktree-root",
+        "relative",
+        "--allowed-parent",
+        repo.root,
+      ]),
     ).rejects.toThrow("must be absolute");
     await expect(
-      parseDevelopmentRoot(["--development-root", "/definitely/missing/root"]),
+      parseWorktreeBoundary([
+        "--worktree-root",
+        "/definitely/missing/root",
+        "--allowed-parent",
+        repo.root,
+      ]),
     ).rejects.toThrow("does not exist");
     await expect(
-      parseDevelopmentRoot(["--development-root", import.meta.path]),
+      parseWorktreeBoundary([
+        "--worktree-root",
+        import.meta.path,
+        "--allowed-parent",
+        repo.root,
+      ]),
     ).rejects.toThrow("not a directory");
+    await expect(
+      parseWorktreeBoundary([
+        "--worktree-root",
+        repo.root,
+        "--allowed-parent",
+        repo.root,
+      ]),
+    ).rejects.toThrow("must be a child");
+    await expect(
+      parseWorktreeBoundary([
+        "--worktree-root",
+        repo.worktreePath,
+        "--allowed-parent",
+        repo.worktreePath,
+      ]),
+    ).rejects.toThrow("must be a child");
   });
 
   test("fails startup without a development root using stderr only", async () => {
@@ -711,7 +761,7 @@ describe("MCP stdio lifecycle", () => {
     const outcome = await Promise.race([
       client.call({
         name: "read_file",
-        input: { repoPath: repo.worktreePath, path: "src/sample.ts" },
+        input: { path: "src/sample.ts" },
       }).then(
         () => "resolved",
         () => "rejected",

@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult, ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import type {
   DispatcherContext,
-  GitInput,
+  ModelToolRequest,
   ToolResult,
 } from "../tools/contracts";
 import { dispatchTool } from "../tools/dispatcher";
@@ -44,6 +44,25 @@ function toMcpResult(result: ToolResult): CallToolResult {
 export function createMcpToolServer(
   context: DispatcherContext,
 ): McpServer {
+  let executionTail: Promise<void> = Promise.resolve();
+  const serializedContext: DispatcherContext = {
+    ...context,
+    executionQueue: context.executionQueue ?? {
+      async run<T>(operation: () => Promise<T>): Promise<T> {
+        const previous = executionTail;
+        let release!: () => void;
+        executionTail = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        await previous;
+        try {
+          return await operation();
+        } finally {
+          release();
+        }
+      },
+    },
+  };
   const server = new McpServer({
     name: "terminal-native-coding-agent-tools",
     version: "0.1.0",
@@ -57,7 +76,7 @@ export function createMcpToolServer(
       inputSchema: readFileInputSchema,
       annotations: readOnlyAnnotations,
     },
-    async (input) => toMcpResult(await dispatchTool({ name: "read_file", input }, context)),
+    async (input) => toMcpResult(await dispatchTool({ name: "read_file", input }, serializedContext)),
   );
 
   server.registerTool(
@@ -69,7 +88,7 @@ export function createMcpToolServer(
       inputSchema: editFileInputSchema,
       annotations: mutatingAnnotations,
     },
-    async (input) => toMcpResult(await dispatchTool({ name: "edit_file", input }, context)),
+    async (input) => toMcpResult(await dispatchTool({ name: "edit_file", input }, serializedContext)),
   );
 
   server.registerTool(
@@ -80,7 +99,7 @@ export function createMcpToolServer(
       inputSchema: ripgrepInputSchema,
       annotations: readOnlyAnnotations,
     },
-    async (input) => toMcpResult(await dispatchTool({ name: "ripgrep", input }, context)),
+    async (input) => toMcpResult(await dispatchTool({ name: "ripgrep", input }, serializedContext)),
   );
 
   server.registerTool(
@@ -93,7 +112,7 @@ export function createMcpToolServer(
     },
     async (input) =>
       toMcpResult(
-        await dispatchTool({ name: "tree_sitter_symbols", input }, context),
+        await dispatchTool({ name: "tree_sitter_symbols", input }, serializedContext),
       ),
   );
 
@@ -106,7 +125,7 @@ export function createMcpToolServer(
       annotations: openWorldAnnotations,
     },
     async (input) =>
-      toMcpResult(await dispatchTool({ name: "run_shell", input }, context)),
+      toMcpResult(await dispatchTool({ name: "run_shell", input }, serializedContext)),
   );
 
   server.registerTool(
@@ -120,8 +139,14 @@ export function createMcpToolServer(
     async (input) =>
       toMcpResult(
         await dispatchTool(
-          { name: "git", input: input as GitInput },
-          context,
+          {
+            name: "git",
+            input: input as Extract<
+              ModelToolRequest,
+              { name: "git" }
+            >["input"],
+          },
+          serializedContext,
         ),
       ),
   );

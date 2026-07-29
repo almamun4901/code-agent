@@ -35,10 +35,10 @@ async function fixture(): Promise<TemporaryRepository> {
 async function dispatch(
   repo: TemporaryRepository,
   call: ToolCall,
-  overrides: Parameters<typeof dispatchTool>[1] = {},
+  overrides: Partial<Parameters<typeof dispatchTool>[1]> = {},
 ): Promise<ToolResult> {
   return dispatchTool(call, {
-    developmentRoot: repo.root,
+    worktreeRoot: repo.worktreePath,
     ...overrides,
   });
 }
@@ -108,11 +108,12 @@ describe("dispatcher and development containment", () => {
       repo,
       {
         name: "read_file",
-        input: { repoPath: repo.worktreePath, path: "src/sample.ts" },
+        input: { path: "src/sample.ts" },
       },
       {
         preToolUse: async () => {
           policyRan = true;
+          return { outcome: "allow" };
         },
       },
     );
@@ -132,7 +133,6 @@ describe("dispatcher and development containment", () => {
       {
         name: "edit_file",
         input: {
-          repoPath: repo.worktreePath,
           path: "src/sample.ts",
           mode: "apply",
           oldText: "Greeter",
@@ -142,7 +142,11 @@ describe("dispatcher and development containment", () => {
       },
       {
         preToolUse: async () => {
-          throw new Error("blocked by test policy");
+          return {
+            outcome: "deny",
+            code: "TEST_POLICY_DENIED",
+            reason: "blocked by test policy",
+          };
         },
       },
     );
@@ -152,22 +156,44 @@ describe("dispatcher and development containment", () => {
       .toBe(original);
   });
 
-  test("rejects an unknown tool and a repository outside the disposable root", async () => {
+  test("fails closed when the policy hook throws", async () => {
+    const repo = await fixture();
+    const result = await dispatch(
+      repo,
+      {
+        name: "read_file",
+        input: { path: "src/sample.ts" },
+      },
+      {
+        preToolUse: async () => {
+          throw new Error("policy backend unavailable");
+        },
+      },
+    );
+
+    expect(result).toMatchObject({
+      success: false,
+      metadata: { code: "POLICY_FAILURE" },
+    });
+    expect(result.output).toContain("policy backend unavailable");
+  });
+
+  test("rejects an unknown tool and requires an immutable worktree root", async () => {
     const repo = await fixture();
     const unknown = await dispatch(
       repo,
-      { name: "unknown", input: { repoPath: repo.worktreePath } } as never,
+      { name: "unknown", input: {} } as never,
     );
-    const outside = await dispatchTool(
+    const missingRoot = await dispatchTool(
       {
         name: "read_file",
-        input: { repoPath: process.cwd(), path: "package.json" },
+        input: { path: "package.json" },
       },
-      { developmentRoot: repo.root },
+      {} as never,
     );
 
     expect(unknown.metadata?.code).toBe("UNKNOWN_TOOL");
-    expect(outside.metadata?.code).toBe("OUTSIDE_DEVELOPMENT_ROOT");
+    expect(missingRoot.metadata?.code).toBe("MISSING_WORKTREE_ROOT");
   });
 
   test("rejects malformed and unknown calls before policy or execution", async () => {
@@ -176,9 +202,10 @@ describe("dispatcher and development containment", () => {
     const malformed = await dispatchTool(
       { name: "read_file" } as never,
       {
-        developmentRoot: repo.root,
+        worktreeRoot: repo.worktreePath,
         preToolUse: async () => {
           policyRan = true;
+          return { outcome: "allow" };
         },
       },
     );
@@ -186,7 +213,6 @@ describe("dispatcher and development containment", () => {
       {
         name: "edit_file",
         input: {
-          repoPath: repo.worktreePath,
           path: "src/sample.ts",
           mode: "write",
           oldText: "Greeter",
@@ -194,21 +220,23 @@ describe("dispatcher and development containment", () => {
         },
       } as never,
       {
-        developmentRoot: repo.root,
+        worktreeRoot: repo.worktreePath,
         preToolUse: async () => {
           policyRan = true;
+          return { outcome: "allow" };
         },
       },
     );
     const unknown = await dispatchTool(
       {
         name: "unknown",
-        input: { repoPath: repo.worktreePath },
+        input: {},
       } as never,
       {
-        developmentRoot: repo.root,
+        worktreeRoot: repo.worktreePath,
         preToolUse: async () => {
           policyRan = true;
+          return { outcome: "allow" };
         },
       },
     );
@@ -223,7 +251,7 @@ describe("dispatcher and development containment", () => {
     const repo = await fixture();
     const result = await dispatch(repo, {
       name: "read_file",
-      input: { repoPath: repo.worktreePath, path: "../seed/package.json" },
+      input: { path: "../seed/package.json" },
     });
 
     expect(result.metadata?.code).toBe("INVALID_PATH");
@@ -236,7 +264,6 @@ describe("read_file", () => {
     const ranged = await dispatch(repo, {
       name: "read_file",
       input: {
-        repoPath: repo.worktreePath,
         path: "src/sample.ts",
         startLine: 2,
         endLine: 3,
@@ -249,7 +276,7 @@ describe("read_file", () => {
 
     const empty = await dispatch(repo, {
       name: "read_file",
-      input: { repoPath: repo.worktreePath, path: "empty.txt" },
+      input: { path: "empty.txt" },
     });
     expect(empty.success).toBe(true);
     expect(empty.output).toBe("1: ");
@@ -260,24 +287,23 @@ describe("read_file", () => {
     const results = await Promise.all([
       dispatch(repo, {
         name: "read_file",
-        input: { repoPath: repo.worktreePath, path: "missing.txt" },
+        input: { path: "missing.txt" },
       }),
       dispatch(repo, {
         name: "read_file",
-        input: { repoPath: repo.worktreePath, path: "binary.bin" },
+        input: { path: "binary.bin" },
       }),
       dispatch(repo, {
         name: "read_file",
-        input: { repoPath: repo.worktreePath, path: "src" },
+        input: { path: "src" },
       }),
       dispatch(repo, {
         name: "read_file",
-        input: { repoPath: repo.worktreePath, path: "invalid-utf8.txt" },
+        input: { path: "invalid-utf8.txt" },
       }),
       dispatch(repo, {
         name: "read_file",
         input: {
-          repoPath: repo.worktreePath,
           path: "src/sample.ts",
           startLine: 999,
         },
@@ -285,7 +311,6 @@ describe("read_file", () => {
       dispatch(repo, {
         name: "read_file",
         input: {
-          repoPath: repo.worktreePath,
           path: "src/sample.ts",
           startLine: 1,
           endLine: 999,
@@ -293,7 +318,7 @@ describe("read_file", () => {
       }),
       dispatch(repo, {
         name: "read_file",
-        input: { repoPath: repo.worktreePath, path: "src//sample.ts" },
+        input: { path: "src//sample.ts" },
       }),
     ]);
 
@@ -316,7 +341,7 @@ describe("read_file", () => {
     const repo = await fixture();
     const result = await dispatch(repo, {
       name: "read_file",
-      input: { repoPath: repo.worktreePath, path: "repeat.txt" },
+      input: { path: "repeat.txt" },
     });
 
     expect(result.success).toBe(true);
@@ -334,7 +359,6 @@ describe("edit_file", () => {
       "utf8",
     );
     const request = {
-      repoPath: repo.worktreePath,
       path: "src/sample.ts",
       oldText: "Greeter",
       newText: "Welcomer",
@@ -365,7 +389,6 @@ describe("edit_file", () => {
   test("rejects stale, zero-match, ambiguous, and no-op edits", async () => {
     const repo = await fixture();
     const common = {
-      repoPath: repo.worktreePath,
       path: "repeat.txt",
       mode: "preview" as const,
     };
@@ -410,7 +433,6 @@ describe("edit_file", () => {
       const replace = await dispatch(repo, {
         name: "edit_file",
         input: {
-          repoPath: repo.worktreePath,
           path: "repeat.txt",
           mode: "preview",
           oldText: "needle",
@@ -421,7 +443,6 @@ describe("edit_file", () => {
       const createPreview = await dispatch(repo, {
         name: "edit_file",
         input: {
-          repoPath: repo.worktreePath,
           path: "src/new.ts",
           mode: "preview",
           oldText: null,
@@ -431,7 +452,6 @@ describe("edit_file", () => {
       const createApply = await dispatch(repo, {
         name: "edit_file",
         input: {
-          repoPath: repo.worktreePath,
           path: "src/new.ts",
           mode: "apply",
           oldText: null,
@@ -456,7 +476,6 @@ describe("ripgrep", () => {
     const match = await dispatch(repo, {
       name: "ripgrep",
       input: {
-        repoPath: repo.worktreePath,
         pattern: "GREETER",
         path: "src",
         glob: "*.ts",
@@ -466,11 +485,11 @@ describe("ripgrep", () => {
     });
     const empty = await dispatch(repo, {
       name: "ripgrep",
-      input: { repoPath: repo.worktreePath, pattern: "not-present" },
+      input: { pattern: "not-present" },
     });
     const invalid = await dispatch(repo, {
       name: "ripgrep",
-      input: { repoPath: repo.worktreePath, pattern: "[" },
+      input: { pattern: "[" },
     });
 
     expect(match.success).toBe(true);
@@ -484,7 +503,7 @@ describe("ripgrep", () => {
     const repo = await fixture();
     const result = await dispatch(repo, {
       name: "ripgrep",
-      input: { repoPath: repo.worktreePath, pattern: "needle", path: "repeat.txt" },
+      input: { pattern: "needle", path: "repeat.txt" },
     });
 
     expect(result.truncated).toBe(true);
@@ -498,7 +517,6 @@ describe("run_shell", () => {
     const mixed = await dispatch(repo, {
       name: "run_shell",
       input: {
-        repoPath: repo.worktreePath,
         cwd: ".",
         command: "echo out; echo err >&2; exit 7",
       },
@@ -506,7 +524,6 @@ describe("run_shell", () => {
     const missing = await dispatch(repo, {
       name: "run_shell",
       input: {
-        repoPath: repo.worktreePath,
         cwd: ".",
         command: "definitely-not-a-real-command",
       },
@@ -514,7 +531,6 @@ describe("run_shell", () => {
     const timeout = await dispatch(repo, {
       name: "run_shell",
       input: {
-        repoPath: repo.worktreePath,
         cwd: ".",
         command: "sleep 2",
         timeoutMs: 20,
@@ -534,7 +550,6 @@ describe("run_shell", () => {
     const invalid = await dispatch(repo, {
       name: "run_shell",
       input: {
-        repoPath: repo.worktreePath,
         cwd: "../seed",
         command: "pwd",
       },
@@ -542,7 +557,6 @@ describe("run_shell", () => {
     const overflow = await dispatch(repo, {
       name: "run_shell",
       input: {
-        repoPath: repo.worktreePath,
         cwd: ".",
         command: "yes output | head -n 10000",
       },
@@ -558,17 +572,16 @@ describe("git", () => {
     const repo = await fixture();
     const clean = await dispatch(repo, {
       name: "git",
-      input: { repoPath: repo.worktreePath, subcommand: "status" },
+      input: { subcommand: "status" },
     });
     await repo.write("src/sample.ts", `${await readFile(path.join(repo.worktreePath, "src/sample.ts"), "utf8")}// changed\n`);
     const dirty = await dispatch(repo, {
       name: "git",
-      input: { repoPath: repo.worktreePath, subcommand: "status" },
+      input: { subcommand: "status" },
     });
     const diff = await dispatch(repo, {
       name: "git",
       input: {
-        repoPath: repo.worktreePath,
         subcommand: "diff",
         path: "src/sample.ts",
       },
@@ -576,7 +589,6 @@ describe("git", () => {
     await dispatch(repo, {
       name: "run_shell",
       input: {
-        repoPath: repo.worktreePath,
         cwd: ".",
         command: "git add src/sample.ts",
       },
@@ -584,7 +596,6 @@ describe("git", () => {
     const staged = await dispatch(repo, {
       name: "git",
       input: {
-        repoPath: repo.worktreePath,
         subcommand: "diff",
         staged: true,
         path: "src/sample.ts",
@@ -602,7 +613,6 @@ describe("git", () => {
     const empty = await dispatch(repo, {
       name: "git",
       input: {
-        repoPath: repo.worktreePath,
         subcommand: "commit",
         message: "nothing",
         addAll: false,
@@ -612,7 +622,6 @@ describe("git", () => {
     const commit = await dispatch(repo, {
       name: "git",
       input: {
-        repoPath: repo.worktreePath,
         subcommand: "commit",
         message: "add new file",
         addAll: true,
@@ -621,7 +630,6 @@ describe("git", () => {
     const push = await dispatch(repo, {
       name: "git",
       input: {
-        repoPath: repo.worktreePath,
         subcommand: "push",
         remote: repo.bareRemotePath,
         branch: "agent-step2",
@@ -630,7 +638,6 @@ describe("git", () => {
     const badPush = await dispatch(repo, {
       name: "git",
       input: {
-        repoPath: repo.worktreePath,
         subcommand: "push",
         remote: path.join(repo.root, "missing.git"),
         branch: "agent-step2",
@@ -639,7 +646,6 @@ describe("git", () => {
     const badBranch = await dispatch(repo, {
       name: "git",
       input: {
-        repoPath: repo.worktreePath,
         subcommand: "push",
         remote: repo.bareRemotePath,
         branch: "missing-branch",
@@ -660,7 +666,6 @@ describe("git", () => {
     const result = await dispatch(repo, {
       name: "git",
       input: {
-        repoPath: repo.worktreePath,
         subcommand: "diff",
         path: "repeat.txt",
       },
@@ -681,7 +686,7 @@ describe("tree_sitter_symbols", () => {
     const repo = await fixture();
     const result = await dispatch(repo, {
       name: "tree_sitter_symbols",
-      input: { repoPath: repo.worktreePath, path: file },
+      input: { path: file },
     });
 
     expect(result.success).toBe(true);
@@ -695,11 +700,11 @@ describe("tree_sitter_symbols", () => {
     await repo.write("src/broken.py", "def broken(:\n  pass\n");
     const broken = await dispatch(repo, {
       name: "tree_sitter_symbols",
-      input: { repoPath: repo.worktreePath, path: "src/broken.py" },
+      input: { path: "src/broken.py" },
     });
     const unsupported = await dispatch(repo, {
       name: "tree_sitter_symbols",
-      input: { repoPath: repo.worktreePath, path: "repeat.txt" },
+      input: { path: "repeat.txt" },
     });
 
     expect(broken.success).toBe(true);
@@ -715,7 +720,7 @@ describe("tree_sitter_symbols", () => {
     );
     const result = await dispatch(repo, {
       name: "tree_sitter_symbols",
-      input: { repoPath: repo.worktreePath, path: "src/many.py" },
+      input: { path: "src/many.py" },
     });
 
     expect(result.truncated).toBe(true);

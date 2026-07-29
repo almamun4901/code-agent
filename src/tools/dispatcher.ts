@@ -1,16 +1,13 @@
 import type {
   DispatcherContext,
+  ModelToolRequest,
   RawToolResult,
-  ToolCall,
+  RootedToolCall,
   ToolResult,
 } from "./contracts";
 import { editFileTool } from "./edit-file";
 import { ToolExecutionError } from "./errors";
 import { gitTool } from "./git";
-import {
-  assertInsideDevelopmentRoot,
-  validateRepoPath,
-} from "./path-utils";
 import { readFileTool } from "./read-file";
 import { ripgrepTool } from "./ripgrep";
 import { runShellTool } from "./run-shell";
@@ -18,9 +15,9 @@ import { finalizeToolResult } from "./token-budget";
 import { treeSitterSymbolsTool } from "./tree-sitter-symbols";
 import { validateToolCall } from "./validate-call";
 
-const allowAll = async (): Promise<void> => {};
+const allowAll = async () => ({ outcome: "allow" } as const);
 
-async function execute(call: ToolCall): Promise<RawToolResult> {
+async function execute(call: RootedToolCall): Promise<RawToolResult> {
   switch (call.name) {
     case "read_file":
       return readFileTool(call.input);
@@ -42,19 +39,63 @@ async function execute(call: ToolCall): Promise<RawToolResult> {
   }
 }
 
-export async function dispatchTool(
-  call: ToolCall,
-  context: DispatcherContext = {},
+function bindWorktreeRoot(
+  request: ModelToolRequest,
+  worktreeRoot: string,
+): RootedToolCall {
+  return {
+    ...request,
+    input: { ...request.input, repoPath: worktreeRoot },
+  } as RootedToolCall;
+}
+
+async function evaluatePolicy(
+  request: ModelToolRequest,
+  context: DispatcherContext,
+): Promise<void> {
+  let decision;
+  try {
+    decision = await (context.preToolUse ?? allowAll)(request, {
+      worktreeRoot: context.worktreeRoot,
+    });
+  } catch (error) {
+    throw new ToolExecutionError(
+      `PreToolUse policy failed: ${
+        error instanceof Error ? error.message : "unknown policy failure"
+      }`,
+      "POLICY_FAILURE",
+    );
+  }
+
+  if (decision.outcome === "allow") return;
+  if (
+    decision.outcome !== "deny" ||
+    typeof decision.code !== "string" ||
+    !/^[A-Z][A-Z0-9_]*$/.test(decision.code) ||
+    typeof decision.reason !== "string" ||
+    !decision.reason.trim()
+  ) {
+    throw new ToolExecutionError(
+      "PreToolUse policy returned an invalid decision.",
+      "POLICY_FAILURE",
+    );
+  }
+  throw new ToolExecutionError(decision.reason, decision.code);
+}
+
+async function dispatchValidated(
+  call: unknown,
+  context: DispatcherContext,
 ): Promise<ToolResult> {
   const codec = context.tokenCodec;
   const tokenLimit = context.tokenLimit;
 
   try {
-    const validatedCall = validateToolCall(call);
-    const repoPath = await validateRepoPath(validatedCall.input.repoPath);
-    assertInsideDevelopmentRoot(repoPath, context.developmentRoot);
-    await (context.preToolUse ?? allowAll)(validatedCall, context);
-    const raw = await execute(validatedCall);
+    const validatedRequest = validateToolCall(call);
+    await evaluatePolicy(validatedRequest, context);
+    const raw = await execute(
+      bindWorktreeRoot(validatedRequest, context.worktreeRoot),
+    );
     return finalizeToolResult(true, raw, { codec, tokenLimit });
   } catch (error) {
     const normalized =
@@ -75,4 +116,24 @@ export async function dispatchTool(
       { codec, tokenLimit },
     );
   }
+}
+
+export async function dispatchTool(
+  call: unknown,
+  context: DispatcherContext,
+): Promise<ToolResult> {
+  if (!context.worktreeRoot) {
+    return finalizeToolResult(
+      false,
+      {
+        output: "Dispatcher requires an immutable worktree root.",
+        metadata: { code: "MISSING_WORKTREE_ROOT" },
+      },
+      { codec: context.tokenCodec, tokenLimit: context.tokenLimit },
+    );
+  }
+  const operation = () => dispatchValidated(call, context);
+  return context.executionQueue
+    ? context.executionQueue.run(operation)
+    : operation();
 }

@@ -72,11 +72,13 @@ test.skipIf(!LIVE_ENABLED)(
         "run_shell",
         "tree_sitter_symbols",
       ]);
+      for (const tool of tools) {
+        expect(tool.inputSchema.properties).not.toHaveProperty("repoPath");
+      }
 
       const read = await session.client.call({
         name: "read_file",
         input: {
-          repoPath: session.remoteRepoPath,
           path: "src/sample.ts",
         },
       });
@@ -86,7 +88,6 @@ test.skipIf(!LIVE_ENABLED)(
       const preview = await session.client.call({
         name: "edit_file",
         input: {
-          repoPath: session.remoteRepoPath,
           path: "src/sample.ts",
           mode: "preview",
           oldText: "return value + 1;",
@@ -99,7 +100,6 @@ test.skipIf(!LIVE_ENABLED)(
       const applied = await session.client.call({
         name: "edit_file",
         input: {
-          repoPath: session.remoteRepoPath,
           path: "src/sample.ts",
           mode: "apply",
           oldText: "return value + 1;",
@@ -112,7 +112,6 @@ test.skipIf(!LIVE_ENABLED)(
       const search = await session.client.call({
         name: "ripgrep",
         input: {
-          repoPath: session.remoteRepoPath,
           pattern: "return value + 2",
           fixedString: true,
         },
@@ -123,7 +122,6 @@ test.skipIf(!LIVE_ENABLED)(
       const symbols = await session.client.call({
         name: "tree_sitter_symbols",
         input: {
-          repoPath: session.remoteRepoPath,
           path: "src/sample.ts",
         },
       });
@@ -133,7 +131,6 @@ test.skipIf(!LIVE_ENABLED)(
       const shell = await session.client.call({
         name: "run_shell",
         input: {
-          repoPath: session.remoteRepoPath,
           cwd: ".",
           command: [
             `if test -e ${shellQuote(sentinelPath)}; then`,
@@ -156,7 +153,6 @@ test.skipIf(!LIVE_ENABLED)(
       const positiveControl = await session.client.call({
         name: "read_file",
         input: {
-          repoPath: session.remoteRepoPath,
           path: "remote-marker.txt",
         },
       });
@@ -169,7 +165,6 @@ test.skipIf(!LIVE_ENABLED)(
       const absoluteRead = await session.client.call({
         name: "read_file",
         input: {
-          repoPath: session.remoteRepoPath,
           path: sentinelPath,
         },
       });
@@ -178,18 +173,9 @@ test.skipIf(!LIVE_ENABLED)(
         metadata: { code: "INVALID_PATH" },
       });
 
-      const outsideRoot = await session.client.call({
-        name: "read_file",
-        input: { repoPath: "/tmp", path: "repository.bundle" },
-      });
-      expect(outsideRoot).toMatchObject({
-        success: false,
-        metadata: { code: "OUTSIDE_DEVELOPMENT_ROOT" },
-      });
-
       const dirty = await session.client.call({
         name: "git",
-        input: { repoPath: session.remoteRepoPath, subcommand: "status" },
+        input: { subcommand: "status" },
       });
       expect(dirty).toMatchObject({
         success: true,
@@ -197,13 +183,12 @@ test.skipIf(!LIVE_ENABLED)(
       });
       const diff = await session.client.call({
         name: "git",
-        input: { repoPath: session.remoteRepoPath, subcommand: "diff" },
+        input: { subcommand: "diff" },
       });
       expect(diff.output).toContain("return value + 2");
       const commit = await session.client.call({
         name: "git",
         input: {
-          repoPath: session.remoteRepoPath,
           subcommand: "commit",
           message: "test: verify E2B isolation",
           addAll: true,
@@ -228,7 +213,6 @@ test.skipIf(!LIVE_ENABLED)(
         session.client.call({
           name: "read_file",
           input: {
-            repoPath: session.remoteRepoPath,
             path: "src/sample.ts",
           },
         }),

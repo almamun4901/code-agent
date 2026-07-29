@@ -57,13 +57,30 @@ export type GitInput =
       branch: string;
     };
 
-export type ToolCall =
+export type RootedToolCall =
   | { name: "read_file"; input: ReadFileInput }
   | { name: "edit_file"; input: EditFileInput }
   | { name: "ripgrep"; input: RipgrepInput }
   | { name: "tree_sitter_symbols"; input: TreeSitterSymbolsInput }
   | { name: "run_shell"; input: RunShellInput }
   | { name: "git"; input: GitInput };
+
+type WithoutRepoPath<T> = T extends { repoPath: string }
+  ? Omit<T, "repoPath">
+  : never;
+
+export type ModelToolRequest =
+  | { name: "read_file"; input: WithoutRepoPath<ReadFileInput> }
+  | { name: "edit_file"; input: WithoutRepoPath<EditFileInput> }
+  | { name: "ripgrep"; input: WithoutRepoPath<RipgrepInput> }
+  | {
+      name: "tree_sitter_symbols";
+      input: WithoutRepoPath<TreeSitterSymbolsInput>;
+    }
+  | { name: "run_shell"; input: WithoutRepoPath<RunShellInput> }
+  | { name: "git"; input: WithoutRepoPath<GitInput> };
+
+export type ToolCall = ModelToolRequest;
 
 export type ToolMetadata = Record<
   string,
@@ -84,14 +101,26 @@ export type RawToolResult = {
   metadata?: ToolMetadata;
 };
 
-export type PreToolUse = (
-  call: ToolCall,
-  context: DispatcherContext,
-) => Promise<void>;
+export type PreToolUseDecision =
+  | { outcome: "allow" }
+  | { outcome: "deny"; code: string; reason: string };
 
-export type DispatcherContext = {
-  developmentRoot?: string;
+export type PreToolUseContext = {
+  worktreeRoot: string;
+};
+
+export type PreToolUse = (
+  request: ModelToolRequest,
+  context: PreToolUseContext,
+) => Promise<PreToolUseDecision>;
+
+export type ToolExecutionQueue = {
+  run<T>(operation: () => Promise<T>): Promise<T>;
+};
+
+export type DispatcherContext = PreToolUseContext & {
   preToolUse?: PreToolUse;
+  executionQueue?: ToolExecutionQueue;
   tokenLimit?: number;
   tokenCodec?: TokenCodec;
 };

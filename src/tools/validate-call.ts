@@ -1,4 +1,4 @@
-import type { ToolCall } from "./contracts";
+import type { ModelToolRequest } from "./contracts";
 import { ToolExecutionError } from "./errors";
 
 type UnknownRecord = Record<string, unknown>;
@@ -50,13 +50,12 @@ function optionalInteger(input: UnknownRecord, key: string): void {
   }
 }
 
-export function validateToolCall(value: unknown): ToolCall {
+export function validateToolCall(value: unknown): ModelToolRequest {
   const call = requireRecord(value, "Tool call");
   if (typeof call.name !== "string" || !("input" in call)) {
     invalid("Tool call requires string name and object input.");
   }
   const input = requireRecord(call.input, "Tool input");
-  requireString(input, "repoPath");
 
   switch (call.name) {
     case "read_file":
@@ -118,5 +117,5 @@ export function validateToolCall(value: unknown): ToolCall {
       );
   }
 
-  return value as ToolCall;
+  return value as ModelToolRequest;
 }

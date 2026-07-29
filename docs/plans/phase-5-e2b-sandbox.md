@@ -1,7 +1,7 @@
 # Phase 5 — E2B sandbox and per-task worktrees
 
-**Status:** Acceptance gates passed on `feat/step-5-e2b-sandbox`; branch landing
-and merged-main verification remain.
+**Status:** Acceptance, review, documentation, commits, and push passed on
+`feat/e2b-sandbox`; merge and merged-main verification remain.
 
 ## Outcome
 
@@ -45,8 +45,8 @@ Host
 | Gate | Result |
 |---|---|
 | TypeScript | pass |
-| Complete offline suite | 120 pass, 3 opt-in tests skipped, 0 fail |
-| Focused sandbox suite | 23 pass, 0 fail |
+| Complete offline suite | 121 pass, 3 opt-in tests skipped, 0 fail |
+| Focused sandbox suite | 24 pass, 0 fail |
 | Live MCP transport | 1 pass, including process-loss failure without retry |
 | Live six-tool isolation | 1 pass, 25 assertions |
 | Host sentinel | randomized absolute host path and content unreachable |

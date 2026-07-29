@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { Template } from "e2b";
+import { readFile } from "node:fs/promises";
 import {
   DEFAULT_E2B_TEMPLATE_NAME,
   E2B_RUNTIME_ROOT,
@@ -107,5 +108,20 @@ describe("E2B runtime template", () => {
       enabled: true,
       templateRef: "terminal-coding-agent-tools:step-6-v1",
     });
+  });
+
+  test("converts millisecond tool timeouts to GNU timeout seconds", async () => {
+    const wrapper = await readFile(
+      new URL("../src/sandbox/runner-wrapper.sh", import.meta.url),
+      "utf8",
+    );
+
+    expect(wrapper).toContain(
+      "timeout_duration=$(printf '%d.%03ds'",
+    );
+    expect(wrapper).toContain(
+      'timeout --signal=TERM --kill-after=1s "$timeout_duration"',
+    );
+    expect(wrapper).not.toContain('"${timeout_ms}ms"');
   });
 });

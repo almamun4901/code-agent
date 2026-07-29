@@ -49,6 +49,11 @@ cleanup_runner() {
 }
 trap cleanup_runner EXIT HUP INT TERM
 
+timeout_seconds=$((timeout_ms / 1000))
+timeout_milliseconds=$((timeout_ms % 1000))
+timeout_duration=$(printf '%d.%03ds' \
+  "$timeout_seconds" "$timeout_milliseconds")
+
 set +e
 setpriv \
   --reuid=runner \
@@ -62,7 +67,7 @@ setpriv \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
     TASK_ROOT="$task_root" \
-  timeout --signal=TERM --kill-after=1s "${timeout_ms}ms" \
+  timeout --signal=TERM --kill-after=1s "$timeout_duration" \
   /bin/sh -c "cd \"\$1\" && exec /bin/sh -c \"\$2\"" sh \
   "$working_directory" "$command"
 status=$?

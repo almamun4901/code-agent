@@ -1,7 +1,7 @@
 # Phase 5 — E2B sandbox and per-task worktrees
 
-**Status:** Acceptance, review, documentation, commits, and push passed on
-`feat/e2b-sandbox`; merge and merged-main verification remain.
+**Status:** Complete. Acceptance, review, documentation, branch landing, and
+merged-main verification passed.
 
 ## Outcome
 

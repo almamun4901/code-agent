@@ -478,6 +478,9 @@ describe("Anthropic model adapter", () => {
     expect(() => createAnthropicModel({ apiKey: "" })).toThrow(
       ModelConfigurationError,
     );
+    expect(() =>
+      createAnthropicModel({ apiKey: "test-key", timeoutMs: 0 }),
+    ).toThrow("positive integer");
   });
 
   test("normalizes provider failures without exposing raw error content", async () => {

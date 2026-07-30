@@ -1,0 +1,599 @@
+import { afterEach, describe, expect, test } from "bun:test";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import type {
+  CallModel,
+  ModelTurn,
+} from "../src/model/contracts";
+import type { E2bTaskSession } from "../src/sandbox/e2b-session";
+import { MemoryE2bSessionRecoveryStore } from "../src/sandbox/session-recovery";
+import type {
+  McpToolCallOptions,
+} from "../src/mcp/client";
+import {
+  AgentRunConfigurationError,
+  prepareAgentRun,
+  runHeadlessAgent,
+} from "../src/runtime/agent-runner";
+import {
+  FileProductionCheckpointStore,
+  MemoryProductionCheckpointStore,
+  ProductionCheckpointError,
+} from "../src/runtime/checkpoint";
+import {
+  runProductionLoop,
+  type ProductionLoopOptions,
+} from "../src/runtime/production-loop";
+import type { ProductionAgentState } from "../src/runtime/schema";
+import type {
+  ModelToolRequest,
+  ToolResult,
+} from "../src/tools/contracts";
+import {
+  createTemporaryRepository,
+  type TemporaryRepository,
+} from "./support/temp-repo";
+
+const repositories: TemporaryRepository[] = [];
+const temporaryRoots: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(repositories.splice(0).map((repo) => repo.cleanup()));
+  await Promise.all(
+    temporaryRoots.splice(0).map((root) =>
+      rm(root, { recursive: true, force: true }),
+    ),
+  );
+});
+
+async function repository(): Promise<TemporaryRepository> {
+  const repo = await createTemporaryRepository();
+  repositories.push(repo);
+  return repo;
+}
+
+describe("production agent loop", () => {
+  test("runs model → plan → MCP tool → checkpoint to completion", async () => {
+    const repo = await repository();
+    const prepared = await prepareAgentRun(
+      repo.worktreePath,
+      "Update the greeting",
+    );
+    const store = new MemoryProductionCheckpointStore();
+    const session = new FakeSession();
+    const callModel = queuedModel([
+      turn(
+        plan([
+          ["inspect", "Inspect the greeting", "in_progress"],
+          ["change", "Update the greeting", "pending"],
+        ]),
+        action("read-1", "read_file", { path: "src/example.ts" }),
+      ),
+      turn(
+        plan([
+          ["inspect", "Inspect the greeting", "completed"],
+          ["change", "Update the greeting", "in_progress"],
+        ]),
+        action("edit-1", "edit_file", {
+          path: "src/example.ts",
+          mode: "apply",
+          oldText: "Hello",
+          newText: "Hello, agent",
+        }),
+      ),
+      turn(
+        plan([
+          ["inspect", "Inspect the greeting", "completed"],
+          ["change", "Update the greeting", "completed"],
+        ]),
+      ),
+    ]);
+
+    const result = await runProductionLoop({
+      ...prepared,
+      callModel,
+      session,
+      checkpointStore: store,
+    });
+
+    expect(result).toMatchObject({
+      status: "completed",
+      modelTurns: 3,
+      acceptedTurns: 3,
+      toolCalls: 2,
+      planRewrites: 3,
+      inputTokens: 30,
+      outputTokens: 15,
+    });
+    expect(session.calls.map((call) => call.request.name)).toEqual([
+      "read_file",
+      "edit_file",
+    ]);
+    expect((await store.load())?.lifecycle).toBe("completed");
+    expect((await store.load())?.pendingTurn).toBeNull();
+
+    const completedSession = new FakeSession();
+    await expect(
+      runProductionLoop({
+        ...prepared,
+        callModel: queuedModel([]),
+        session: completedSession,
+        checkpointStore: store,
+      }),
+    ).resolves.toEqual(result);
+    expect(completedSession.calls).toHaveLength(0);
+  });
+
+  test("resumes a pending mutation with its durable operation ID", async () => {
+    const repo = await repository();
+    const prepared = await prepareAgentRun(repo.worktreePath, "Edit safely");
+    const store = new MemoryProductionCheckpointStore();
+    const abort = new AbortController();
+    const firstSession = new FakeSession();
+    firstSession.callImpl = async (_request, options) => {
+      abort.abort();
+      throw new DOMException("cancelled", "AbortError");
+    };
+    const model = queuedModel([
+      turn(
+        plan([["change", "Edit safely", "in_progress"]]),
+        action("edit-1", "edit_file", {
+          path: "src/example.ts",
+          mode: "apply",
+          oldText: "Hello",
+          newText: "Safe",
+        }),
+      ),
+    ]);
+    const firstOptions: ProductionLoopOptions = {
+      ...prepared,
+      callModel: model,
+      session: firstSession,
+      checkpointStore: store,
+      signal: abort.signal,
+    };
+
+    await expect(runProductionLoop(firstOptions)).rejects.toThrow();
+    const pending = (await store.load())?.pendingTurn;
+    expect(pending?.action?.operationId).toMatch(/^[0-9a-f-]{36}$/);
+
+    const resumedSession = new FakeSession();
+    const finishModel = queuedModel([
+      turn(plan([["change", "Edit safely", "completed"]])),
+    ]);
+    await expect(
+      runProductionLoop({
+        ...prepared,
+        callModel: finishModel,
+        session: resumedSession,
+        checkpointStore: store,
+      }),
+    ).resolves.toMatchObject({ status: "completed", toolCalls: 1 });
+    expect(resumedSession.calls[0]?.options.operationId).toBe(
+      pending?.action?.operationId,
+    );
+  });
+
+  test("rejects a pending checkpoint that disagrees with model content", async () => {
+    const repo = await repository();
+    const prepared = await prepareAgentRun(
+      repo.worktreePath,
+      "Reject altered intent",
+    );
+    const store = new MemoryProductionCheckpointStore();
+    const abort = new AbortController();
+    const interrupted = new FakeSession();
+    interrupted.callImpl = async () => {
+      abort.abort();
+      throw new DOMException("cancelled", "AbortError");
+    };
+    await expect(
+      runProductionLoop({
+        ...prepared,
+        callModel: queuedModel([
+          turn(
+            plan([["inspect", "Reject altered intent", "in_progress"]]),
+            action("read-original", "read_file", {
+              path: "README.md",
+            }),
+          ),
+        ]),
+        session: interrupted,
+        checkpointStore: store,
+        signal: abort.signal,
+      }),
+    ).rejects.toThrow();
+
+    const altered = await store.load();
+    if (!altered?.pendingTurn?.action) {
+      throw new Error("Expected a pending action.");
+    }
+    altered.pendingTurn.action.request = {
+      name: "read_file",
+      input: { path: "package.json" },
+    };
+    const alteredStore = new MemoryProductionCheckpointStore(altered);
+    const resumed = new FakeSession();
+
+    await expect(
+      runProductionLoop({
+        ...prepared,
+        callModel: queuedModel([]),
+        session: resumed,
+        checkpointStore: alteredStore,
+      }),
+    ).rejects.toThrow("pending turn does not match");
+    expect(resumed.calls).toHaveLength(0);
+  });
+
+  test("accepts a sequential plan then action handshake", async () => {
+    const repo = await repository();
+    const prepared = await prepareAgentRun(
+      repo.worktreePath,
+      "Inspect sequentially",
+    );
+    const store = new MemoryProductionCheckpointStore();
+    const session = new FakeSession();
+
+    const result = await runProductionLoop({
+      ...prepared,
+      callModel: queuedModel([
+        turn(plan([["inspect", "Inspect sequentially", "in_progress"]])),
+        {
+          content: [
+            action("read-sequential", "read_file", {
+              path: "README.md",
+            }),
+          ],
+          stopReason: "tool_use",
+          usage: { inputTokens: 10, outputTokens: 5 },
+        },
+        turn(plan([["inspect", "Inspect sequentially", "completed"]])),
+      ]),
+      session,
+      checkpointStore: store,
+    });
+
+    expect(result).toMatchObject({
+      status: "completed",
+      modelTurns: 3,
+      acceptedTurns: 3,
+      toolCalls: 1,
+      planRewrites: 2,
+    });
+    expect(session.calls[0]?.request.name).toBe("read_file");
+  });
+
+  test("supports provider-native action chains and bounded replanning", async () => {
+    const repo = await repository();
+    const prepared = await prepareAgentRun(
+      repo.worktreePath,
+      "Inspect and verify",
+    );
+    const session = new FakeSession();
+
+    const result = await runProductionLoop({
+      ...prepared,
+      callModel: queuedModel([
+        turn(
+          plan([
+            ["setup", "Understand the task", "completed"],
+            ["inspect", "Inspect the file", "in_progress"],
+            ["verify", "Verify repository state", "pending"],
+          ]),
+        ),
+        {
+          content: [
+            action("read-chain", "read_file", { path: "README.md" }),
+          ],
+          stopReason: "tool_use",
+          usage: { inputTokens: 10, outputTokens: 5 },
+        },
+        {
+          content: [
+            action("git-chain", "git", { subcommand: "status" }),
+          ],
+          stopReason: "tool_use",
+          usage: { inputTokens: 10, outputTokens: 5 },
+        },
+        turn(
+          plan([
+            ["setup", "Understand the task", "completed"],
+            ["inspect", "Inspect the file", "completed"],
+            ["verify", "Verify repository state", "in_progress"],
+          ]),
+        ),
+        turn(
+          plan([
+            ["final", "Record verified completion", "in_progress"],
+          ]),
+        ),
+        {
+          content: [
+            action("final-status", "git", { subcommand: "status" }),
+          ],
+          stopReason: "tool_use",
+          usage: { inputTokens: 10, outputTokens: 5 },
+        },
+        turn(
+          plan([
+            ["final", "Record verified completion", "completed"],
+          ]),
+        ),
+      ]),
+      session,
+      checkpointStore: new MemoryProductionCheckpointStore(),
+    });
+
+    expect(result).toMatchObject({
+      status: "completed",
+      modelTurns: 7,
+      toolCalls: 3,
+      planRewrites: 4,
+    });
+    expect(session.calls.map((call) => call.request.name)).toEqual([
+      "read_file",
+      "git",
+      "git",
+    ]);
+  });
+
+  test("rejects two malformed turns and persists the terminal failure", async () => {
+    const repo = await repository();
+    const prepared = await prepareAgentRun(repo.worktreePath, "Fail closed");
+    const store = new MemoryProductionCheckpointStore();
+    const badTurn: ModelTurn = {
+      content: [{ type: "text", text: "No tools" }],
+      stopReason: "end_turn",
+      usage: { inputTokens: 1, outputTokens: 1 },
+    };
+
+    await expect(
+      runProductionLoop({
+        ...prepared,
+        callModel: queuedModel([badTurn, badTurn]),
+        session: new FakeSession(),
+        checkpointStore: store,
+      }),
+    ).rejects.toThrow("Expected tool_use");
+    expect(await store.load()).toMatchObject({
+      lifecycle: "failed",
+      consecutiveInvalidAttempts: 1,
+      counters: { modelTurns: 2, protocolRetries: 1 },
+    });
+  });
+});
+
+describe("host-side production runner", () => {
+  test("validates the canonical repository and task before external activity", async () => {
+    const repo = await repository();
+    await expect(
+      prepareAgentRun(repo.worktreePath, "  "),
+    ).rejects.toBeInstanceOf(AgentRunConfigurationError);
+    await expect(
+      prepareAgentRun(repo.worktreePath, "x".repeat(32 * 1024 + 1)),
+    ).rejects.toThrow("must not exceed");
+    await expect(
+      prepareAgentRun("relative/repo", "task"),
+    ).rejects.toThrow("absolute");
+    await expect(
+      prepareAgentRun(path.join(repo.worktreePath, "src"), "task"),
+    ).rejects.toThrow("root");
+  });
+
+  test("fails a checkpoint identity mismatch without model or sandbox calls", async () => {
+    const repo = await repository();
+    const other = await prepareAgentRun(repo.worktreePath, "another task");
+    const store = new MemoryProductionCheckpointStore(
+      initialState(other),
+    );
+    let modelCalls = 0;
+    let sessionCalls = 0;
+
+    await expect(
+      runHeadlessAgent({
+        repoPath: repo.worktreePath,
+        task: "requested task",
+        templateId: "template:test",
+        checkpointStore: store,
+        callModel: async () => {
+          modelCalls += 1;
+          throw new Error("must not run");
+        },
+        openSession: async () => {
+          sessionCalls += 1;
+          return new FakeSession() as unknown as E2bTaskSession;
+        },
+      }),
+    ).rejects.toThrow("another repository or task");
+    expect(modelCalls).toBe(0);
+    expect(sessionCalls).toBe(0);
+  });
+
+  test("rejects an unknown model provider before opening a sandbox", async () => {
+    const repo = await repository();
+    let sessionCalls = 0;
+    await expect(
+      runHeadlessAgent({
+        repoPath: repo.worktreePath,
+        task: "Validate provider",
+        templateId: "template:test",
+        checkpointStore: new MemoryProductionCheckpointStore(),
+        modelProvider: "unknown" as "anthropic",
+        openSession: async () => {
+          sessionCalls += 1;
+          return new FakeSession() as unknown as E2bTaskSession;
+        },
+      }),
+    ).rejects.toThrow('must be "anthropic" or "openrouter"');
+    expect(sessionCalls).toBe(0);
+  });
+
+  test("reconciles mutations before closing the sandbox", async () => {
+    const repo = await repository();
+    const session = new FakeSession();
+    const result = await runHeadlessAgent({
+      repoPath: repo.worktreePath,
+      task: "Inspect one file",
+      templateId: "template:test",
+      checkpointStore: new MemoryProductionCheckpointStore(),
+      sessionRecoveryStore: new MemoryE2bSessionRecoveryStore(),
+      callModel: queuedModel([
+        turn(
+          plan([["inspect", "Inspect one file", "in_progress"]]),
+          action("read", "read_file", { path: "README.md" }),
+        ),
+        turn(plan([["inspect", "Inspect one file", "completed"]])),
+      ]),
+      openSession: async () =>
+        session as unknown as E2bTaskSession,
+    });
+
+    expect(result.status).toBe("completed");
+    expect(session.lifecycle).toEqual(["reconcile", "close"]);
+  });
+});
+
+describe("production checkpoint", () => {
+  test("writes mode-safe state and fails closed on corruption", async () => {
+    const repo = await repository();
+    const prepared = await prepareAgentRun(repo.worktreePath, "Persist");
+    const store = new FileProductionCheckpointStore(repo.worktreePath);
+    await store.save(initialState(prepared));
+    expect(await store.load()).toMatchObject({
+      version: 2,
+      task: "Persist",
+    });
+    await writeFile(store.statePath, '{"version":1}\n');
+    await expect(store.load()).rejects.toBeInstanceOf(
+      ProductionCheckpointError,
+    );
+  });
+
+  test("rejects a symlinked checkpoint directory", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "runtime-state-"));
+    temporaryRoots.push(root);
+    const repo = await repository();
+    await Bun.spawn(["ln", "-s", root, path.join(repo.worktreePath, ".agent")])
+      .exited;
+    const store = new FileProductionCheckpointStore(repo.worktreePath);
+    await expect(store.load()).rejects.toThrow("unsafe checkpoint");
+  });
+});
+
+class FakeSession {
+  calls: Array<{
+    request: ModelToolRequest;
+    options: McpToolCallOptions;
+  }> = [];
+  lifecycle: string[] = [];
+  callImpl:
+    | ((
+        request: ModelToolRequest,
+        options: McpToolCallOptions,
+      ) => Promise<ToolResult>)
+    | undefined;
+
+  async call(
+    request: ModelToolRequest,
+    options: McpToolCallOptions = {},
+  ): Promise<ToolResult> {
+    this.calls.push({ request, options });
+    if (this.callImpl) return this.callImpl(request, options);
+    return {
+      success: true,
+      output: "ok",
+      truncated: false,
+      originalTokenCount: 1,
+      codec: "test",
+    };
+  }
+
+  async reconcileActiveMutation(): Promise<null> {
+    this.lifecycle.push("reconcile");
+    return null;
+  }
+
+  async close(): Promise<void> {
+    this.lifecycle.push("close");
+  }
+}
+
+function queuedModel(turns: ModelTurn[]): CallModel {
+  let index = 0;
+  return async () => {
+    const next = turns[index++];
+    if (!next) throw new Error("Unexpected model call.");
+    return next;
+  };
+}
+
+function turn(
+  planCall: ReturnType<typeof plan>,
+  repositoryAction?: ReturnType<typeof action>,
+): ModelTurn {
+  return {
+    content: [planCall, ...(repositoryAction ? [repositoryAction] : [])],
+    stopReason: "tool_use",
+    usage: { inputTokens: 10, outputTokens: 5 },
+  };
+}
+
+function plan(
+  tasks: Array<
+    [id: string, description: string, status: "pending" | "in_progress" | "completed"]
+  >,
+) {
+  return {
+    type: "tool_use" as const,
+    id: crypto.randomUUID(),
+    name: "rewrite_plan",
+    input: {
+      plan: tasks.map(([id, description, status]) => ({
+        id,
+        description,
+        status,
+      })),
+    },
+  };
+}
+
+function action(name: string, tool: string, input: unknown) {
+  return {
+    type: "tool_use" as const,
+    id: name,
+    name: tool,
+    input,
+  };
+}
+
+function initialState(
+  prepared: {
+    canonicalRepoPath: string;
+    task: string;
+    runIdentity: string;
+  },
+): ProductionAgentState {
+  return {
+    version: 2,
+    ...prepared,
+    lifecycle: "running",
+    plan: [],
+    transcript: [{ role: "user", content: "test" }],
+    lastToolSucceeded: null,
+    pendingTurn: null,
+    counters: {
+      modelTurns: 0,
+      committedTurns: 0,
+      protocolRetries: 0,
+      toolCalls: 0,
+      planRewrites: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+    },
+    consecutiveInvalidAttempts: 0,
+    terminalError: null,
+    lastToolResult: null,
+  };
+}

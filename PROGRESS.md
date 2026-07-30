@@ -9,21 +9,18 @@
 
 ## Current state (updated: 2026-07-30)
 
-**Overall:** Steps 0–6 and the ADR 0009 mutation-recovery prerequisite are
-complete. Mutating edit, shell, and Git calls now use durable operation IDs,
-host session leases, sandbox journals, same-sandbox reconnection, fail-closed
-ambiguity handling, and terminal cancellation reconciliation. Final
-verification reports 150 offline tests, 15 focused MCP tests, 33 focused
-sandbox tests, and 4 focused safety tests passing. The four-case live E2B gate
-passes and leaves zero running sandboxes. The OpenRouter adapter and
-provider-neutral cancellation contract are implemented on
-`feat/model-routing`; 164 offline tests and type checking pass. The explicit
-live multi-turn tool-call gate passes through OpenRouter using the free
-`cohere/north-mini-code:free` route in 68.5 seconds. Production defaults remain
-fail-closed with provider data collection denied; the free synthetic gate used
-an explicit local override after user authorization. The branch still needs
-its final post-live review, push, PR, merge, and merged-main verification
-before the headless production runner or Step 7 begins.
+**Overall:** Steps 0–6, mutation recovery, and the routed OpenRouter provider
+are complete and merged. The host-side production runner is implemented on
+`feat/agent-runtime`: it validates canonical repository/task identity before
+external activity, persists validated pending turns and stable mutation
+operation IDs, supports provider-native sequential actions and full plan
+revision, runs actions through the owned E2B MCP session, and reconciles
+before cleanup. Type checking, 176 offline tests, 15 focused MCP tests, 33
+focused sandbox tests, 4 focused safety tests, and all smoke checks pass.
+The complete production live gate passes through the direct Anthropic adapter
+and E2B MCP in 29.2 seconds and leaves zero running sandboxes. OpenRouter
+remains implemented and verified, but is set aside until paid capacity is
+available.
 
 **Step-by-step:**
 
@@ -36,7 +33,7 @@ before the headless production runner or Step 7 begins.
 | 4 — MCP transport (stdio) | complete | Six tools have canonical direct/MCP parity; lifecycle and mutation checks pass |
 | 5 — Sandbox (E2B) | complete | Six remote tools, exact task worktree, host-isolation sentinel, process-loss handling, and cleanup verified on merged `main` |
 | 6 — PreToolUse safety hook | complete | Exact-root binding, two identities, symlink-safe files, offline shell, reduced Git, and red-team/live gates pass |
-| 7 — TUI (Ink) | not started | Mutation recovery complete; OpenRouter live verification/landing and the headless production runner remain prerequisites |
+| 7 — TUI (Ink) | not started | Mutation recovery and routed provider complete; headless production runner is the active prerequisite |
 | 8 — Remaining hooks + budget | not started | — |
 | 9 — Telemetry | not started | — |
 | 10 — Eval + PR posting | not started | — |
@@ -104,6 +101,13 @@ before the headless production runner or Step 7 begins.
   sandbox, returns matching terminal results, and never replays ambiguous
   work. Cancellation must reach a terminal journal result before cleanup. See
   ADR 0013.
+- Production turns persist validated plan/action intent and a stable operation
+  ID before MCP execution, then commit only after a terminal observation.
+  Plan-only and action-only provider turns remain bounded and durable. See ADR
+  0014.
+- The host runner selects `anthropic` or `openrouter` without changing loop,
+  sandbox, or TUI behavior. Step 7 temporarily defaults to direct Anthropic
+  because the available OpenRouter free quota is exhausted. See ADR 0015.
 
 ---
 
@@ -126,6 +130,8 @@ before the headless production runner or Step 7 begins.
   0009 revisit.
 - [x] Implement and verify the OpenRouter provider boundary before connecting
   the production model/tool runner or starting Step 7.
+- [x] Complete the live production-runner gate through the user-authorized
+  Anthropic fallback. OpenRouter remains available but no longer blocks Step 7.
 - [x] Resolve the focused live-gate failure. The initial ambiguous E2B create
   response was followed by a successful bounded run. Template workspace
   ownership and the newline-aware probe assertion were corrected; the real
@@ -792,6 +798,38 @@ before the headless production runner or Step 7 begins.
   production runner on a fresh `feat/agent-runtime` branch. Verify
   model → plan → E2B MCP tool → checkpoint execution and cancellation before
   starting the terminal interface.
+
+### 2026-07-30 — Headless production runner
+
+- What was done: Added the host-side production runner, version-2 production
+  checkpoint, canonical repository/task run identity, routed model loop, E2B
+  session ownership, stable pending mutation operation IDs, and cleanup
+  reconciliation. Added deterministic coverage for combined and sequential
+  plan/action turns, provider-native action chains, bounded full-plan
+  revisions, cancellation resume, mismatched checkpoints, and unsafe state
+  paths. Recorded ADR 0014 and added an opt-in live acceptance gate.
+- What broke / had to be reworked: The free route emits plan and repository
+  tools sequentially and revises its plan as observations arrive, so the
+  initial parallel/stable-plan protocol was incompatible. The runner now
+  accepts one action per provider turn against the last committed plan and
+  bounds completion advancement to successful observations. Repeated
+  diagnostics then exhausted OpenRouter's daily free request quota.
+- Decisions made this session: Persist the validated assistant turn and stable
+  operation ID before MCP execution; publish the new plan only with a terminal
+  observation. Support full plan revision and provider-native sequential tool
+  calls without weakening mutation reconciliation. See ADR 0014.
+- Current status of the step in progress: Branch `feat/agent-runtime` has
+  scoped implementation, test, documentation, and review-fix commits. Type
+  checking, 176 offline tests, 15 focused MCP tests, 33 focused sandbox tests,
+  4 focused safety tests, fake-loop regression, template inspection, and diff
+  checks pass. The live gate completed a real `rewrite_plan`, E2B MCP
+  `read_file`, and observed follow-up plan, and every attempt left zero
+  running sandboxes. Pre-landing review found and fixed semantic checkpoint
+  replay validation and unbounded persisted inputs. The complete Anthropic
+  production gate passes through live E2B MCP in 29.2 seconds with zero
+  running sandboxes. The selectable-provider follow-up review is clean.
+- Next session should start with: Push and merge the runner prerequisite,
+  reverify merged `main`, then create the terminal-interface branch.
 
 ---
 

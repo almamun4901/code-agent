@@ -49,10 +49,12 @@ type MessagesClient = {
 type AnthropicModelOptions = {
   apiKey?: string;
   model?: string;
+  timeoutMs?: number;
   client?: MessagesClient;
 };
 
 const DEFAULT_MODEL = "claude-haiku-4-5";
+const DEFAULT_TIMEOUT_MS = 60_000;
 
 /**
  * Build the Phase 1 model adapter.
@@ -72,13 +74,19 @@ export function createAnthropicModel(
       "ANTHROPIC_API_KEY is required. Add it to the local .env file; never commit the key.",
     );
   }
+  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  if (!Number.isInteger(timeoutMs) || timeoutMs <= 0) {
+    throw new ModelConfigurationError(
+      "Anthropic timeoutMs must be a positive integer.",
+    );
+  }
 
   const client: MessagesClient =
     options.client ??
     new Anthropic({
       apiKey,
       maxRetries: 2,
-      timeout: 30_000,
+      timeout: timeoutMs,
     });
   const model =
     options.model?.trim() ||

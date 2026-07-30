@@ -182,7 +182,7 @@ scenario through OpenRouter. Normal `bun test` never makes this call either.
 
 ## Current step
 
-Step 6 is complete. The mandatory next work is ADR 0009 mutation recovery on
-`fix/mutation-recovery`; it must land before OpenRouter, Step 7, or any
-live-model access to mutating real tools. Check `PROGRESS.md` for the
-authoritative answer.
+Steps 0–6, mutation recovery, and the routed provider prerequisite are
+complete. The headless production runner is the active prerequisite before
+Step 7. Check `PROGRESS.md` for its authoritative branch, verification status,
+and next action.

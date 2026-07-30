@@ -15,8 +15,10 @@ acceptance gates. Mutation recovery is also complete: mutating calls are
 journaled on both host and sandbox, interrupted sessions reconnect to the same
 worktree, and ambiguous operations fail closed. The six tools execute serially
 inside one short-lived, network-disabled E2B worktree per task.
-The real tools have only been exercised by deterministic tests against
-disposable repositories; no model has received them.
+The routed OpenRouter provider and host-side production runner now connect the
+model to those real tools. The runner validates repository/task identity
+before external activity, checkpoints validated tool intent before execution,
+resumes the same E2B mutation operation, and reconciles before cleanup.
 
 The code currently proves:
 
@@ -56,6 +58,8 @@ The code currently proves:
 - disposable git worktrees and a local bare remote for tool tests;
 - complete success and error results capped at 4,000 offline
   `o200k_base` tokens.
+- a production `model -> plan -> E2B MCP tool -> checkpoint` runner with
+  provider-native sequential plan/action turns and actual usage accounting.
 
 ## Current architecture
 
@@ -111,6 +115,13 @@ network-disabled E2B task worktree
     |
     +---- /opt/agent and Git control state protected by permissions
     +---- ordinary task content remains mutable
+    ^
+    |
+src/runtime/agent-runner.ts
+    +---- canonical repository + task identity
+    +---- pending turn and stable mutation operation ID
+    +---- OpenRouter model + recovered E2B session
+    +---- reconciliation before sandbox cleanup
 ```
 
 `E2bTaskSession` now uploads an exact clean Git revision, provisions a
@@ -119,10 +130,9 @@ through streamed E2B stdin/stdout. The sandbox starts with internet disabled;
 typed tools run as `agent`, while arbitrary shell commands run as `runner`
 through the fixed wrapper. Its host lease records the exact sandbox and active
 mutation; recovery verifies the sandbox journal before reconnecting or
-refusing replay. Later roadmap steps add the production runner, remaining
-lifecycle hooks, telemetry, and an Ink terminal UI. The model loop and Step 2
-real-tool dispatcher remain deliberately disconnected until the OpenRouter
-provider and production runner prerequisites land.
+refusing replay. The production runner now joins that session to the routed
+model and durable version-2 checkpoint. Later roadmap steps add lifecycle
+hooks, telemetry, and the Ink terminal UI.
 
 ## Setup
 
@@ -138,8 +148,8 @@ bun install
 cp .env.example .env
 ```
 
-Add `ANTHROPIC_API_KEY` to the local `.env`. That file is ignored and must
-never be committed.
+Add only the API keys needed for explicit live commands to local `.env`. That
+file is ignored and must never be committed.
 
 ## Development commands
 
@@ -180,6 +190,12 @@ bun run test:integration
 # Explicit live E2B transport and safety gates
 bun run test:e2b:transport
 bun run test:e2b:safety
+
+# Focused offline production-runner suite
+bun run test:runtime
+
+# Explicit selected-provider -> live E2B MCP production-runner gate
+bun run test:runtime:integration
 
 # Start MCP for one exact task root under a trusted parent
 bun run mcp:stdio -- --worktree-root /absolute/tasks/task-a --allowed-parent /absolute/tasks
@@ -245,6 +261,12 @@ The authoritative agent instructions and exact sequence are in
 - [`docs/plans/mutation-recovery.md`](docs/plans/mutation-recovery.md):
   operation journaling, same-sandbox recovery, cancellation, and acceptance
   evidence.
+- `src/runtime/agent-runner.ts` validates run identity, opens or recovers the
+  owned E2B session, and reconciles before cleanup.
+- `src/runtime/production-loop.ts` checkpoints validated pending turns before
+  MCP execution and commits plans only with terminal observations.
+- `tests/agent-runtime.integration.test.ts` is the opt-in routed-model to live
+  E2B MCP acceptance gate.
 - [`docs/testing/step-5-manual-terminal-tests.md`](docs/testing/step-5-manual-terminal-tests.md)
   and [`docs/testing/step-6-manual-safety-tests.md`](docs/testing/step-6-manual-safety-tests.md):
   ordered local and opt-in live verification procedures.

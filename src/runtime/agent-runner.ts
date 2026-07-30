@@ -22,6 +22,7 @@ import {
 } from "./production-loop";
 import {
   createAgentEventPublisher,
+  sanitizeTerminalText,
   type AgentEventPublisher,
   type AgentEventSink,
 } from "./events";
@@ -512,7 +513,7 @@ function safeError(error: unknown): { code: string; message: string } {
       code: error.name
         .replace(/([a-z])([A-Z])/g, "$1_$2")
         .toUpperCase(),
-      message: error.message.slice(0, 2_048),
+      message: sanitizeTerminalText(error.message).slice(0, 2_048),
     };
   }
   return { code: "UNKNOWN_ERROR", message: "Unknown runtime failure." };

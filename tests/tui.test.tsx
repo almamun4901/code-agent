@@ -209,6 +209,38 @@ describe("non-TTY output", () => {
     expect(output).toContain("Run finished: completed");
     expect(output).not.toMatch(/\u001B\[[0-?]*[ -/]*[@-~]/);
   });
+
+  test("neutralizes terminal controls from observed text", () => {
+    const malicious = "\u001B]0;owned\u0007";
+    const lines = formatStaticEvent(event({
+      type: "plan_committed",
+      plan: [{
+        id: "safe",
+        description: `Inspect ${malicious} repository`,
+        status: "in_progress",
+      }],
+    }));
+    const state = reduceAgentEvent(
+      initialTuiState,
+      event({
+        type: "plan_committed",
+        plan: [{
+          id: "safe",
+          description: `Inspect ${malicious} repository`,
+          status: "in_progress",
+        }],
+      }),
+    );
+    const frame = renderToString(
+      <AgentApp state={state} width={80} />,
+      { columns: 80 },
+    );
+
+    expect(lines.join("\n")).not.toContain("\u001B");
+    expect(lines.join("\n")).not.toContain("\u0007");
+    expect(frame).not.toContain("\u001B]0;owned");
+    expect(frame).not.toContain("\u0007");
+  });
 });
 
 let sequence = 0;

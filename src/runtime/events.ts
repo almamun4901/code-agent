@@ -145,7 +145,16 @@ export function safeToolSummary(request: ModelToolRequest): string {
           : request.input.subcommand;
       break;
   }
-  return truncateUtf8(summary, MAX_SUMMARY_BYTES);
+  return truncateUtf8(sanitizeTerminalText(summary), MAX_SUMMARY_BYTES);
+}
+
+export function sanitizeTerminalText(value: string): string {
+  return value
+    .replaceAll(/[\r\n\t]+/g, " ")
+    .replaceAll(
+      /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u202A-\u202E\u2066-\u2069]/g,
+      "�",
+    );
 }
 
 export function toolOutcome(result: ToolResult): ToolOutcome {

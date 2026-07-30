@@ -1,4 +1,5 @@
 import type { AgentEvent } from "../runtime/events";
+import { sanitizeTerminalText } from "../runtime/events";
 
 export function formatStaticEvent(event: AgentEvent): string[] {
   switch (event.type) {
@@ -42,5 +43,5 @@ export function formatStaticEvent(event: AgentEvent): string[] {
 }
 
 function singleLine(value: string): string {
-  return value.replaceAll(/\s+/g, " ").trim();
+  return sanitizeTerminalText(value).replaceAll(/\s+/g, " ").trim();
 }

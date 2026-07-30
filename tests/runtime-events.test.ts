@@ -139,6 +139,10 @@ describe("runtime observation events", () => {
         name: "read_file",
         input: { path: `${"界".repeat(1_000)}.ts` },
       }),
+      safeToolSummary({
+        name: "read_file",
+        input: { path: "src/\u001B]0;owned\u0007file.ts" },
+      }),
     ];
 
     expect(summaries.every((summary) => !summary.includes(secret))).toBe(true);
@@ -147,6 +151,7 @@ describe("runtime observation events", () => {
         (summary) => new TextEncoder().encode(summary).byteLength <= 2_048,
       ),
     ).toBe(true);
+    expect(summaries.join("")).not.toMatch(/[\u001B\u0007]/);
   });
 
   test("isolates sink failures from the runner", () => {

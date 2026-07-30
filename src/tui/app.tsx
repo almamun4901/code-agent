@@ -2,6 +2,7 @@ import { Box, Text, useStdout } from "ink";
 import { useEffect, useState } from "react";
 import type { TodoItem } from "../plan/schema";
 import type { ToolOutcome } from "../runtime/events";
+import { sanitizeTerminalText } from "../runtime/events";
 import type { ToolActivity, TuiState } from "./state";
 
 export type AgentAppProps = {
@@ -54,7 +55,8 @@ function PlanPane({ plan }: { plan: TodoItem[] }) {
         ? <Text dimColor>Waiting for committed plan…</Text>
         : plan.map((task) => (
             <Text key={task.id} color={planColor(task.status)}>
-              {planIcon(task.status)} {task.description}
+              {planIcon(task.status)}{" "}
+              {sanitizeTerminalText(task.description)}
             </Text>
           ))}
     </Pane>
@@ -81,7 +83,8 @@ function ToolPane({
                 key={tool.operationId}
                 color={toolColor(tool.outcome)}
               >
-                {toolIcon(tool.outcome)} {tool.toolName} · {tool.summary} ·{" "}
+                {toolIcon(tool.outcome)} {tool.toolName} ·{" "}
+                {sanitizeTerminalText(tool.summary)} ·{" "}
                 {formatDuration(elapsed)}
               </Text>
             );
@@ -107,7 +110,8 @@ function BudgetPane({ state }: { state: TuiState }) {
       {state.error
         ? (
             <Text color="red">
-              {state.error.code}: {state.error.message}
+              {state.error.code}:{" "}
+              {sanitizeTerminalText(state.error.message)}
             </Text>
           )
         : null}

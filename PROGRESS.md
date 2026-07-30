@@ -17,11 +17,13 @@ verification reports 150 offline tests, 15 focused MCP tests, 33 focused
 sandbox tests, and 4 focused safety tests passing. The four-case live E2B gate
 passes and leaves zero running sandboxes. The OpenRouter adapter and
 provider-neutral cancellation contract are implemented on
-`feat/model-routing`; 162 offline tests and type checking pass, and the
-pre-landing review is clean. Its required live multi-turn tool-call gate is
-blocked only on a locally configured `OPENROUTER_API_KEY`. Do not start the
-headless production runner or Step 7 until that gate passes and this branch is
-landed.
+`feat/model-routing`; 163 offline tests and type checking pass, and the
+pre-landing review is clean. A local OpenRouter key is configured, but its
+required live multi-turn tool-call gate is blocked by the account privacy
+policy: free endpoints require allowing provider training, while the adapter
+requires no-data-collection routes. Do not start the headless production
+runner or Step 7 until the user chooses a free training-enabled synthetic gate
+or a paid no-data-collection route, the gate passes, and this branch is landed.
 
 **Step-by-step:**
 
@@ -115,9 +117,11 @@ landed.
   repo. Needed by step 10, easy to forget until blocked on it.
 - [ ] Langfuse: self-host via Docker Compose vs. cloud free tier for dev —
   not decided. Doesn't block anything until step 9.
-- [ ] Configure a local `OPENROUTER_API_KEY` with sufficient credits. The
-  adapter is complete, but its explicit real tool-call acceptance gate cannot
-  run without this credential.
+- [x] Configure a local `OPENROUTER_API_KEY`.
+- [ ] Choose between allowing provider training for the synthetic free-model
+  acceptance gate or funding a paid no-data-collection model. Do not send
+  repository code to a training-enabled free endpoint without a separate
+  explicit decision.
 - [x] Choose and verify mutation-recovery reconciliation before the first
   live-model real-tool run, OpenRouter, or Step 7; this closes the blocking ADR
   0009 revisit.
@@ -756,7 +760,7 @@ landed.
 
 - What was done: Extracted the provider-neutral model contract, propagated
   `AbortSignal` through the loop and historical adapter, and added the
-  production OpenRouter adapter. The adapter maps strict parallel tool calls,
+  production OpenRouter adapter. The adapter maps strict ordered tool calls,
   reconstructs tool-result transcripts, reports actual input/output usage,
   requires parameter-supporting and no-data-collection routes, bounds latency
   and response size, normalizes cancellation, and fails closed on malformed or
@@ -765,8 +769,12 @@ landed.
 - What broke / had to be reworked: Review found that a failing response-stream
   cancellation could mask the intended size-limit error and that the current
   architecture docs still showed only the historical direct adapter. Both are
-  fixed. The live gate cannot run because no `OPENROUTER_API_KEY` is configured
-  locally.
+  fixed. Live free-model attempts exposed two additional provider behaviors:
+  free endpoints do not advertise the optional `parallel_tool_calls` control,
+  and provider failures can arrive in-band with HTTP 200 and
+  `finish_reason: "error"`. The adapter now relies on its stronger ordered-call
+  validation and safely normalizes canonical in-band error types. The current
+  account privacy policy rejects free providers that train on prompts.
 - Decisions made this session: Keep the final routed adapter dependency-free
   on top of the platform `fetch`, validate its complete response with strict
   Zod schemas, require actual provider usage, and retain the direct adapter
@@ -774,11 +782,14 @@ landed.
   do not create a new architectural decision.
 - Current status of the step in progress: Branch `feat/model-routing` has four
   scoped implementation/review commits plus this progress handoff. Type
-  checking, all 162 offline tests, focused cancellation and provider tests,
+  checking, all 163 offline tests, focused cancellation and provider tests,
   diff checks, and pre-landing review pass. The branch is intentionally
   unpushed and unmerged until the required live tool-call gate passes.
-- Next session should start with: Add `OPENROUTER_API_KEY` to the ignored local
-  `.env`, run `bun run test:openrouter:integration`, then complete branch
+- Next session should start with: Resolve the OpenRouter privacy/cost choice.
+  For a free synthetic-only gate, explicitly enable free-provider training in
+  OpenRouter privacy settings, run `bun run test:openrouter:integration`, then
+  disable it again. Otherwise fund the paid Haiku route and retain
+  no-data-collection routing. After the gate passes, complete branch
   verification, push, PR, merge, and merged-main verification. Only after that
   should the headless production runner begin on a new branch.
 

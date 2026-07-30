@@ -111,14 +111,14 @@ transport) until the logic they wrap is already trustworthy.
 | 3   | Plan schema + persistence | 2          | Crash recovery actually works                                         | Zod-validated TodoWrite schema; `.agent/state.json` written every turn; repeated `kill -9` mid-turn + restart resumes from the last committed plan without replaying committed reads                                                            | 6          |
 | 4   | MCP transport (stdio)     | 2          | Tool dispatch works transport-agnostically                            | Same 6 tools from step 2, now called over MCP stdio instead of direct function calls, identical behavior verified                                                                                                                              | 4          |
 | 5   | Sandbox (E2B)             | 4          | Isolation is structural, not a permission check                       | Tools execute inside E2B; worktree created per task; a probe test confirms host filesystem is unreachable from inside a tool call                                                                                                              | 5          |
-| 6   | PreToolUse safety hook    | 5          | The destructive-command guard actually holds under attack             | `rm -rf` outside worktree blocked; symlink-escape attempt blocked; `..`-traversal blocked; each has a written red-team test case                                                                                                               | 4          |
+| 6   | PreToolUse safety hook    | 5          | The destructive-command guard actually holds under attack             | `rm -rf` outside worktree blocked; symlink-escape attempt blocked; `..`-traversal blocked; each has a written red-team test case                                                                                                               | 10–14      |
 | 7   | TUI (Ink)                 | 3, 4, 5    | The harness is a pure view over already-stable state                  | Split view (plan / tool stream / budget) renders live; cold start < 2s; Ctrl-C fires `SessionEnd` and exits cleanly mid-tool                                                                                                                   | 4          |
 | 8   | Remaining hooks + budget  | 6          | All lifecycle extension points and cost ceilings are enforced         | All 8 hook types wired (`PreToolUse`, `PostToolUse`, `SessionStart`, `SessionEnd`, `UserPromptSubmit`, `Notification`, `Stop`, `PreCompact`); 3 ceilings enforced (50 turns, 200k context, $5/task); `PreCompact` fires and summarizes at 150k | 6          |
 | 9   | Telemetry                 | 8          | Observability is complete, not sampled                                | OTel spans on every model call, tool call, and hook invocation with `gen_ai.*` attributes; exported to self-hosted Langfuse; 100% tool-call span coverage verified by counting                                                                 | 3          |
 | 10  | Eval + PR posting         | all        | The whole system produces the deliverable                             | 30-task SWE-bench Pro Python run vs mini-swe-agent; `eval/results.jsonl` written; successful task opens a real PR via GitHub App with plan + diff summary in the body                                                                          | 6          |
 
 
-Total: ~47h against a 35h budget — this is intentional headroom, not a
+Total: ~53–57h against a 35h budget — this is intentional headroom, not a
 target to hit exactly. Steps 2 and 6 are the likeliest to overrun (tool edge
 cases, red-team iteration); steps 0, 3, and 9 are likeliest to go faster than
 estimated. Re-budget after step 2, once you have real signal on your pace.
@@ -198,7 +198,7 @@ order above.
 | 3 — Plan schema + persistence | complete                                              |
 | 4 — MCP transport (stdio)     | complete                                              |
 | 5 — Sandbox (E2B)             | complete                                              |
-| 6 — PreToolUse safety hook    | not started                                           |
+| 6 — PreToolUse safety hook    | complete                                              |
 | 7 — TUI (Ink)                 | not started                                           |
 | 8 — Remaining hooks + budget  | not started                                           |
 | 9 — Telemetry                 | not started                                           |

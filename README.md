@@ -8,10 +8,11 @@ creation.
 
 ## Current status
 
-Steps 0–5 are complete. The deterministic fake loop, live Claude loop with fake
+Steps 0–6 are complete. The deterministic fake loop, live Claude loop with fake
 tools, six real local tools, crash-safe plan persistence, MCP stdio transport,
-and isolated E2B execution have passed their acceptance gates. The six tools
-execute inside one short-lived E2B worktree per task.
+isolated E2B execution, and the PreToolUse safety boundary have passed their
+acceptance gates. The six tools execute serially inside one short-lived,
+network-disabled E2B worktree per task.
 The real tools have only been exercised by deterministic tests against
 disposable repositories; no model has received them.
 
@@ -33,14 +34,19 @@ The code currently proves:
   `SIGKILL` restarts;
 - terminal protocol failures and cross-field checkpoint corruption rejected
   before any resumed model call;
-- a transport-neutral real-tool dispatcher with runtime input validation and
-  a no-op policy seam for Step 6;
+- a transport-neutral real-tool dispatcher with strict runtime input
+  validation, immutable task-root binding, structured PreToolUse decisions,
+  fail-closed policy errors, and per-session serialization;
 - real `read_file`, preview/apply `edit_file`, `ripgrep`,
   `tree_sitter_symbols`, `run_shell`, and typed git operations;
-- exact MCP discovery schemas for those six tools, including four
-  discriminated Git operations;
+- exact MCP discovery schemas for those six tools, including status, diff,
+  and commit Git operations with no model-visible repository path or push;
 - persistent MCP stdio client/server transport with canonical direct-call
   parity, strict result decoding, and child-process lifecycle handling;
+- separate `agent` and `runner` identities, immutable runtime ownership,
+  protected linked-worktree Git metadata, and a fixed root-owned shell wrapper;
+- component-wise symlink rejection, no-follow file access, controlled shell
+  and Git environments, process cleanup, and disabled sandbox internet;
 - disposable git worktrees and a local bare remote for tool tests;
 - complete success and error results capped at 4,000 offline
   `o200k_base` tokens.
@@ -84,20 +90,27 @@ src/mcp/server.ts
     v
 src/tools/dispatcher.ts
     |
-    +---- runtime validation + development-root containment
-    +---- policy seam + six typed real tools
+    +---- strict schema + immutable canonical task root
+    +---- PreToolUse allow/deny + serialized execution
+    +---- typed file/Git tools as agent
+    +---- run_shell through root-owned wrapper as runner
     +---- capped, canonical serialized ToolResult
     |
     v
-disposable git worktree + local bare remote
+network-disabled E2B task worktree
+    |
+    +---- /opt/agent and Git control state protected by permissions
+    +---- ordinary task content remains mutable
 ```
 
 `E2bTaskSession` now uploads an exact clean Git revision, provisions a
 branch-backed worktree under `/workspace/tasks`, and connects to the MCP server
-through streamed E2B stdin/stdout. Later roadmap steps add safety hooks,
-telemetry, and an Ink terminal UI.
+through streamed E2B stdin/stdout. The sandbox starts with internet disabled;
+typed tools run as `agent`, while arbitrary shell commands run as `runner`
+through the fixed wrapper. Later roadmap steps add the remaining lifecycle
+hooks, telemetry, and an Ink terminal UI.
 The model loop and Step 2 real-tool dispatcher remain
-deliberately disconnected until those safety layers exist.
+deliberately disconnected until ADR 0009 mutation recovery lands.
 
 ## Setup
 
@@ -128,6 +141,12 @@ bun test
 # Focused MCP stdio suite
 bun run test:mcp
 
+# Focused offline safety/red-team suite
+bun run test:safety
+
+# Focused offline sandbox/template/session suite
+bun run test:sandbox
+
 # Complete local verification, including the focused sandbox suite
 bun run test:manual:local
 
@@ -146,8 +165,12 @@ bun run phase1
 # Explicit live acceptance test
 bun run test:integration
 
-# Start the MCP stdio server for an absolute development root
-bun run mcp:stdio -- --development-root /absolute/path/to/development-root
+# Explicit live E2B transport and safety gates
+bun run test:e2b:transport
+bun run test:e2b:safety
+
+# Start MCP for one exact task root under a trusted parent
+bun run mcp:stdio -- --worktree-root /absolute/tasks/task-a --allowed-parent /absolute/tasks
 ```
 
 The [Step 5 manual terminal test guide](docs/testing/step-5-manual-terminal-tests.md)
@@ -168,9 +191,10 @@ Invalid, incompatible, or unsupported state is preserved and reported instead
 of being silently reset.
 
 The MCP server reserves stdout for JSON-RPC. Startup and runtime diagnostics go
-to stderr. Its development root must be an existing absolute directory. MCP
-tool failures are returned as JSON `ToolResult` values; connection, protocol,
-timeout, and malformed-result failures reject the client call.
+to stderr. Its worktree root and allowed parent must be existing absolute
+directories, and the canonical worktree must be a strict child of that parent.
+MCP tool failures are returned as JSON `ToolResult` values; connection,
+protocol, timeout, and malformed-result failures reject the client call.
 
 ## Roadmap-step workflow
 
@@ -202,6 +226,13 @@ The authoritative agent instructions and exact sequence are in
 - [`docs/plans/phase-4-mcp-stdio.md`](docs/plans/phase-4-mcp-stdio.md):
   stdio architecture, wire/error contract, parity matrix, and completion
   evidence.
+- [`docs/plans/phase-5-e2b-sandbox.md`](docs/plans/phase-5-e2b-sandbox.md):
+  E2B runtime, worktree provisioning, lifecycle ownership, and live gates.
+- [`docs/plans/phase-6-pretooluse-safety-hook.md`](docs/plans/phase-6-pretooluse-safety-hook.md):
+  threat model, structural confinement, red-team matrix, and acceptance gates.
+- [`docs/testing/step-5-manual-terminal-tests.md`](docs/testing/step-5-manual-terminal-tests.md)
+  and [`docs/testing/step-6-manual-safety-tests.md`](docs/testing/step-6-manual-safety-tests.md):
+  ordered local and opt-in live verification procedures.
 - [`docs/decisions/`](docs/decisions/): architectural decision records explaining
   what was chosen, alternatives, consequences, and revisit triggers.
 - [`docs/reviews/phase-1-implementation-review.md`](docs/reviews/phase-1-implementation-review.md):
@@ -212,6 +243,8 @@ The authoritative agent instructions and exact sequence are in
   Step 3 trust-boundary findings, fixes, and recovery verification.
 - [`docs/reviews/phase-4-implementation-review.md`](docs/reviews/phase-4-implementation-review.md):
   Step 4 schema, lifecycle, mutation-parity, and result-boundary review.
+- [`docs/reviews/phase-6-implementation-review.md`](docs/reviews/phase-6-implementation-review.md):
+  Step 6 security review, engineering findings, fixes, and landing evidence.
 
 Read `PROGRESS.md` first when resuming work. It is intentionally more current
 than the roadmap.

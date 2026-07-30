@@ -15,8 +15,13 @@ host session leases, sandbox journals, same-sandbox reconnection, fail-closed
 ambiguity handling, and terminal cancellation reconciliation. Final
 verification reports 150 offline tests, 15 focused MCP tests, 33 focused
 sandbox tests, and 4 focused safety tests passing. The four-case live E2B gate
-passes and leaves zero running sandboxes. OpenRouter is the mandatory next
-change before the headless production runner and Step 7.
+passes and leaves zero running sandboxes. The OpenRouter adapter and
+provider-neutral cancellation contract are implemented on
+`feat/model-routing`; 162 offline tests and type checking pass, and the
+pre-landing review is clean. Its required live multi-turn tool-call gate is
+blocked only on a locally configured `OPENROUTER_API_KEY`. Do not start the
+headless production runner or Step 7 until that gate passes and this branch is
+landed.
 
 **Step-by-step:**
 
@@ -29,7 +34,7 @@ change before the headless production runner and Step 7.
 | 4 — MCP transport (stdio) | complete | Six tools have canonical direct/MCP parity; lifecycle and mutation checks pass |
 | 5 — Sandbox (E2B) | complete | Six remote tools, exact task worktree, host-isolation sentinel, process-loss handling, and cleanup verified on merged `main` |
 | 6 — PreToolUse safety hook | complete | Exact-root binding, two identities, symlink-safe files, offline shell, reduced Git, and red-team/live gates pass |
-| 7 — TUI (Ink) | not started | Mutation recovery complete; OpenRouter and the headless production runner remain prerequisites |
+| 7 — TUI (Ink) | not started | Mutation recovery complete; OpenRouter live verification/landing and the headless production runner remain prerequisites |
 | 8 — Remaining hooks + budget | not started | — |
 | 9 — Telemetry | not started | — |
 | 10 — Eval + PR posting | not started | — |
@@ -110,8 +115,9 @@ change before the headless production runner and Step 7.
   repo. Needed by step 10, easy to forget until blocked on it.
 - [ ] Langfuse: self-host via Docker Compose vs. cloud free tier for dev —
   not decided. Doesn't block anything until step 9.
-- [ ] OpenRouter account/credits not yet set up — deferred until after Steps
-  5–6, but flagging so it is not a surprise at the live real-tool boundary.
+- [ ] Configure a local `OPENROUTER_API_KEY` with sufficient credits. The
+  adapter is complete, but its explicit real tool-call acceptance gate cannot
+  run without this credential.
 - [x] Choose and verify mutation-recovery reconciliation before the first
   live-model real-tool run, OpenRouter, or Step 7; this closes the blocking ADR
   0009 revisit.
@@ -745,6 +751,36 @@ change before the headless production runner and Step 7.
 - Next session should start with: Implement the OpenRouter provider boundary
   on a fresh branch from updated `main`, verify normalized tool calls, then
   build the headless production runner before Step 7.
+
+### 2026-07-30 — Routed model provider
+
+- What was done: Extracted the provider-neutral model contract, propagated
+  `AbortSignal` through the loop and historical adapter, and added the
+  production OpenRouter adapter. The adapter maps strict parallel tool calls,
+  reconstructs tool-result transcripts, reports actual input/output usage,
+  requires parameter-supporting and no-data-collection routes, bounds latency
+  and response size, normalizes cancellation, and fails closed on malformed or
+  inconsistent responses. Added deterministic coverage and an explicit live
+  multi-turn tool-call gate. Updated current architecture documentation.
+- What broke / had to be reworked: Review found that a failing response-stream
+  cancellation could mask the intended size-limit error and that the current
+  architecture docs still showed only the historical direct adapter. Both are
+  fixed. The live gate cannot run because no `OPENROUTER_API_KEY` is configured
+  locally.
+- Decisions made this session: Keep the final routed adapter dependency-free
+  on top of the platform `fetch`, validate its complete response with strict
+  Zod schemas, require actual provider usage, and retain the direct adapter
+  only as the historical Phase 1 gate. These implement existing ADR 0006 and
+  do not create a new architectural decision.
+- Current status of the step in progress: Branch `feat/model-routing` has four
+  scoped implementation/review commits plus this progress handoff. Type
+  checking, all 162 offline tests, focused cancellation and provider tests,
+  diff checks, and pre-landing review pass. The branch is intentionally
+  unpushed and unmerged until the required live tool-call gate passes.
+- Next session should start with: Add `OPENROUTER_API_KEY` to the ignored local
+  `.env`, run `bun run test:openrouter:integration`, then complete branch
+  verification, push, PR, merge, and merged-main verification. Only after that
+  should the headless production runner begin on a new branch.
 
 ---
 

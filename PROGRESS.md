@@ -124,7 +124,7 @@ before the headless production runner or Step 7 begins.
 - [x] Choose and verify mutation-recovery reconciliation before the first
   live-model real-tool run, OpenRouter, or Step 7; this closes the blocking ADR
   0009 revisit.
-- [ ] Implement and verify the OpenRouter provider boundary before connecting
+- [x] Implement and verify the OpenRouter provider boundary before connecting
   the production model/tool runner or starting Step 7.
 - [x] Resolve the focused live-gate failure. The initial ambiguous E2B create
   response was followed by a successful bounded run. Template workspace
@@ -781,17 +781,17 @@ before the headless production runner or Step 7 begins.
   Zod schemas, require actual provider usage, and retain the direct adapter
   only as the historical Phase 1 gate. These implement existing ADR 0006 and
   do not create a new architectural decision.
-- Current status of the step in progress: Branch `feat/model-routing` has
-  scoped implementation, review-fix, documentation, and progress commits.
-  Type checking, all 164 offline tests, 15 focused MCP tests, 33 focused
-  sandbox tests, 4 focused safety tests, fake-loop regression, template
-  inspection, and diff checks pass. The live OpenRouter gate completes four
-  accepted model turns and three correlated reads through
-  `cohere/north-mini-code:free` in 68.5 seconds. Final pre-landing review is
-  clean and the branch is ready to push.
-- Next session should start with: Push `feat/model-routing`, create and merge
-  its PR, and reverify merged `main`. Then pull `main` and start the headless
-  production runner on a fresh branch.
+- Current status of the step in progress: The routed provider prerequisite is
+  merged through PR #3. Merged `main` passes type checking, all 164 offline
+  tests, 15 focused MCP tests, 33 focused sandbox tests, 4 focused safety
+  tests, fake-loop regression, template inspection, and diff checks. The
+  repeated live OpenRouter gate completed through
+  `cohere/north-mini-code:free` in 55.5 seconds. The provider prerequisite is
+  complete.
+- Next session should start with: Pull updated `main` and build the headless
+  production runner on a fresh `feat/agent-runtime` branch. Verify
+  model → plan → E2B MCP tool → checkpoint execution and cancellation before
+  starting the terminal interface.
 
 ---
 

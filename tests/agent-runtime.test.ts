@@ -112,6 +112,17 @@ describe("production agent loop", () => {
     ]);
     expect((await store.load())?.lifecycle).toBe("completed");
     expect((await store.load())?.pendingTurn).toBeNull();
+
+    const completedSession = new FakeSession();
+    await expect(
+      runProductionLoop({
+        ...prepared,
+        callModel: queuedModel([]),
+        session: completedSession,
+        checkpointStore: store,
+      }),
+    ).resolves.toEqual(result);
+    expect(completedSession.calls).toHaveLength(0);
   });
 
   test("resumes a pending mutation with its durable operation ID", async () => {
@@ -162,6 +173,58 @@ describe("production agent loop", () => {
     expect(resumedSession.calls[0]?.options.operationId).toBe(
       pending?.action?.operationId,
     );
+  });
+
+  test("rejects a pending checkpoint that disagrees with model content", async () => {
+    const repo = await repository();
+    const prepared = await prepareAgentRun(
+      repo.worktreePath,
+      "Reject altered intent",
+    );
+    const store = new MemoryProductionCheckpointStore();
+    const abort = new AbortController();
+    const interrupted = new FakeSession();
+    interrupted.callImpl = async () => {
+      abort.abort();
+      throw new DOMException("cancelled", "AbortError");
+    };
+    await expect(
+      runProductionLoop({
+        ...prepared,
+        callModel: queuedModel([
+          turn(
+            plan([["inspect", "Reject altered intent", "in_progress"]]),
+            action("read-original", "read_file", {
+              path: "README.md",
+            }),
+          ),
+        ]),
+        session: interrupted,
+        checkpointStore: store,
+        signal: abort.signal,
+      }),
+    ).rejects.toThrow();
+
+    const altered = await store.load();
+    if (!altered?.pendingTurn?.action) {
+      throw new Error("Expected a pending action.");
+    }
+    altered.pendingTurn.action.request = {
+      name: "read_file",
+      input: { path: "package.json" },
+    };
+    const alteredStore = new MemoryProductionCheckpointStore(altered);
+    const resumed = new FakeSession();
+
+    await expect(
+      runProductionLoop({
+        ...prepared,
+        callModel: queuedModel([]),
+        session: resumed,
+        checkpointStore: alteredStore,
+      }),
+    ).rejects.toThrow("pending turn does not match");
+    expect(resumed.calls).toHaveLength(0);
   });
 
   test("accepts a sequential plan then action handshake", async () => {

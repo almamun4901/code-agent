@@ -12,6 +12,7 @@ import {
   type TodoItem,
 } from "../plan/schema";
 import type { E2bTaskSession } from "../sandbox/e2b-session";
+import { toolResultWireSchema } from "../mcp/schemas";
 import type { ModelToolRequest } from "../tools/contracts";
 import { validateToolCall } from "../tools/validate-call";
 import type { ProductionCheckpointStore } from "./checkpoint";
@@ -65,7 +66,7 @@ const SYSTEM_PROMPT = [
   "",
   "A plan response must:",
   "1. Call rewrite_plan exactly once and before every other tool call.",
-  "2. Keep a complete plan of 1-20 concise tasks with unique stable IDs.",
+  "2. Keep a complete plan of 1-20 concise tasks with unique IDs.",
   "3. Keep at least one task in_progress while work remains.",
   "4. On later turns, rewrite the complete current plan; revise it when new",
   "   information changes the necessary work.",
@@ -222,7 +223,7 @@ export async function runProductionLoop(
             role: "user",
             content:
               `The previous response was rejected without executing tools: ${protocolError.message} ` +
-              "Retry with rewrite_plan first, the complete stable plan, and at most one repository action.",
+              "Retry with a complete rewrite_plan or one action against the committed plan.",
           },
         ],
       };
@@ -443,20 +444,8 @@ function validateProductionTurn(
 }
 
 function validatePlan(plan: TodoItem[], state: ProductionAgentState): void {
-  const ids = new Set(plan.map((task) => task.id));
-  if (ids.size !== plan.length) {
-    throw new ProductionTurnProtocolError("Plan task IDs must be unique.");
-  }
+  validatePlanShape(plan);
   const completed = countCompleted(plan);
-  const statuses = plan.map((task) => task.status);
-  if (
-    completed !== plan.length &&
-    !statuses.includes("in_progress")
-  ) {
-    throw new ProductionTurnProtocolError(
-      "An incomplete plan must contain an in_progress task.",
-    );
-  }
   if (state.plan.length === 0) {
     if (completed === plan.length) {
       throw new ProductionTurnProtocolError(
@@ -472,6 +461,23 @@ function validatePlan(plan: TodoItem[], state: ProductionAgentState): void {
   ) {
     throw new ProductionTurnProtocolError(
       "Plan completion may advance by one only after a successful action.",
+    );
+  }
+}
+
+function validatePlanShape(plan: TodoItem[]): void {
+  const ids = new Set(plan.map((task) => task.id));
+  if (ids.size !== plan.length) {
+    throw new ProductionTurnProtocolError("Plan task IDs must be unique.");
+  }
+  const completed = countCompleted(plan);
+  const statuses = plan.map((task) => task.status);
+  if (
+    completed !== plan.length &&
+    !statuses.includes("in_progress")
+  ) {
+    throw new ProductionTurnProtocolError(
+      "An incomplete plan must contain an in_progress task.",
     );
   }
 }
@@ -548,9 +554,258 @@ function validateRecoveredState(
       "Checkpoint lifecycle and committed plan disagree.",
     );
   }
+  if (state.plan.length > 0) {
+    validatePlanShape(state.plan);
+  }
   if (state.lifecycle !== "running" && state.pendingTurn) {
     throw new ProductionTurnProtocolError(
       "A terminal checkpoint cannot contain a pending turn.",
+    );
+  }
+  if (
+    (state.lifecycle === "failed") !== Boolean(state.terminalError)
+  ) {
+    throw new ProductionTurnProtocolError(
+      "Checkpoint lifecycle and terminal error disagree.",
+    );
+  }
+  const [firstMessage] = state.transcript;
+  if (
+    !firstMessage ||
+    firstMessage.role !== "user" ||
+    firstMessage.content !== initialPrompt(state.task)
+  ) {
+    throw new ProductionTurnProtocolError(
+      "Checkpoint does not contain the canonical initial task prompt.",
+    );
+  }
+  validateRecoveredTranscript(state);
+  const terminalAttempt = state.lifecycle === "failed" ? 1 : 0;
+  const pendingAttempt = state.pendingTurn ? 1 : 0;
+  if (
+    state.counters.modelTurns !==
+      state.counters.committedTurns +
+        state.counters.protocolRetries +
+        terminalAttempt +
+        pendingAttempt ||
+    state.counters.toolCalls > state.counters.committedTurns ||
+    state.counters.planRewrites > state.counters.committedTurns
+  ) {
+    throw new ProductionTurnProtocolError(
+      "Checkpoint turn counters are inconsistent.",
+    );
+  }
+  if (
+    (state.lastToolResult === null) !==
+      (state.lastToolSucceeded === null) ||
+    (state.lastToolResult &&
+      state.lastToolResult.success !== state.lastToolSucceeded)
+  ) {
+    throw new ProductionTurnProtocolError(
+      "Checkpoint tool observation fields disagree.",
+    );
+  }
+  const finalMessage = state.transcript.at(-1);
+  const endsWithCorrection =
+    finalMessage?.role === "user" &&
+    typeof finalMessage.content === "string" &&
+    finalMessage.content.startsWith(
+      "The previous response was rejected without executing tools:",
+    );
+  if ((state.consecutiveInvalidAttempts === 1) !== endsWithCorrection) {
+    throw new ProductionTurnProtocolError(
+      "Checkpoint protocol-retry state and transcript disagree.",
+    );
+  }
+  if (state.pendingTurn) {
+    validateRecoveredPendingTurn(state);
+  }
+}
+
+function validateRecoveredTranscript(state: ProductionAgentState): void {
+  let historicalPlan: TodoItem[] = [];
+  let historicalToolSucceeded: boolean | null = null;
+  let historicalToolResult: ProductionAgentState["lastToolResult"] = null;
+  let committedTurns = 0;
+  let protocolRetries = 0;
+  let toolCalls = 0;
+  let planRewrites = 0;
+
+  for (let index = 1; index < state.transcript.length; index += 1) {
+    const message = state.transcript[index];
+    if (!message) {
+      throw new ProductionTurnProtocolError(
+        "Checkpoint transcript contains a missing message.",
+      );
+    }
+    if (message.role === "user" && typeof message.content === "string") {
+      if (
+        !message.content.startsWith(
+          "The previous response was rejected without executing tools:",
+        )
+      ) {
+        throw new ProductionTurnProtocolError(
+          "Checkpoint transcript contains an unknown correction.",
+        );
+      }
+      protocolRetries += 1;
+      continue;
+    }
+    if (message.role !== "assistant") {
+      throw new ProductionTurnProtocolError(
+        "Checkpoint tool results lack a preceding assistant turn.",
+      );
+    }
+    const resultMessage = state.transcript[index + 1];
+    if (
+      !resultMessage ||
+      resultMessage.role !== "user" ||
+      !Array.isArray(resultMessage.content)
+    ) {
+      throw new ProductionTurnProtocolError(
+        "Checkpoint assistant turn lacks correlated tool results.",
+      );
+    }
+
+    const historicalState: ProductionAgentState = {
+      ...state,
+      lifecycle: "running",
+      plan: historicalPlan,
+      lastToolSucceeded: historicalToolSucceeded,
+      lastToolResult: historicalToolResult,
+      pendingTurn: null,
+      terminalError: null,
+    };
+    const validated = validateProductionTurn(
+      message.content,
+      "tool_use",
+      historicalState,
+    );
+    const calls = message.content.filter(
+      (block): block is ToolUseBlock => block.type === "tool_use",
+    );
+    const results = resultMessage.content.filter(
+      (block): block is ToolResultBlock => block.type === "tool_result",
+    );
+    if (
+      results.length !== resultMessage.content.length ||
+      results.length !== calls.length ||
+      calls.some(
+        (call, callIndex) => results[callIndex]?.toolUseId !== call.id,
+      )
+    ) {
+      throw new ProductionTurnProtocolError(
+        "Checkpoint tool calls and results are not exactly correlated.",
+      );
+    }
+
+    let resultIndex = 0;
+    if (validated.planToolId) {
+      const planResult = results[resultIndex++];
+      if (
+        !planResult ||
+        planResult.isError === true ||
+        !isAcceptedPlanResult(planResult.content)
+      ) {
+        throw new ProductionTurnProtocolError(
+          "Checkpoint plan rewrite lacks its accepted result.",
+        );
+      }
+      planRewrites += 1;
+    }
+
+    historicalToolSucceeded = null;
+    historicalToolResult = null;
+    if (validated.action) {
+      const actionResult = results[resultIndex];
+      if (!actionResult) {
+        throw new ProductionTurnProtocolError(
+          "Checkpoint action lacks its terminal result.",
+        );
+      }
+      let decoded: unknown;
+      try {
+        decoded = JSON.parse(actionResult.content);
+      } catch {
+        throw new ProductionTurnProtocolError(
+          "Checkpoint action result is not valid JSON.",
+        );
+      }
+      const parsed = toolResultWireSchema.safeParse(decoded);
+      if (
+        !parsed.success ||
+        Boolean(actionResult.isError) !== !parsed.data.success
+      ) {
+        throw new ProductionTurnProtocolError(
+          "Checkpoint action result is invalid or contradictory.",
+        );
+      }
+      historicalToolResult = parsed.data;
+      historicalToolSucceeded = parsed.data.success;
+      toolCalls += 1;
+    }
+
+    historicalPlan = validated.plan;
+    committedTurns += 1;
+    index += 1;
+  }
+
+  if (
+    committedTurns !== state.counters.committedTurns ||
+    protocolRetries !== state.counters.protocolRetries ||
+    toolCalls !== state.counters.toolCalls ||
+    planRewrites !== state.counters.planRewrites ||
+    JSON.stringify(historicalPlan) !== JSON.stringify(state.plan) ||
+    historicalToolSucceeded !== state.lastToolSucceeded ||
+    JSON.stringify(historicalToolResult) !==
+      JSON.stringify(state.lastToolResult)
+  ) {
+    throw new ProductionTurnProtocolError(
+      "Checkpoint transcript does not match its committed state.",
+    );
+  }
+}
+
+function isAcceptedPlanResult(content: string): boolean {
+  try {
+    const decoded: unknown = JSON.parse(content);
+    return (
+      typeof decoded === "object" &&
+      decoded !== null &&
+      !Array.isArray(decoded) &&
+      Object.keys(decoded).length === 1 &&
+      "accepted" in decoded &&
+      decoded.accepted === true
+    );
+  } catch {
+    return false;
+  }
+}
+
+function validateRecoveredPendingTurn(state: ProductionAgentState): void {
+  const pending = state.pendingTurn!;
+  const validated = validateProductionTurn(
+    pending.assistantContent,
+    "tool_use",
+    { ...state, pendingTurn: null },
+  );
+  const sameAction =
+    pending.action === null && validated.action === null
+      ? true
+      : Boolean(
+          pending.action &&
+            validated.action &&
+            pending.action.toolUseId === validated.action.toolUseId &&
+            JSON.stringify(pending.action.request) ===
+              JSON.stringify(validated.action.request),
+        );
+  if (
+    pending.planToolId !== validated.planToolId ||
+    JSON.stringify(pending.plan) !== JSON.stringify(validated.plan) ||
+    !sameAction
+  ) {
+    throw new ProductionTurnProtocolError(
+      "Checkpoint pending turn does not match its validated assistant content.",
     );
   }
 }

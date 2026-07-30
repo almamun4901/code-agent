@@ -1,14 +1,14 @@
-import {
-  createAnthropicModel,
-  type AssistantBlock,
-  type CallModel,
-  type ConversationMessage,
-  type ModelRequest,
-  type ModelToolDefinition,
-  type ModelTurn,
-  type ToolResultBlock,
-  type ToolUseBlock,
-} from "./model/anthropic";
+import { createAnthropicModel } from "./model/anthropic";
+import type {
+  AssistantBlock,
+  CallModel,
+  ConversationMessage,
+  ModelRequest,
+  ModelToolDefinition,
+  ModelTurn,
+  ToolResultBlock,
+  ToolUseBlock,
+} from "./model/contracts";
 import {
   fakeReadFile,
   type FakeReadFileResult,
@@ -66,6 +66,7 @@ export type LoopOptions = {
   checkpointStore?: CheckpointStore;
   repoPath?: string;
   startupPolicy?: StartupPolicy;
+  signal?: AbortSignal;
 };
 
 export class TurnProtocolError extends Error {
@@ -231,6 +232,7 @@ export async function runAgentLoop(options: LoopOptions): Promise<LoopResult> {
 
     const turn = await options.callModel(
       createModelRequest(state.transcript),
+      options.signal ? { signal: options.signal } : undefined,
     );
     const countersAfterModel = {
       ...state.counters,

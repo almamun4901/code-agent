@@ -15,6 +15,7 @@ import {
   createAnthropicModel,
   ModelConfigurationError,
   ModelProviderError,
+  ModelRequestCancelledError,
   type CallModel,
   type ModelRequest,
   type ModelTurn,
@@ -424,6 +425,25 @@ describe("runAgentLoop", () => {
       }),
     ).rejects.toBeInstanceOf(LoopLimitError);
   });
+
+  test("passes the caller cancellation signal to model requests", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    let receivedSignal: AbortSignal | undefined;
+
+    await expect(
+      runAgentLoop({
+        callModel: async (_request, options) => {
+          receivedSignal = options?.signal;
+          throw new ModelRequestCancelledError();
+        },
+        checkpointStore: new MemoryCheckpointStore(),
+        logger: () => {},
+        signal: controller.signal,
+      }),
+    ).rejects.toBeInstanceOf(ModelRequestCancelledError);
+    expect(receivedSignal).toBe(controller.signal);
+  });
 });
 
 describe("fakeReadFile", () => {
@@ -475,6 +495,28 @@ describe("Anthropic model adapter", () => {
     await expect(callModel(makeRequest())).rejects.toEqual(
       new ModelProviderError("Anthropic request failed unexpectedly."),
     );
+  });
+
+  test("propagates caller cancellation to the Anthropic request", async () => {
+    const controller = new AbortController();
+    let receivedSignal: AbortSignal | undefined;
+    const callModel = createAnthropicModel({
+      apiKey: "test-key",
+      client: {
+        messages: {
+          create: async (_params, options) => {
+            receivedSignal = options?.signal;
+            throw new DOMException("aborted", "AbortError");
+          },
+        },
+      },
+    });
+
+    controller.abort();
+    await expect(
+      callModel(makeRequest(), { signal: controller.signal }),
+    ).rejects.toBeInstanceOf(ModelRequestCancelledError);
+    expect(receivedSignal).toBe(controller.signal);
   });
 
   test("keeps safe 4xx validation detail without exposing the raw envelope", async () => {

@@ -85,6 +85,7 @@ const errorEnvelopeSchema = z
 type OpenRouterModelOptions = {
   apiKey?: string;
   model?: string;
+  dataCollection?: "allow" | "deny";
   timeoutMs?: number;
   fetchImpl?: (
     input: string | URL | Request,
@@ -106,6 +107,15 @@ export function createOpenRouterModel(
     options.model?.trim() ||
     process.env.OPENROUTER_MODEL?.trim() ||
     DEFAULT_MODEL;
+  const dataCollection =
+    options.dataCollection ??
+    process.env.OPENROUTER_DATA_COLLECTION?.trim() ??
+    "deny";
+  if (dataCollection !== "allow" && dataCollection !== "deny") {
+    throw new ModelConfigurationError(
+      'OPENROUTER_DATA_COLLECTION must be "allow" or "deny".',
+    );
+  }
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1) {
     throw new ModelConfigurationError(
@@ -132,7 +142,9 @@ export function createOpenRouterModel(
           Authorization: `Bearer ${apiKey}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify(toOpenRouterRequest(request, model)),
+        body: JSON.stringify(
+          toOpenRouterRequest(request, model, dataCollection),
+        ),
         signal,
       });
       const serialized = await readBoundedResponse(response);
@@ -178,7 +190,11 @@ export function createOpenRouterModel(
   };
 }
 
-function toOpenRouterRequest(request: ModelRequest, model: string) {
+function toOpenRouterRequest(
+  request: ModelRequest,
+  model: string,
+  dataCollection: "allow" | "deny",
+) {
   return {
     model,
     messages: [
@@ -190,7 +206,7 @@ function toOpenRouterRequest(request: ModelRequest, model: string) {
     max_tokens: request.maxTokens,
     provider: {
       require_parameters: true,
-      data_collection: "deny",
+      data_collection: dataCollection,
     },
     stream: false,
   };

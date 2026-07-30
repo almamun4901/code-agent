@@ -15,6 +15,39 @@ describe("OpenRouter model adapter", () => {
     expect(() =>
       createOpenRouterModel({ apiKey: "test-key", timeoutMs: 0 }),
     ).toThrow("positive integer");
+    expect(() =>
+      createOpenRouterModel({
+        apiKey: "test-key",
+        dataCollection: "invalid" as "deny",
+      }),
+    ).toThrow('must be "allow" or "deny"');
+  });
+
+  test("allows an explicit data-collection route override", async () => {
+    let requestedBody: Record<string, unknown> | undefined;
+    const callModel = createOpenRouterModel({
+      apiKey: "test-key",
+      dataCollection: "allow",
+      fetchImpl: async (_input, init) => {
+        requestedBody = JSON.parse(String(init?.body));
+        return jsonResponse(
+          completion({
+            finish_reason: "stop",
+            content: "done",
+          }),
+        );
+      },
+    });
+
+    await expect(callModel(makeRequest())).resolves.toMatchObject({
+      stopReason: "end_turn",
+    });
+    expect(requestedBody).toMatchObject({
+      provider: {
+        require_parameters: true,
+        data_collection: "allow",
+      },
+    });
   });
 
   test("normalizes messages, tools, tool calls, and actual usage", async () => {
@@ -23,6 +56,7 @@ describe("OpenRouter model adapter", () => {
     const callModel = createOpenRouterModel({
       apiKey: "test-key",
       model: "test/tool-model",
+      dataCollection: "deny",
       fetchImpl: async (input, init) => {
         requestedUrl = String(input);
         requestedInit = init;

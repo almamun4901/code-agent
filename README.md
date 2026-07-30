@@ -194,7 +194,7 @@ bun run test:e2b:safety
 # Focused offline production-runner suite
 bun run test:runtime
 
-# Explicit free-model -> live E2B MCP production-runner gate
+# Explicit selected-provider -> live E2B MCP production-runner gate
 bun run test:runtime:integration
 
 # Start MCP for one exact task root under a trusted parent

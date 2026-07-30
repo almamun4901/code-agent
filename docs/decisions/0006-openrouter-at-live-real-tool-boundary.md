@@ -1,7 +1,7 @@
 # 0006 — Introduce OpenRouter at the live real-tool boundary
 
 **Date:** 2026-07-26
-**Status:** accepted
+**Status:** superseded by 0015
 
 ## Context
 
@@ -37,5 +37,6 @@ or the Step 7 TUI, whichever comes first.
 
 ## Revisit when
 
-After Steps 5 and 6 are complete, immediately before the first live-model
-real-tool run or Step 7, whichever comes first.
+Superseded by ADR 0015 after the OpenRouter boundary was implemented and
+verified, but its free-model quota could not support continued Step 7
+development.

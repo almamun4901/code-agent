@@ -25,7 +25,7 @@ terminal result.
 Allow a plan rewrite with zero or one action and allow subsequent one-action
 responses against the last committed incomplete plan. Plan revisions are
 bounded to 20 tasks, require an active task while incomplete, and may advance
-completed-task accounting by one only after a successful tool observation.
+completed-task accounting only after a successful tool observation.
 
 ## Alternatives considered
 

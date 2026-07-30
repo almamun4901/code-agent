@@ -343,7 +343,7 @@ async function readBoundedResponse(response: Response): Promise<string> {
     if (done) break;
     totalBytes += value.byteLength;
     if (totalBytes > MAX_RESPONSE_BYTES) {
-      await reader.cancel();
+      await reader.cancel().catch(() => {});
       throw new ModelProviderError(
         "OpenRouter response exceeded the maximum allowed size.",
         response.status || undefined,

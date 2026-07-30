@@ -252,7 +252,14 @@ describe("OpenRouter model adapter", () => {
       "exceeded the maximum allowed size",
     );
 
-    const oversizedBody = "x".repeat(2 * 1024 * 1024 + 1);
+    const oversizedBody = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(2 * 1024 * 1024 + 1));
+      },
+      cancel() {
+        throw new Error("provider stream cancellation failed");
+      },
+    });
     const streamedOversize = createOpenRouterModel({
       apiKey: "test-key",
       fetchImpl: async () => new Response(oversizedBody),

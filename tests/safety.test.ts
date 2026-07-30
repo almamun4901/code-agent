@@ -39,6 +39,44 @@ async function expectSafeFollowUp(repo: TemporaryRepository): Promise<void> {
 }
 
 describe("PreToolUse red-team boundary", () => {
+  test("propagates cancellation into an active policy evaluation", async () => {
+    const repo = await fixture();
+    const abort = new AbortController();
+    let evaluating!: () => void;
+    const started = new Promise<void>((resolve) => {
+      evaluating = resolve;
+    });
+    const result = dispatchTool(
+      {
+        name: "read_file",
+        input: { path: "src/sample.ts" },
+      },
+      {
+        worktreeRoot: repo.worktreePath,
+        abortSignal: abort.signal,
+        preToolUse: async (_request, context) => {
+          expect(context.abortSignal).toBe(abort.signal);
+          evaluating();
+          await new Promise<void>((_, reject) => {
+            context.abortSignal?.addEventListener(
+              "abort",
+              () => reject(new DOMException("cancelled", "AbortError")),
+              { once: true },
+            );
+          });
+          return { outcome: "allow" };
+        },
+      },
+    );
+
+    await started;
+    abort.abort();
+    await expect(result).resolves.toMatchObject({
+      success: false,
+      metadata: { code: "CANCELLED" },
+    });
+  });
+
   test("every obvious shell attack has a stable denial and no protected effect", async () => {
     const repo = await fixture();
     const protectedFile = path.join(repo.root, "protected.txt");

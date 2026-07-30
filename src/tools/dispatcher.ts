@@ -61,13 +61,24 @@ async function evaluatePolicy(
   try {
     decision = await defaultPreToolUse(request, {
       worktreeRoot: context.worktreeRoot,
+      abortSignal: context.abortSignal,
     });
     if (decision.outcome === "allow" && context.preToolUse) {
       decision = await context.preToolUse(request, {
         worktreeRoot: context.worktreeRoot,
+        abortSignal: context.abortSignal,
       });
     }
   } catch (error) {
+    if (
+      context.abortSignal?.aborted ||
+      (error instanceof Error && error.name === "AbortError")
+    ) {
+      throw new ToolExecutionError(
+        "PreToolUse policy evaluation was cancelled.",
+        "CANCELLED",
+      );
+    }
     throw new ToolExecutionError(
       `PreToolUse policy failed: ${
         error instanceof Error ? error.message : "unknown policy failure"

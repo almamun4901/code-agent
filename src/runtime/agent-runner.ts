@@ -86,24 +86,31 @@ export class AgentRunConfigurationError extends Error {
   }
 }
 
+export class AgentRunUsageError extends AgentRunConfigurationError {
+  constructor(message: string, options: ErrorOptions = {}) {
+    super(message, options);
+    this.name = "AgentRunUsageError";
+  }
+}
+
 export async function prepareAgentRun(
   repoPath: string,
   task: string,
 ): Promise<PreparedAgentRun> {
   const normalizedTask = task.trim();
   if (!normalizedTask) {
-    throw new AgentRunConfigurationError("Task must not be blank.");
+    throw new AgentRunUsageError("Task must not be blank.");
   }
   if (
     new TextEncoder().encode(normalizedTask).byteLength >
     MAX_TASK_BYTES
   ) {
-    throw new AgentRunConfigurationError(
+    throw new AgentRunUsageError(
       `Task must not exceed ${MAX_TASK_BYTES} UTF-8 bytes.`,
     );
   }
   if (!path.isAbsolute(repoPath)) {
-    throw new AgentRunConfigurationError(
+    throw new AgentRunUsageError(
       "Repository path must be absolute.",
     );
   }
@@ -112,14 +119,14 @@ export async function prepareAgentRun(
   try {
     const details = await stat(repoPath);
     if (!details.isDirectory()) {
-      throw new AgentRunConfigurationError(
+      throw new AgentRunUsageError(
         "Repository path must identify a directory.",
       );
     }
     canonicalRepoPath = await realpath(repoPath);
   } catch (error) {
-    if (error instanceof AgentRunConfigurationError) throw error;
-    throw new AgentRunConfigurationError(
+    if (error instanceof AgentRunUsageError) throw error;
+    throw new AgentRunUsageError(
       `Repository path does not exist: ${repoPath}`,
       { cause: error },
     );
@@ -127,7 +134,7 @@ export async function prepareAgentRun(
 
   const topLevel = await gitTopLevel(canonicalRepoPath);
   if ((await realpath(topLevel)) !== canonicalRepoPath) {
-    throw new AgentRunConfigurationError(
+    throw new AgentRunUsageError(
       "Repository path must be the root of a Git repository.",
     );
   }
@@ -476,7 +483,7 @@ function exitCodeFor(
 ): 0 | 1 | 2 | 130 {
   if (reason === "completed") return 0;
   if (reason === "cancelled") return 130;
-  return error instanceof AgentRunConfigurationError ? 2 : 1;
+  return error instanceof AgentRunUsageError ? 2 : 1;
 }
 
 const finishedEvents = new WeakSet<AgentEventPublisher>();
@@ -542,7 +549,7 @@ function parseModelProvider(
 ): AgentModelProvider {
   const normalized = value?.trim() || "anthropic";
   if (normalized !== "anthropic" && normalized !== "openrouter") {
-    throw new AgentRunConfigurationError(
+    throw new AgentRunUsageError(
       'AGENT_MODEL_PROVIDER must be "anthropic" or "openrouter".',
     );
   }

@@ -22,6 +22,7 @@ import {
   FileProductionCheckpointStore,
   MemoryProductionCheckpointStore,
   ProductionCheckpointError,
+  type ProductionCheckpointStore,
 } from "../src/runtime/checkpoint";
 import {
   runProductionLoop,
@@ -516,6 +517,98 @@ describe("host-side production runner", () => {
       observed.filter((event) => event.type === "run_finished"),
     ).toHaveLength(1);
     expect(observed.map((event) => event.type)).toContain("tool_finished");
+  });
+
+  test("cancels an active model request before sandbox cleanup", async () => {
+    const repo = await repository();
+    const session = new FakeSession();
+    let modelStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      modelStarted = resolve;
+    });
+    const controller = startAgentRun({
+      repoPath: repo.worktreePath,
+      task: "Cancel model",
+      templateId: "template:test",
+      checkpointStore: new MemoryProductionCheckpointStore(),
+      callModel: async (_request, options) => {
+        modelStarted();
+        return await new Promise<ModelTurn>((_, reject) => {
+          options?.signal?.addEventListener(
+            "abort",
+            () => reject(new DOMException("cancelled", "AbortError")),
+            { once: true },
+          );
+        });
+      },
+      openSession: async () =>
+        session as unknown as E2bTaskSession,
+    });
+
+    await started;
+    await expect(controller.stop("ui")).resolves.toMatchObject({
+      status: "cancelled",
+      exitCode: 130,
+    });
+    expect(session.lifecycle).toEqual(["reconcile", "close"]);
+  });
+
+  test("waits for an in-flight checkpoint commit before cancelling", async () => {
+    const repo = await repository();
+    const session = new FakeSession();
+    const backing = new MemoryProductionCheckpointStore();
+    let saveCount = 0;
+    let commitStarted!: () => void;
+    let releaseCommit!: () => void;
+    const committing = new Promise<void>((resolve) => {
+      commitStarted = resolve;
+    });
+    const commitRelease = new Promise<void>((resolve) => {
+      releaseCommit = resolve;
+    });
+    const store: ProductionCheckpointStore = {
+      load: () => backing.load(),
+      async save(state) {
+        saveCount += 1;
+        if (saveCount === 3) {
+          commitStarted();
+          await commitRelease;
+        }
+        await backing.save(state);
+      },
+    };
+    const controller = startAgentRun({
+      repoPath: repo.worktreePath,
+      task: "Cancel checkpoint",
+      templateId: "template:test",
+      checkpointStore: store,
+      callModel: queuedModel([
+        turn(
+          plan([["inspect", "Inspect safely", "in_progress"]]),
+          action("read", "read_file", { path: "README.md" }),
+        ),
+      ]),
+      openSession: async () =>
+        session as unknown as E2bTaskSession,
+    });
+
+    await committing;
+    const stopping = controller.stop("sigint");
+    let settled = false;
+    void stopping.then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    releaseCommit();
+    await expect(stopping).resolves.toMatchObject({
+      status: "cancelled",
+      exitCode: 130,
+    });
+    expect((await backing.load())?.plan[0]?.description).toBe(
+      "Inspect safely",
+    );
+    expect(session.lifecycle).toEqual(["reconcile", "close"]);
   });
 
   test("runs SessionEnd after cleanup and maps successful completion", async () => {

@@ -17,12 +17,20 @@ export async function runProcess(
     timeoutMs?: number;
     env?: Record<string, string>;
     signal?: AbortSignal;
+    onAbort?: () => void | Promise<void>;
   } = {},
 ): Promise<ProcessResult> {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const controller = new AbortController();
   let timedOut = false;
-  const abortFromCaller = () => controller.abort(options.signal?.reason);
+  let abortCleanup: Promise<void> = Promise.resolve();
+  const abortFromCaller = () => {
+    controller.abort(options.signal?.reason);
+    abortCleanup = Promise.resolve()
+      .then(() => options.onAbort?.())
+      .then(() => undefined)
+      .catch(() => undefined);
+  };
   if (options.signal?.aborted) {
     throw new ToolExecutionError(
       "Tool execution was cancelled.",
@@ -51,6 +59,7 @@ export async function runProcess(
       new Response(process.stderr).text(),
       process.exited,
     ]);
+    await abortCleanup;
 
     if (options.signal?.aborted) {
       throw new ToolExecutionError(
@@ -60,6 +69,7 @@ export async function runProcess(
     }
     return { stdout, stderr, exitCode, timedOut };
   } catch (error) {
+    await abortCleanup;
     if (timedOut) {
       return {
         stdout: "",

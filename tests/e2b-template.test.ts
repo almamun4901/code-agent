@@ -23,9 +23,9 @@ describe("E2B runtime template", () => {
     const dockerfile = Template.toDockerfile(createAgentTemplate());
 
     expect(DEFAULT_E2B_TEMPLATE_NAME).toBe(
-      "terminal-coding-agent-tools:step-6-v1",
+      "terminal-coding-agent-tools:mutation-recovery-v1",
     );
-    expect(TOOL_RUNTIME_VERSION).toBe("step-6-v1");
+    expect(TOOL_RUNTIME_VERSION).toBe("mutation-recovery-v1");
     expect(E2B_RUNTIME_ROOT).toBe("/opt/agent");
     expect(E2B_SHELL_WRAPPER).toBe("/usr/local/sbin/agent-run-shell");
     expect(RUNTIME_MANIFEST_PATH).toBe(
@@ -73,7 +73,7 @@ describe("E2B runtime template", () => {
 
     expect(first).toEqual(second);
     expect(first).toMatchObject({
-      runtimeVersion: "step-6-v1",
+      runtimeVersion: "mutation-recovery-v1",
       packageVersion: "0.1.0",
     });
     expect(first.lockSha256).toMatch(/^[a-f0-9]{64}$/);
@@ -85,13 +85,13 @@ describe("E2B runtime template", () => {
       templateBuildOutput({
         templateId: "template-id",
         buildId: "build-id",
-        name: "terminal-coding-agent-tools:step-6-v1",
+        name: "terminal-coding-agent-tools:mutation-recovery-v1",
       }),
     ).toEqual({
       templateId: "template-id",
-      templateRef: "terminal-coding-agent-tools:step-6-v1",
+      templateRef: "terminal-coding-agent-tools:mutation-recovery-v1",
       buildId: "build-id",
-      name: "terminal-coding-agent-tools:step-6-v1",
+      name: "terminal-coding-agent-tools:mutation-recovery-v1",
     });
 
     expect(() =>
@@ -106,11 +106,11 @@ describe("E2B runtime template", () => {
         RUN_LIVE_E2B_TEST: "1",
         E2B_API_KEY: "configured",
         E2B_TEMPLATE_ID:
-          "terminal-coding-agent-tools:step-6-v1",
+          "terminal-coding-agent-tools:mutation-recovery-v1",
       }),
     ).toEqual({
       enabled: true,
-      templateRef: "terminal-coding-agent-tools:step-6-v1",
+      templateRef: "terminal-coding-agent-tools:mutation-recovery-v1",
     });
   });
 
@@ -126,6 +126,10 @@ describe("E2B runtime template", () => {
     expect(wrapper).toContain(
       'timeout --signal=TERM --kill-after=1s "$timeout_duration"',
     );
+    expect(wrapper).toContain(
+      'if [ "$#" -eq 2 ] && [ "$1" = "--cancel" ]',
+    );
+    expect(wrapper).toContain("pkill -KILL -u runner");
     expect(wrapper).not.toContain('"${timeout_ms}ms"');
   });
 

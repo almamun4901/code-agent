@@ -50,6 +50,11 @@ export async function runShellTool(
     timeoutMs: wrapper ? timeoutMs + 1_500 : timeoutMs,
     env: shellEnvironment(repoPath),
     signal,
+    ...(wrapper
+      ? {
+          onAbort: () => cancelRunnerProcesses(wrapper, repoPath),
+        }
+      : {}),
   });
   const sections = [
     result.stdout ? `STDOUT\n${result.stdout.trimEnd()}` : "",
@@ -64,6 +69,23 @@ export async function runShellTool(
       cwd: input.cwd,
     },
   };
+}
+
+async function cancelRunnerProcesses(
+  wrapper: string,
+  repoPath: string,
+): Promise<void> {
+  const cancellation = Bun.spawn(
+    ["sudo", wrapper, "--cancel", repoPath],
+    {
+      cwd: repoPath,
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+      env: shellEnvironment(repoPath),
+    },
+  );
+  await cancellation.exited;
 }
 
 export function shellCommand(

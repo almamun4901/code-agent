@@ -3,9 +3,26 @@ set -eu
 
 usage() {
   printf '%s\n' \
-    "usage: agent-run-shell <task-root> <relative-cwd> <timeout-ms> <command>" >&2
+    "usage: agent-run-shell <task-root> <relative-cwd> <timeout-ms> <command>" \
+    "       agent-run-shell --cancel <task-root>" >&2
   exit 64
 }
+
+if [ "$#" -eq 2 ] && [ "$1" = "--cancel" ]; then
+  requested_root=$2
+  case "$requested_root" in
+    /workspace/tasks/*) ;;
+    *) printf '%s\n' "refusing task root outside /workspace/tasks" >&2; exit 65 ;;
+  esac
+  task_root=$(realpath -e -- "$requested_root") ||
+    { printf '%s\n' "task root does not exist" >&2; exit 65; }
+  case "$task_root" in
+    /workspace/tasks/*) ;;
+    *) printf '%s\n' "resolved task root escaped /workspace/tasks" >&2; exit 65 ;;
+  esac
+  pkill -KILL -u runner 2>/dev/null || true
+  exit 0
+fi
 
 [ "$#" -eq 4 ] || usage
 

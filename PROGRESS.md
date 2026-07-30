@@ -10,8 +10,8 @@
 ## Current state (updated: 2026-07-30)
 
 **Overall:** Steps 0–6, mutation recovery, and the routed OpenRouter provider
-are complete and merged. The host-side production runner is implemented on
-`feat/agent-runtime`: it validates canonical repository/task identity before
+are complete and merged. The host-side production runner is also merged: it
+validates canonical repository/task identity before
 external activity, persists validated pending turns and stable mutation
 operation IDs, supports provider-native sequential actions and full plan
 revision, runs actions through the owned E2B MCP session, and reconciles
@@ -33,7 +33,7 @@ available.
 | 4 — MCP transport (stdio) | complete | Six tools have canonical direct/MCP parity; lifecycle and mutation checks pass |
 | 5 — Sandbox (E2B) | complete | Six remote tools, exact task worktree, host-isolation sentinel, process-loss handling, and cleanup verified on merged `main` |
 | 6 — PreToolUse safety hook | complete | Exact-root binding, two identities, symlink-safe files, offline shell, reduced Git, and red-team/live gates pass |
-| 7 — TUI (Ink) | not started | Mutation recovery and routed provider complete; headless production runner is the active prerequisite |
+| 7 — TUI (Ink) | not started | All prerequisites are merged and reverified; start the terminal interface on a fresh branch |
 | 8 — Remaining hooks + budget | not started | — |
 | 9 — Telemetry | not started | — |
 | 10 — Eval + PR posting | not started | — |
@@ -827,9 +827,12 @@ available.
   running sandboxes. Pre-landing review found and fixed semantic checkpoint
   replay validation and unbounded persisted inputs. The complete Anthropic
   production gate passes through live E2B MCP in 29.2 seconds with zero
-  running sandboxes. The selectable-provider follow-up review is clean.
-- Next session should start with: Push and merge the runner prerequisite,
-  reverify merged `main`, then create the terminal-interface branch.
+  running sandboxes. The selectable-provider follow-up review is clean. PR #4
+  is merged; merged `main` repeats all offline gates and the live
+  Anthropic/E2B gate in 29.1 seconds with zero running sandboxes.
+- Next session should start with: Pull updated `main`, create
+  `feat/terminal-interface`, and implement the Step 7 observation contract
+  before coordinated shutdown and Ink rendering.
 
 ---
 

@@ -18,6 +18,7 @@
     "src/**/*.tsx",
     "tests/**/*.ts",
     "tests/**/*.tsx",
+    "bin/**/*.ts",
     "loop-fake.ts"
   ]
 }

@@ -22,10 +22,13 @@ import {
 } from "./production-loop";
 import {
   createAgentEventPublisher,
+  type AgentEventPublisher,
   type AgentEventSink,
 } from "./events";
 
 const MAX_TASK_BYTES = 32 * 1024;
+const SESSION_END_TIMEOUT_MS = 5_000;
+const SHUTDOWN_TIMEOUT_MS = 30_000;
 
 export type PreparedAgentRun = {
   canonicalRepoPath: string;
@@ -51,6 +54,29 @@ export type HeadlessAgentRunOptions = {
     recoveryStore: E2bSessionRecoveryStore;
     templateId: string;
   }) => Promise<E2bTaskSession>;
+};
+
+export type SessionEndContext = {
+  reason: "completed" | "cancelled" | "failed";
+  cleanup: "succeeded" | "failed";
+  error?: { code: string; message: string };
+};
+
+export type AgentRunResult = SessionEndContext & {
+  status: SessionEndContext["reason"];
+  exitCode: 0 | 1 | 2 | 130;
+  productionResult?: ProductionLoopResult;
+};
+
+export type AgentRunController = {
+  result: Promise<AgentRunResult>;
+  stop(reason: "sigint" | "ui" | "runtime"): Promise<AgentRunResult>;
+};
+
+export type ControlledAgentRunOptions = HeadlessAgentRunOptions & {
+  sessionEnd?: (context: SessionEndContext) => void | Promise<void>;
+  sessionEndTimeoutMs?: number;
+  shutdownTimeoutMs?: number;
 };
 
 export class AgentRunConfigurationError extends Error {
@@ -115,76 +141,288 @@ export async function prepareAgentRun(
 export async function runHeadlessAgent(
   options: HeadlessAgentRunOptions,
 ): Promise<ProductionLoopResult> {
-  const prepared = await prepareAgentRun(options.repoPath, options.task);
   const events = createAgentEventPublisher(options.eventSink);
+  let started = false;
+  let shutdown = false;
+  const beginShutdown = (reason: SessionEndContext["reason"]) => {
+    if (shutdown) return;
+    shutdown = true;
+    if (started) events.emit({ type: "shutdown_started", reason });
+  };
+  const execution = await executeAgentRun(
+    options,
+    events,
+    () => {
+      started = true;
+    },
+    beginShutdown,
+  );
+  const reason = execution.cleanupError
+    ? "failed"
+    : resultReason(
+      execution.runError,
+      options.signal?.aborted ? "ui" : undefined,
+    );
+  beginShutdown(reason);
+  if (started) {
+    events.emit({
+      type: "run_finished",
+      reason,
+      cleanup: execution.cleanupError ? "failed" : "succeeded",
+      ...((execution.runError || execution.cleanupError) &&
+          reason === "failed"
+        ? { error: safeError(execution.runError ?? execution.cleanupError) }
+        : {}),
+    });
+  }
+  if (execution.runError && execution.cleanupError) {
+    throw new AggregateError(
+      [execution.runError, execution.cleanupError],
+      "Agent run and sandbox cleanup both failed.",
+    );
+  }
+  if (execution.runError) throw execution.runError;
+  if (execution.cleanupError) throw execution.cleanupError;
+  return execution.result!;
+}
+
+export function startAgentRun(
+  options: ControlledAgentRunOptions,
+): AgentRunController {
+  const abortController = new AbortController();
+  const events = createAgentEventPublisher(options.eventSink);
+  let stopReason: "sigint" | "ui" | "runtime" | undefined;
+  let runStarted = false;
+  let shutdownReason:
+    | SessionEndContext["reason"]
+    | undefined;
+  let resolveShutdownStarted:
+    | ((reason: SessionEndContext["reason"]) => void)
+    | undefined;
+  const shutdownStarted = new Promise<SessionEndContext["reason"]>(
+    (resolve) => {
+      resolveShutdownStarted = resolve;
+    },
+  );
+
+  const beginShutdown = (reason: SessionEndContext["reason"]) => {
+    if (shutdownReason) return;
+    shutdownReason = reason;
+    resolveShutdownStarted?.(reason);
+    if (runStarted) {
+      events.emit({ type: "shutdown_started", reason });
+    }
+  };
+
+  const linkedAbort = () => {
+    stopReason ??= "runtime";
+    beginShutdown("failed");
+    abortController.abort(options.signal?.reason);
+  };
+  if (options.signal?.aborted) {
+    linkedAbort();
+  } else {
+    options.signal?.addEventListener("abort", linkedAbort, { once: true });
+  }
+
+  const executionPromise = executeAgentRun(
+    {
+      ...options,
+      signal: abortController.signal,
+      eventSink: undefined,
+    },
+    events,
+    (event) => {
+      if (event === "run_started") {
+        runStarted = true;
+        if (shutdownReason) {
+          events.emit({
+            type: "shutdown_started",
+            reason: shutdownReason,
+          });
+        }
+      }
+    },
+    beginShutdown,
+  );
+
+  const normalResult = executionPromise.then(async (execution) => {
+    const reason = execution.cleanupError
+      ? "failed"
+      : resultReason(execution.runError, stopReason);
+    beginShutdown(reason);
+    const initialError = execution.runError ?? execution.cleanupError;
+    let cleanup: SessionEndContext["cleanup"] =
+      execution.cleanupError ? "failed" : "succeeded";
+    const context: SessionEndContext = {
+      reason,
+      cleanup,
+      ...(initialError && reason === "failed"
+        ? { error: safeError(initialError) }
+        : {}),
+    };
+
+    if (runStarted && options.sessionEnd) {
+      try {
+        await withTimeout(
+          Promise.resolve(options.sessionEnd(context)),
+          options.sessionEndTimeoutMs ?? SESSION_END_TIMEOUT_MS,
+          "SessionEnd handler timed out.",
+        );
+      } catch (error) {
+        cleanup = "failed";
+        context.cleanup = "failed";
+        context.error = safeError(error);
+      }
+    }
+
+    return finishResult(
+      events,
+      context,
+      execution.result,
+      cleanup === "failed" ? 1 : exitCodeFor(reason, execution.runError),
+    );
+  });
+
+  const result = shutdownStarted.then((reason) =>
+    withTimeout(
+      normalResult,
+      options.shutdownTimeoutMs ?? SHUTDOWN_TIMEOUT_MS,
+      `Shutdown did not finish within ${
+        options.shutdownTimeoutMs ?? SHUTDOWN_TIMEOUT_MS
+      }ms after ${reason}.`,
+    ).catch((error) => {
+      return finishResult(
+        events,
+        {
+          reason: "failed",
+          cleanup: "failed",
+          error: {
+            code: "SHUTDOWN_TIMEOUT",
+            message: error instanceof Error
+              ? error.message
+              : "Shutdown timed out.",
+          },
+        },
+        undefined,
+        1,
+      );
+    })
+  ).finally(() => {
+    options.signal?.removeEventListener("abort", linkedAbort);
+  });
+
+  return {
+    result,
+    stop(reason) {
+      if (!stopReason) {
+        stopReason = reason;
+        beginShutdown(reason === "runtime" ? "failed" : "cancelled");
+        abortController.abort(reason);
+      }
+      return result;
+    },
+  };
+}
+
+type ExecutionResult = {
+  result?: ProductionLoopResult;
+  runError?: unknown;
+  cleanupError?: unknown;
+};
+
+async function executeAgentRun(
+  options: HeadlessAgentRunOptions,
+  events: AgentEventPublisher,
+  lifecycleEvent: (event: "run_started") => void,
+  beginShutdown: (
+    reason: SessionEndContext["reason"],
+  ) => void = () => {},
+): Promise<ExecutionResult> {
+  let prepared: PreparedAgentRun;
+  try {
+    prepared = await prepareAgentRun(options.repoPath, options.task);
+  } catch (runError) {
+    return { runError };
+  }
   events.emit({
     type: "run_started",
     runIdentity: prepared.runIdentity,
   });
-  const checkpointStore =
-    options.checkpointStore ??
-    new FileProductionCheckpointStore(prepared.canonicalRepoPath);
-  const existing = await checkpointStore.load();
-  if (
-    existing &&
-    (existing.runIdentity !== prepared.runIdentity ||
-      existing.canonicalRepoPath !== prepared.canonicalRepoPath ||
-      existing.task !== prepared.task)
-  ) {
-    throw new AgentRunConfigurationError(
-      "Existing checkpoint belongs to another repository or task.",
-    );
-  }
-  if (existing?.lifecycle === "completed") {
-    return runProductionLoop({
-      ...prepared,
-      callModel:
-        options.callModel ??
-        (async () => {
-          throw new Error("Completed checkpoints must not call the model.");
-        }),
-      session: {
-        async call() {
-          throw new Error("Completed checkpoints must not call tools.");
-        },
-      },
-      checkpointStore,
-      maxModelTurns: options.maxModelTurns,
-      signal: options.signal,
-      events,
-    });
+  lifecycleEvent("run_started");
+  if (options.signal?.aborted) {
+    beginShutdown("cancelled");
+    return { runError: abortError(options.signal.reason) };
   }
 
-  const templateId =
-    options.templateId ?? process.env.E2B_TEMPLATE_ID?.trim() ?? "";
-  if (!templateId) {
-    throw new AgentRunConfigurationError(
-      "E2B_TEMPLATE_ID is required to start a production run.",
-    );
-  }
-  const callModel =
-    options.callModel ??
-    createConfiguredModel(
-      parseModelProvider(
-        options.modelProvider ?? process.env.AGENT_MODEL_PROVIDER,
-      ),
-    );
-  const recoveryStore =
-    options.sessionRecoveryStore ??
-    new FileE2bSessionRecoveryStore(
-      path.join(prepared.canonicalRepoPath, ".agent", "e2b-session.json"),
-    );
-  const session = options.openSession
-    ? await options.openSession({
-        prepared,
-        recoveryStore,
-        templateId,
-      })
-    : await openDefaultSession(prepared, recoveryStore, templateId);
-
+  let session: E2bTaskSession | undefined;
   let result: ProductionLoopResult | undefined;
   let runError: unknown;
+  let cleanupError: unknown;
   try {
+    const checkpointStore =
+      options.checkpointStore ??
+      new FileProductionCheckpointStore(prepared.canonicalRepoPath);
+    const existing = await checkpointStore.load();
+    if (
+      existing &&
+      (existing.runIdentity !== prepared.runIdentity ||
+        existing.canonicalRepoPath !== prepared.canonicalRepoPath ||
+        existing.task !== prepared.task)
+    ) {
+      throw new AgentRunConfigurationError(
+        "Existing checkpoint belongs to another repository or task.",
+      );
+    }
+    if (existing?.lifecycle === "completed") {
+      result = await runProductionLoop({
+        ...prepared,
+        callModel:
+          options.callModel ??
+          (async () => {
+            throw new Error("Completed checkpoints must not call the model.");
+          }),
+        session: {
+          async call() {
+            throw new Error("Completed checkpoints must not call tools.");
+          },
+        },
+        checkpointStore,
+        maxModelTurns: options.maxModelTurns,
+        signal: options.signal,
+        events,
+      });
+      beginShutdown("completed");
+      return { result };
+    }
+
+    const templateId =
+      options.templateId ?? process.env.E2B_TEMPLATE_ID?.trim() ?? "";
+    if (!templateId) {
+      throw new AgentRunConfigurationError(
+        "E2B_TEMPLATE_ID is required to start a production run.",
+      );
+    }
+    const callModel =
+      options.callModel ??
+      createConfiguredModel(
+        parseModelProvider(
+          options.modelProvider ?? process.env.AGENT_MODEL_PROVIDER,
+        ),
+      );
+    const recoveryStore =
+      options.sessionRecoveryStore ??
+      new FileE2bSessionRecoveryStore(
+        path.join(prepared.canonicalRepoPath, ".agent", "e2b-session.json"),
+      );
+    session = options.openSession
+      ? await options.openSession({
+          prepared,
+          recoveryStore,
+          templateId,
+        })
+      : await openDefaultSession(prepared, recoveryStore, templateId);
+
     result = await runProductionLoop({
       ...prepared,
       callModel,
@@ -198,24 +436,106 @@ export async function runHeadlessAgent(
     runError = error;
   }
 
-  let cleanupError: unknown;
-  try {
-    await session.reconcileActiveMutation();
-    await session.close();
-  } catch (error) {
-    cleanupError = error;
+  beginShutdown(
+    resultReason(runError, options.signal?.aborted ? "ui" : undefined),
+  );
+  if (session) {
+    const cleanupErrors: unknown[] = [];
+    try {
+      await session.reconcileActiveMutation();
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+    try {
+      await session.close();
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+    cleanupError = cleanupErrors.length === 1
+      ? cleanupErrors[0]
+      : cleanupErrors.length > 1
+        ? new AggregateError(cleanupErrors, "Sandbox cleanup failed.")
+        : undefined;
   }
 
-  if (runError && cleanupError) {
-    throw new AggregateError(
-      [runError, cleanupError],
-      "Agent run and sandbox cleanup both failed.",
-    );
-  }
-  if (runError) throw runError;
-  if (cleanupError) throw cleanupError;
-  return result!;
+  return { result, runError, cleanupError };
 }
+
+function resultReason(
+  error: unknown,
+  stopReason: "sigint" | "ui" | "runtime" | undefined,
+): SessionEndContext["reason"] {
+  if (!error) return "completed";
+  if (stopReason === "sigint" || stopReason === "ui") return "cancelled";
+  return "failed";
+}
+
+function exitCodeFor(
+  reason: SessionEndContext["reason"],
+  error: unknown,
+): 0 | 1 | 2 | 130 {
+  if (reason === "completed") return 0;
+  if (reason === "cancelled") return 130;
+  return error instanceof AgentRunConfigurationError ? 2 : 1;
+}
+
+const finishedEvents = new WeakSet<AgentEventPublisher>();
+
+function finishResult(
+  events: AgentEventPublisher,
+  context: SessionEndContext,
+  productionResult: ProductionLoopResult | undefined,
+  exitCode: 0 | 1 | 2 | 130,
+): AgentRunResult {
+  if (!finishedEvents.has(events)) {
+    finishedEvents.add(events);
+    events.emit({ type: "run_finished", ...context });
+  }
+  return {
+    ...context,
+    status: context.reason,
+    exitCode,
+    ...(productionResult ? { productionResult } : {}),
+  };
+}
+
+function safeError(error: unknown): { code: string; message: string } {
+  if (error instanceof Error) {
+    return {
+      code: error.name
+        .replace(/([a-z])([A-Z])/g, "$1_$2")
+        .toUpperCase(),
+      message: error.message.slice(0, 2_048),
+    };
+  }
+  return { code: "UNKNOWN_ERROR", message: "Unknown runtime failure." };
+}
+
+function abortError(reason: unknown): DOMException {
+  return new DOMException(
+    typeof reason === "string" ? reason : "Agent run was cancelled.",
+    "AbortError",
+  );
+}
+
+async function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  message: string,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 
 function parseModelProvider(
   value: string | undefined,

@@ -15,7 +15,9 @@ import {
   AgentRunConfigurationError,
   prepareAgentRun,
   runHeadlessAgent,
+  startAgentRun,
 } from "../src/runtime/agent-runner";
+import type { AgentEvent } from "../src/runtime/events";
 import {
   FileProductionCheckpointStore,
   MemoryProductionCheckpointStore,
@@ -452,6 +454,148 @@ describe("host-side production runner", () => {
 
     expect(result.status).toBe("completed");
     expect(session.lifecycle).toEqual(["reconcile", "close"]);
+  });
+
+  test("coordinates repeated cancellation through one cleanup result", async () => {
+    const repo = await repository();
+    const session = new FakeSession();
+    let toolStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      toolStarted = resolve;
+    });
+    session.callImpl = async (_request, options) => {
+      toolStarted();
+      return await new Promise<ToolResult>((_, reject) => {
+        options.signal?.addEventListener(
+          "abort",
+          () => reject(new DOMException("cancelled", "AbortError")),
+          { once: true },
+        );
+      });
+    };
+    const lifecycle: string[] = [];
+    const observed: AgentEvent[] = [];
+    const controller = startAgentRun({
+      repoPath: repo.worktreePath,
+      task: "Cancel safely",
+      templateId: "template:test",
+      checkpointStore: new MemoryProductionCheckpointStore(),
+      sessionRecoveryStore: new MemoryE2bSessionRecoveryStore(),
+      callModel: queuedModel([
+        turn(
+          plan([["inspect", "Inspect safely", "in_progress"]]),
+          action("read", "read_file", { path: "README.md" }),
+        ),
+      ]),
+      openSession: async () =>
+        session as unknown as E2bTaskSession,
+      eventSink: (event) => observed.push(event),
+      sessionEnd: async (context) => {
+        lifecycle.push(`sessionEnd:${context.reason}`);
+      },
+    });
+
+    await started;
+    const firstStop = controller.stop("sigint");
+    const secondStop = controller.stop("ui");
+    expect(firstStop).toBe(secondStop);
+    const result = await firstStop;
+
+    expect(result).toMatchObject({
+      status: "cancelled",
+      reason: "cancelled",
+      cleanup: "succeeded",
+      exitCode: 130,
+    });
+    expect(session.lifecycle).toEqual(["reconcile", "close"]);
+    expect(lifecycle).toEqual(["sessionEnd:cancelled"]);
+    expect(
+      observed.filter((event) => event.type === "shutdown_started"),
+    ).toHaveLength(1);
+    expect(
+      observed.filter((event) => event.type === "run_finished"),
+    ).toHaveLength(1);
+    expect(observed.map((event) => event.type)).toContain("tool_finished");
+  });
+
+  test("runs SessionEnd after cleanup and maps successful completion", async () => {
+    const repo = await repository();
+    const session = new FakeSession();
+    const lifecycle = session.lifecycle;
+    const controller = startAgentRun({
+      repoPath: repo.worktreePath,
+      task: "Finish safely",
+      templateId: "template:test",
+      checkpointStore: new MemoryProductionCheckpointStore(),
+      callModel: queuedModel([
+        turn(
+          plan([["inspect", "Inspect safely", "in_progress"]]),
+          action("read", "read_file", { path: "README.md" }),
+        ),
+        turn(plan([["inspect", "Inspect safely", "completed"]])),
+      ]),
+      openSession: async () =>
+        session as unknown as E2bTaskSession,
+      sessionEnd: () => {
+        lifecycle.push("sessionEnd");
+      },
+    });
+
+    await expect(controller.result).resolves.toMatchObject({
+      status: "completed",
+      cleanup: "succeeded",
+      exitCode: 0,
+    });
+    expect(lifecycle).toEqual(["reconcile", "close", "sessionEnd"]);
+  });
+
+  test("fails cleanup when SessionEnd exceeds its bound", async () => {
+    const repo = await repository();
+    const session = new FakeSession();
+    const controller = startAgentRun({
+      repoPath: repo.worktreePath,
+      task: "Bound lifecycle hook",
+      templateId: "template:test",
+      checkpointStore: new MemoryProductionCheckpointStore(),
+      callModel: queuedModel([
+        turn(plan([["done", "Finish", "in_progress"]]), action(
+          "read",
+          "read_file",
+          { path: "README.md" },
+        )),
+        turn(plan([["done", "Finish", "completed"]])),
+      ]),
+      openSession: async () =>
+        session as unknown as E2bTaskSession,
+      sessionEnd: () => new Promise(() => {}),
+      sessionEndTimeoutMs: 10,
+    });
+
+    await expect(controller.result).resolves.toMatchObject({
+      status: "completed",
+      cleanup: "failed",
+      exitCode: 1,
+      error: { message: "SessionEnd handler timed out." },
+    });
+  });
+
+  test("uses exit code 2 for invalid usage without external activity", async () => {
+    let opened = 0;
+    const controller = startAgentRun({
+      repoPath: "relative",
+      task: "task",
+      templateId: "template:test",
+      openSession: async () => {
+        opened += 1;
+        return new FakeSession() as unknown as E2bTaskSession;
+      },
+    });
+
+    await expect(controller.result).resolves.toMatchObject({
+      status: "failed",
+      exitCode: 2,
+    });
+    expect(opened).toBe(0);
   });
 });
 

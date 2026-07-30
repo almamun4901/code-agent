@@ -51,6 +51,7 @@ export type ProductionLoopOptions = {
   maxModelTurns?: number;
   signal?: AbortSignal;
   events?: AgentEventPublisher;
+  now?: () => number;
 };
 
 export class ProductionTurnProtocolError extends Error {
@@ -284,7 +285,8 @@ async function commitPendingTurn(
   if (pending.action) {
     throwIfAborted(options.signal);
     const request = validateToolCall(pending.action.request);
-    const startedAt = performance.now();
+    const now = options.now ?? (() => performance.now());
+    const startedAt = now();
     options.events?.emit({
       type: "tool_started",
       operationId: pending.action.operationId,
@@ -300,14 +302,14 @@ async function commitPendingTurn(
       options.events?.emit({
         type: "tool_finished",
         operationId: pending.action.operationId,
-        durationMs: Math.max(0, performance.now() - startedAt),
+        durationMs: Math.max(0, now() - startedAt),
         outcome: toolOutcome(rawResult),
       });
     } catch (error) {
       options.events?.emit({
         type: "tool_finished",
         operationId: pending.action.operationId,
-        durationMs: Math.max(0, performance.now() - startedAt),
+        durationMs: Math.max(0, now() - startedAt),
         outcome:
           options.signal?.aborted || isAbortError(error)
             ? "cancelled"

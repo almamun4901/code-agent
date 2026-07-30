@@ -1,54 +1,144 @@
 import { runCli } from "../../src/cli";
+import type { ModelTurn } from "../../src/model/contracts";
+import { startAgentRun } from "../../src/runtime/agent-runner";
+import {
+  MemoryProductionCheckpointStore,
+  type ProductionCheckpointStore,
+} from "../../src/runtime/checkpoint";
 import type {
-  AgentRunResult,
-} from "../../src/runtime/agent-runner";
+  ModelToolRequest,
+  ToolResult,
+} from "../../src/tools/contracts";
 
-let finish!: (result: AgentRunResult) => void;
-const result = new Promise<AgentRunResult>((resolve) => {
-  finish = resolve;
-});
+const phase = process.env.CANCELLATION_PHASE ?? "read";
+const lifecycle: string[] = [];
 
 process.exitCode = await runCli(process.argv.slice(2), {
   startRun(options) {
-    options.eventSink?.({
-      type: "run_started",
-      sequence: 1,
-      timestamp: new Date().toISOString(),
-      runIdentity: "a".repeat(64),
-    });
-    options.eventSink?.({
-      type: "tool_started",
-      sequence: 2,
-      timestamp: new Date().toISOString(),
-      operationId: crypto.randomUUID(),
-      toolName: "read_file",
-      summary: "README.md",
-    });
-    return {
-      result,
-      stop() {
-        options.eventSink?.({
-          type: "shutdown_started",
-          sequence: 3,
-          timestamp: new Date().toISOString(),
-          reason: "cancelled",
-        });
-        const cancelled: AgentRunResult = {
-          status: "cancelled",
-          reason: "cancelled",
-          cleanup: "succeeded",
-          exitCode: 130,
-        };
-        options.eventSink?.({
-          type: "run_finished",
-          sequence: 4,
-          timestamp: new Date().toISOString(),
-          reason: "cancelled",
-          cleanup: "succeeded",
-        });
-        finish(cancelled);
-        return result;
+    const backing = new MemoryProductionCheckpointStore();
+    let saves = 0;
+    const checkpointStore: ProductionCheckpointStore = {
+      load: () => backing.load(),
+      async save(state) {
+        saves += 1;
+        if (phase === "checkpoint" && saves === 3) {
+          ready();
+          await Bun.sleep(100);
+        }
+        await backing.save(state);
       },
     };
+    let modelTurns = 0;
+    return startAgentRun({
+      ...options,
+      templateId: "template:test",
+      checkpointStore,
+      callModel: async (_request, modelOptions) => {
+        if (phase === "model") {
+          ready();
+          await waitForAbort(modelOptions?.signal);
+        }
+        modelTurns += 1;
+        if (modelTurns > 1) {
+          throw new Error("Cancellation did not stop the next model turn.");
+        }
+        return firstTurn(phase);
+      },
+      openSession: async () =>
+        ({
+          async call(
+            request: ModelToolRequest,
+            callOptions: { signal?: AbortSignal } = {},
+          ): Promise<ToolResult> {
+            if (phase === "policy") {
+              ready();
+              await waitForAbort(callOptions.signal);
+            }
+            if (phase === "read" || phase === "mutation") {
+              ready();
+              await waitForAbort(callOptions.signal);
+            }
+            return {
+              success: true,
+              output: "ok",
+              truncated: false,
+              originalTokenCount: 1,
+              codec: "test",
+            };
+          },
+          async reconcileActiveMutation() {
+            lifecycle.push("reconcile");
+            return null;
+          },
+          async close() {
+            lifecycle.push("close");
+          },
+        }) as never,
+      sessionEnd() {
+        lifecycle.push("sessionEnd");
+      },
+    });
   },
 });
+
+const lifecyclePath = process.env.LIFECYCLE_FILE;
+if (lifecyclePath) {
+  await Bun.write(lifecyclePath, `${lifecycle.join(",")}\n`);
+}
+
+function firstTurn(cancellationPhase: string): ModelTurn {
+  const action = cancellationPhase === "mutation"
+    ? {
+        type: "tool_use" as const,
+        id: crypto.randomUUID(),
+        name: "edit_file",
+        input: {
+          path: "README.md",
+          mode: "apply",
+          oldText: "old",
+          newText: "new",
+        },
+      }
+    : {
+        type: "tool_use" as const,
+        id: crypto.randomUUID(),
+        name: "read_file",
+        input: { path: "README.md" },
+      };
+  return {
+    content: [
+      {
+        type: "tool_use",
+        id: crypto.randomUUID(),
+        name: "rewrite_plan",
+        input: {
+          plan: [{
+            id: "cancel",
+            description: "Exercise cancellation",
+            status: "in_progress",
+          }],
+        },
+      },
+      action,
+    ],
+    stopReason: "tool_use",
+    usage: { inputTokens: 1, outputTokens: 1 },
+  };
+}
+
+async function waitForAbort(signal: AbortSignal | undefined): Promise<never> {
+  if (signal?.aborted) {
+    throw new DOMException("cancelled", "AbortError");
+  }
+  return new Promise<never>((_, reject) => {
+    signal?.addEventListener(
+      "abort",
+      () => reject(new DOMException("cancelled", "AbortError")),
+      { once: true },
+    );
+  });
+}
+
+function ready(): void {
+  process.stderr.write("PHASE_READY\n");
+}

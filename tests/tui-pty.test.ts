@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import type { ModelTurn } from "../src/model/contracts";
 import { prepareAgentRun } from "../src/runtime/agent-runner";
@@ -11,6 +13,7 @@ import {
 } from "./support/temp-repo";
 
 const repositories: TemporaryRepository[] = [];
+const temporaryRoots: string[] = [];
 const projectRoot = path.resolve(import.meta.dir, "..");
 const packagedCommand = path.join(projectRoot, "bin", "agent.ts");
 const cancellableCommand = path.join(
@@ -22,21 +25,41 @@ const cancellableCommand = path.join(
 
 afterEach(async () => {
   await Promise.all(repositories.splice(0).map((repo) => repo.cleanup()));
+  await Promise.all(
+    temporaryRoots.splice(0).map((root) =>
+      rm(root, { recursive: true, force: true }),
+    ),
+  );
 });
 
 describe("packaged terminal lifecycle", () => {
-  test("restores terminal state and cancels through Ctrl-C", async () => {
-    const result = await runPty(
-      ["bun", cancellableCommand, "run", ".", "Cancel safely"],
-      true,
-    );
+  test.each(["model", "policy", "read", "mutation", "checkpoint"])(
+    "restores terminal state and cancels through Ctrl-C during %s",
+    async (phase) => {
+      const root = await mkdtemp(path.join(os.tmpdir(), "tui-lifecycle-"));
+      temporaryRoots.push(root);
+      const lifecycleFile = path.join(root, "lifecycle.txt");
+      const result = await runPty(
+        ["bun", "run", cancellableCommand, "run", ".", "Cancel safely"],
+        true,
+        {
+          CANCELLATION_PHASE: phase,
+          LIFECYCLE_FILE: lifecycleFile,
+          PTY_TRIGGER: "PHASE_READY",
+        },
+      );
 
-    expect(result.returnCode).toBe(130);
-    expect(result.firstOutputMs).toBeLessThan(2_000);
-    expect(result.terminalRestored).toBe(true);
-    expect(result.output).toContain("Initializing");
-    expect(result.output).toContain("cancelled");
-  });
+      expect(result.returnCode).toBe(130);
+      expect(result.firstOutputMs).toBeLessThan(2_000);
+      expect(result.terminalRestored).toBe(true);
+      expect(result.output).toContain("Initializing");
+      expect(result.output).toContain("cancelled");
+      expect(result.stderr).toContain("PHASE_READY");
+      expect(await readFile(lifecycleFile, "utf8")).toBe(
+        "reconcile,close,sessionEnd\n",
+      );
+    },
+  );
 
   test("keeps ten cold and ten resumed first paints below two seconds", async () => {
     const coldRepo = await createTemporaryRepository();
@@ -64,6 +87,9 @@ describe("packaged terminal lifecycle", () => {
       expect(resumed.returnCode).toBe(0);
       expect(cold.terminalRestored).toBe(true);
       expect(resumed.terminalRestored).toBe(true);
+      expect(cold.output).not.toContain("E2B_TEMPLATE_ID is required");
+      expect(cold.stderr).toContain("E2B_TEMPLATE_ID is required");
+      expect(resumed.stderr).toBe("");
       coldMeasurements.push(cold.firstOutputMs);
       resumedMeasurements.push(resumed.firstOutputMs);
     }
@@ -86,11 +112,13 @@ type PtyResult = {
   elapsedMs: number;
   terminalRestored: boolean;
   output: string;
+  stderr: string;
 };
 
 async function runPty(
   command: string[],
   sendSigint = false,
+  extraEnvironment: Record<string, string> = {},
 ): Promise<PtyResult> {
   const child = Bun.spawn(
     ["python3", path.join(import.meta.dir, "support", "run-pty.py"), ...command],
@@ -103,6 +131,7 @@ async function runPty(
         ...process.env,
         E2B_TEMPLATE_ID: "",
         PTY_SEND_SIGINT: sendSigint ? "1" : "0",
+        ...extraEnvironment,
       },
     },
   );
@@ -114,12 +143,17 @@ async function runPty(
   if (exitCode !== 0) {
     throw new Error(`PTY helper failed: ${stderr}`);
   }
-  const decoded = JSON.parse(stdout) as Omit<PtyResult, "output"> & {
+  const decoded = JSON.parse(stdout) as Omit<
+    PtyResult,
+    "output" | "stderr"
+  > & {
     output: string;
+    stderr: string;
   };
   return {
     ...decoded,
     output: Buffer.from(decoded.output, "base64").toString("utf8"),
+    stderr: Buffer.from(decoded.stderr, "base64").toString("utf8"),
   };
 }
 

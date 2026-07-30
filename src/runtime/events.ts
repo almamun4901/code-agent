@@ -1,3 +1,4 @@
+import { posix } from "node:path";
 import type { TodoItem } from "../plan/schema";
 import type {
   ModelToolRequest,
@@ -92,7 +93,7 @@ export function createAgentEventPublisher(
         const snapshot = structuredClone(event);
         queueMicrotask(() => {
           try {
-            sink(snapshot);
+            void Promise.resolve(sink(snapshot)).catch(() => {});
           } catch {
             // Observation must never affect execution.
           }
@@ -119,33 +120,61 @@ export function safeToolSummary(request: ModelToolRequest): string {
   let summary: string;
   switch (request.name) {
     case "read_file":
-      summary = request.input.path;
+      summary = safeRepositoryPath(request.input.path) ?? "repository path";
       break;
     case "edit_file":
-      summary = `${request.input.mode} ${request.input.path}`;
+      summary = `${request.input.mode} ${
+        safeRepositoryPath(request.input.path) ?? "repository path"
+      }`;
       break;
     case "ripgrep":
       summary = [
-        request.input.path ? `in ${request.input.path}` : "in repository",
-        request.input.glob ? `(${request.input.glob})` : "",
+        request.input.path && safeRepositoryPath(request.input.path)
+          ? `in ${request.input.path}`
+          : "in repository",
+        request.input.glob && safeRepositoryPath(request.input.glob)
+          ? `(${request.input.glob})`
+          : "",
       ]
         .filter(Boolean)
         .join(" ");
       break;
     case "tree_sitter_symbols":
-      summary = request.input.path;
+      summary = safeRepositoryPath(request.input.path) ?? "repository path";
       break;
     case "run_shell":
-      summary = `in ${request.input.cwd || "."}`;
+      summary = `in ${
+        safeRepositoryPath(request.input.cwd || ".", true) ?? "repository"
+      }`;
       break;
     case "git":
       summary =
-        request.input.subcommand === "diff" && request.input.path
+        request.input.subcommand === "diff" &&
+          request.input.path &&
+          safeRepositoryPath(request.input.path)
           ? `${request.input.subcommand} ${request.input.path}`
           : request.input.subcommand;
       break;
   }
   return truncateUtf8(sanitizeTerminalText(summary), MAX_SUMMARY_BYTES);
+}
+
+function safeRepositoryPath(
+  value: string,
+  allowRoot = false,
+): string | undefined {
+  if (allowRoot && (value === "" || value === ".")) return ".";
+  if (
+    !value ||
+    value.includes("\\") ||
+    posix.isAbsolute(value) ||
+    posix.normalize(value) !== value ||
+    value === ".." ||
+    value.startsWith("../")
+  ) {
+    return undefined;
+  }
+  return value;
 }
 
 export function sanitizeTerminalText(value: string): string {

@@ -13,6 +13,7 @@
     "test:tui": "bun test tests/tui.test.tsx",
     "test:cli": "bun test tests/cli.test.ts",
     "test:tui:pty": "bun test tests/tui-pty.test.ts",
+    "test:tui:integration": "RUN_LIVE_E2B_TEST=1 bun test tests/tui-live.integration.test.ts",
     "test:runtime": "bun test tests/agent-runtime.test.ts",
     "test:mcp": "bun test tests/mcp.test.ts",
     "test:sandbox": "bun test tests/e2b-stdio-transport.test.ts tests/e2b-template.test.ts tests/e2b-session.test.ts tests/e2b-sandbox-admin.test.ts",

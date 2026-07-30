@@ -39,7 +39,9 @@ completed activity while retaining the active operation and latest failure.
 
 The complete shutdown phase is bounded at 30 seconds. Completion exits 0,
 user cancellation 130, invalid command usage 2, and runtime or cleanup
-failure 1.
+failure 1. Exceeding the bound reports failure only after reconciliation and
+cleanup reach a terminal state; the deadline never releases sandbox ownership
+early.
 
 ## Command and resume behavior
 
@@ -86,10 +88,12 @@ Offline coverage verifies:
 
 PTY acceptance runs the packaged executable, checks terminal restoration on
 completion, failure, and cancellation, and measures ten cold plus ten resumed
-launches. The implementation measurement was 185.3 ms maximum cold first
-paint and 183.8 ms maximum resumed first paint, below the two-second gate.
+launches. The final complete-suite measurement was 198.5 ms maximum cold
+first paint and 195.2 ms maximum resumed first paint, below the two-second
+gate.
 
 The final gate runs all offline, MCP, sandbox, safety, type, fake-loop,
 template, and diff checks; performs a live E2B cancellation/reconciliation
 check; confirms no running E2B sandboxes; and completes pre-landing review
-before merge.
+before merge. The live cancellation gate completed in 5.6 seconds and
+confirmed zero running E2B sandboxes before and after the run.

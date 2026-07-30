@@ -33,6 +33,9 @@ Cancellation takes as long as safe reconciliation requires and returns the
 same result to every caller. Completion exits 0, user cancellation 130,
 invalid command usage 2, and runtime or cleanup failure 1. A hung shutdown is
 reported as failure after 30 seconds rather than silently appearing complete.
+The runner never releases sandbox ownership merely because the deadline has
+elapsed: reconciliation and cleanup still reach a terminal result before the
+controller resolves.
 
 ## Revisit when
 

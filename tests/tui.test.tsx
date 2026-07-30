@@ -182,7 +182,7 @@ describe("responsive Ink application", () => {
     );
 
     expect(frame).toContain("Inspect repository");
-    expect(frame).toContain("git · status · 1.3s");
+    expect(frame).toContain("git · status · denied · 1.3s");
     expect(frame).toContain("Turns 2 · Input 100 · Output");
     expect(frame).toContain("25");
     expect(frame).toContain("DENIED: Policy blocked");

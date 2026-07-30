@@ -4,6 +4,7 @@ import type { McpToolCallOptions } from "../src/mcp/client";
 import {
   createAgentEventPublisher,
   safeToolSummary,
+  toolOutcome,
   type AgentEvent,
 } from "../src/runtime/events";
 import { prepareAgentRun } from "../src/runtime/agent-runner";
@@ -47,6 +48,7 @@ describe("runtime observation events", () => {
       modelTurn([["inspect", "Inspect the file", "completed"]]),
     ];
     let modelIndex = 0;
+    const times = [100, 250];
 
     await runProductionLoop({
       ...prepared,
@@ -54,6 +56,7 @@ describe("runtime observation events", () => {
       events,
       callModel: async () => turns[modelIndex++]!,
       session: new FakeSession(),
+      now: () => times.shift() ?? 250,
     });
 
     expect(observed.map((event) => event.type)).toEqual([
@@ -77,7 +80,7 @@ describe("runtime observation events", () => {
         summary: "README.md",
       });
     expect(observed.find((event) => event.type === "tool_finished"))
-      .toMatchObject({ outcome: "succeeded" });
+      .toMatchObject({ outcome: "succeeded", durationMs: 150 });
   });
 
   test("does not claim a plan commit when durable persistence fails", async () => {
@@ -143,6 +146,14 @@ describe("runtime observation events", () => {
         name: "read_file",
         input: { path: "src/\u001B]0;owned\u0007file.ts" },
       }),
+      safeToolSummary({
+        name: "read_file",
+        input: { path: "/etc/private-secret" },
+      }),
+      safeToolSummary({
+        name: "run_shell",
+        input: { cwd: "../../private-secret", command: "true" },
+      }),
     ];
 
     expect(summaries.every((summary) => !summary.includes(secret))).toBe(true);
@@ -152,6 +163,7 @@ describe("runtime observation events", () => {
       ),
     ).toBe(true);
     expect(summaries.join("")).not.toMatch(/[\u001B\u0007]/);
+    expect(summaries.join("")).not.toContain("private-secret");
   });
 
   test("isolates sink failures from the runner", () => {
@@ -164,6 +176,18 @@ describe("runtime observation events", () => {
         runIdentity: "a".repeat(64),
       })
     ).not.toThrow();
+  });
+
+  test("consumes asynchronous sink rejections", async () => {
+    const publisher = createAgentEventPublisher(async () => {
+      throw new Error("async render failed");
+    });
+    publisher.emit({
+      type: "run_started",
+      runIdentity: "a".repeat(64),
+    });
+    await Promise.resolve();
+    await Promise.resolve();
   });
 
   test("reports denied and cancelled outcomes without tool output", async () => {
@@ -201,6 +225,59 @@ describe("runtime observation events", () => {
     expect(JSON.stringify(observed)).not.toContain("secret denied command");
     expect(JSON.stringify(observed)).not.toContain('"command":"secret"');
   });
+
+  test("classifies every terminal tool outcome", () => {
+    const result = (
+      success: boolean,
+      metadata?: ToolResult["metadata"],
+    ): ToolResult => ({
+      success,
+      output: "",
+      truncated: false,
+      originalTokenCount: 0,
+      codec: "test",
+      metadata,
+    });
+
+    expect(toolOutcome(result(true))).toBe("succeeded");
+    expect(toolOutcome(result(false))).toBe("failed");
+    expect(toolOutcome(result(false, { denied: true }))).toBe("denied");
+    expect(toolOutcome(result(false, { code: "CANCELLED" }))).toBe(
+      "cancelled",
+    );
+  });
+
+  test("pairs thrown tool cancellation with an exact duration", async () => {
+    const repo = await createTemporaryRepository();
+    repositories.push(repo);
+    const prepared = await prepareAgentRun(repo.worktreePath, "Cancel tool");
+    const observed: AgentEvent[] = [];
+    const session = new FakeSession();
+    session.callImpl = async () => {
+      throw new DOMException("cancelled", "AbortError");
+    };
+    const times = [1_000, 1_125];
+
+    await expect(runProductionLoop({
+      ...prepared,
+      checkpointStore: new MemoryProductionCheckpointStore(),
+      events: createAgentEventPublisher((event) => observed.push(event)),
+      callModel: async () =>
+        modelTurn(
+          [["inspect", "Inspect", "in_progress"]],
+          { name: "read_file", input: { path: "README.md" } },
+        ),
+      session,
+      now: () => times.shift() ?? 1_125,
+    })).rejects.toThrow("cancelled");
+
+    expect(observed.filter((event) => event.type === "tool_started"))
+      .toHaveLength(1);
+    expect(observed.filter((event) => event.type === "tool_finished"))
+      .toHaveLength(1);
+    expect(observed.find((event) => event.type === "tool_finished"))
+      .toMatchObject({ outcome: "cancelled", durationMs: 125 });
+  });
 });
 
 class FakeSession {
@@ -211,11 +288,13 @@ class FakeSession {
     originalTokenCount: 1,
     codec: "test",
   };
+  callImpl: (() => Promise<ToolResult>) | undefined;
 
   async call(
     _request: ModelToolRequest,
     _options?: McpToolCallOptions,
   ): Promise<ToolResult> {
+    if (this.callImpl) return this.callImpl();
     return this.result;
   }
 }

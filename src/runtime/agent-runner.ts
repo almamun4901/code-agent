@@ -54,6 +54,7 @@ export type HeadlessAgentRunOptions = {
     prepared: PreparedAgentRun;
     recoveryStore: E2bSessionRecoveryStore;
     templateId: string;
+    signal?: AbortSignal;
   }) => Promise<E2bTaskSession>;
 };
 
@@ -175,12 +176,19 @@ export async function runHeadlessAgent(
   if (started) {
     events.emit({
       type: "run_finished",
-      reason,
-      cleanup: execution.cleanupError ? "failed" : "succeeded",
-      ...((execution.runError || execution.cleanupError) &&
-          reason === "failed"
-        ? { error: safeError(execution.runError ?? execution.cleanupError) }
-        : {}),
+      ...publicEventContext({
+        reason,
+        cleanup: execution.cleanupError ? "failed" : "succeeded",
+        ...((execution.runError || execution.cleanupError) &&
+            (reason === "failed" || execution.cleanupError)
+          ? {
+              error: safeError(
+                execution.runError ?? execution.cleanupError,
+                [options.task, options.repoPath],
+              ),
+            }
+          : {}),
+      }),
     });
   }
   if (execution.runError && execution.cleanupError) {
@@ -204,19 +212,12 @@ export function startAgentRun(
   let shutdownReason:
     | SessionEndContext["reason"]
     | undefined;
-  let resolveShutdownStarted:
-    | ((reason: SessionEndContext["reason"]) => void)
-    | undefined;
-  const shutdownStarted = new Promise<SessionEndContext["reason"]>(
-    (resolve) => {
-      resolveShutdownStarted = resolve;
-    },
-  );
+  let shutdownStartedAt: number | undefined;
 
   const beginShutdown = (reason: SessionEndContext["reason"]) => {
     if (shutdownReason) return;
     shutdownReason = reason;
-    resolveShutdownStarted?.(reason);
+    shutdownStartedAt = performance.now();
     if (runStarted) {
       events.emit({ type: "shutdown_started", reason });
     }
@@ -255,9 +256,7 @@ export function startAgentRun(
   );
 
   const normalResult = executionPromise.then(async (execution) => {
-    const reason = execution.cleanupError
-      ? "failed"
-      : resultReason(execution.runError, stopReason);
+    const reason = resultReason(execution.runError, stopReason);
     beginShutdown(reason);
     const initialError = execution.runError ?? execution.cleanupError;
     let cleanup: SessionEndContext["cleanup"] =
@@ -265,8 +264,13 @@ export function startAgentRun(
     const context: SessionEndContext = {
       reason,
       cleanup,
-      ...(initialError && reason === "failed"
-        ? { error: safeError(initialError) }
+      ...(initialError && (reason === "failed" || execution.cleanupError)
+        ? {
+            error: safeError(initialError, [
+              options.task,
+              options.repoPath,
+            ]),
+          }
         : {}),
     };
 
@@ -280,8 +284,26 @@ export function startAgentRun(
       } catch (error) {
         cleanup = "failed";
         context.cleanup = "failed";
-        context.error = safeError(error);
+        context.error = safeError(error, [
+          options.task,
+          options.repoPath,
+        ]);
       }
+    }
+
+    const shutdownDuration = shutdownStartedAt === undefined
+      ? 0
+      : performance.now() - shutdownStartedAt;
+    const shutdownLimit =
+      options.shutdownTimeoutMs ?? SHUTDOWN_TIMEOUT_MS;
+    if (shutdownDuration > shutdownLimit) {
+      cleanup = "failed";
+      context.cleanup = "failed";
+      context.error = {
+        code: "SHUTDOWN_TIMEOUT",
+        message:
+          `Shutdown exceeded ${shutdownLimit}ms but cleanup was still awaited.`,
+      };
     }
 
     return finishResult(
@@ -292,31 +314,7 @@ export function startAgentRun(
     );
   });
 
-  const result = shutdownStarted.then((reason) =>
-    withTimeout(
-      normalResult,
-      options.shutdownTimeoutMs ?? SHUTDOWN_TIMEOUT_MS,
-      `Shutdown did not finish within ${
-        options.shutdownTimeoutMs ?? SHUTDOWN_TIMEOUT_MS
-      }ms after ${reason}.`,
-    ).catch((error) => {
-      return finishResult(
-        events,
-        {
-          reason: "failed",
-          cleanup: "failed",
-          error: {
-            code: "SHUTDOWN_TIMEOUT",
-            message: error instanceof Error
-              ? error.message
-              : "Shutdown timed out.",
-          },
-        },
-        undefined,
-        1,
-      );
-    })
-  ).finally(() => {
+  const result = normalResult.finally(() => {
     options.signal?.removeEventListener("abort", linkedAbort);
   });
 
@@ -428,8 +426,14 @@ async function executeAgentRun(
           prepared,
           recoveryStore,
           templateId,
+          signal: options.signal,
         })
-      : await openDefaultSession(prepared, recoveryStore, templateId);
+      : await openDefaultSession(
+          prepared,
+          recoveryStore,
+          templateId,
+          options.signal,
+        );
 
     result = await runProductionLoop({
       ...prepared,
@@ -497,7 +501,10 @@ function finishResult(
 ): AgentRunResult {
   if (!finishedEvents.has(events)) {
     finishedEvents.add(events);
-    events.emit({ type: "run_finished", ...context });
+    events.emit({
+      type: "run_finished",
+      ...publicEventContext(context),
+    });
   }
   return {
     ...context,
@@ -507,16 +514,41 @@ function finishResult(
   };
 }
 
-function safeError(error: unknown): { code: string; message: string } {
+function safeError(
+  error: unknown,
+  sensitiveValues: string[] = [],
+): { code: string; message: string } {
   if (error instanceof Error) {
+    const candidate = error.name
+      .replace(/([a-z])([A-Z])/g, "$1_$2")
+      .toUpperCase();
+    let message = sanitizeTerminalText(error.message);
+    for (const sensitive of sensitiveValues) {
+      if (sensitive) message = message.replaceAll(sensitive, "[redacted]");
+    }
     return {
-      code: error.name
-        .replace(/([a-z])([A-Z])/g, "$1_$2")
-        .toUpperCase(),
-      message: sanitizeTerminalText(error.message).slice(0, 2_048),
+      code: /^[A-Z][A-Z0-9_]*$/.test(candidate)
+        ? candidate
+        : "RUNTIME_ERROR",
+      message: message.slice(0, 2_048),
     };
   }
   return { code: "UNKNOWN_ERROR", message: "Unknown runtime failure." };
+}
+
+function publicEventContext(
+  context: SessionEndContext,
+): SessionEndContext {
+  if (!context.error) return context;
+  return {
+    ...context,
+    error: {
+      code: /^[A-Z][A-Z0-9_]*$/.test(context.error.code)
+        ? context.error.code
+        : "RUNTIME_ERROR",
+      message: "Run failed. See stderr for diagnostics.",
+    },
+  };
 }
 
 function abortError(reason: unknown): DOMException {
@@ -550,7 +582,7 @@ function parseModelProvider(
 ): AgentModelProvider {
   const normalized = value?.trim() || "anthropic";
   if (normalized !== "anthropic" && normalized !== "openrouter") {
-    throw new AgentRunUsageError(
+    throw new AgentRunConfigurationError(
       'AGENT_MODEL_PROVIDER must be "anthropic" or "openrouter".',
     );
   }
@@ -569,18 +601,20 @@ async function openDefaultSession(
   prepared: PreparedAgentRun,
   recoveryStore: E2bSessionRecoveryStore,
   templateId: string,
+  signal?: AbortSignal,
 ): Promise<E2bTaskSession> {
   const recovery = {
     runIdentity: prepared.runIdentity,
     store: recoveryStore,
   };
   return (await recoveryStore.load())
-    ? recoverE2bTaskSession(recovery)
+    ? recoverE2bTaskSession({ ...recovery, signal })
     : createE2bTaskSession({
         localRepoPath: prepared.canonicalRepoPath,
         taskId: `run-${prepared.runIdentity.slice(0, 24)}`,
         templateId,
         recovery,
+        signal,
       });
 }
 
@@ -600,7 +634,7 @@ async function gitTopLevel(repositoryPath: string): Promise<string> {
     child.exited,
   ]);
   if (exitCode !== 0) {
-    throw new AgentRunConfigurationError(
+    throw new AgentRunUsageError(
       `Repository path is not a Git repository: ${stderr.trim() || repositoryPath}`,
     );
   }

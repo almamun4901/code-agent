@@ -70,7 +70,17 @@ function ToolPane({
   tools: ToolActivity[];
   now: number;
 }) {
-  const visible = tools.slice(-8);
+  const recent = tools.slice(-8);
+  const latestFailure = [...tools].reverse().find(
+    (tool) => tool.outcome === "failed" || tool.outcome === "denied",
+  );
+  const visible =
+    latestFailure &&
+      !recent.some(
+        (tool) => tool.operationId === latestFailure.operationId,
+      )
+      ? [latestFailure, ...recent.slice(-7)]
+      : recent;
   return (
     <Pane title="Tool activity">
       {visible.length === 0
@@ -85,6 +95,7 @@ function ToolPane({
               >
                 {toolIcon(tool.outcome)} {tool.toolName} ·{" "}
                 {sanitizeTerminalText(tool.summary)} ·{" "}
+                {tool.outcome ?? "active"} ·{" "}
                 {formatDuration(elapsed)}
               </Text>
             );

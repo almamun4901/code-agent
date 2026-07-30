@@ -16,6 +16,7 @@ import {
   prepareAgentRun,
   runHeadlessAgent,
   startAgentRun,
+  type SessionEndContext,
 } from "../src/runtime/agent-runner";
 import type { AgentEvent } from "../src/runtime/events";
 import {
@@ -672,6 +673,179 @@ describe("host-side production runner", () => {
     });
   });
 
+  test("keeps run reason separate from cleanup failure and still closes", async () => {
+    const repo = await repository();
+    const session = new FakeSession();
+    session.reconcileImpl = async () => {
+      throw new Error("reconcile failed");
+    };
+    let endContext: SessionEndContext | undefined;
+    const observed: AgentEvent[] = [];
+    const controller = startAgentRun({
+      repoPath: repo.worktreePath,
+      task: "Finish with cleanup failure",
+      templateId: "template:test",
+      checkpointStore: new MemoryProductionCheckpointStore(),
+      callModel: queuedModel([
+        turn(
+          plan([["inspect", "Inspect", "in_progress"]]),
+          action("read", "read_file", { path: "README.md" }),
+        ),
+        turn(plan([["inspect", "Inspect", "completed"]])),
+      ]),
+      openSession: async () =>
+        session as unknown as E2bTaskSession,
+      eventSink: (event) => observed.push(event),
+      sessionEnd(context) {
+        endContext = context;
+      },
+    });
+
+    await expect(controller.result).resolves.toMatchObject({
+      status: "completed",
+      reason: "completed",
+      cleanup: "failed",
+      exitCode: 1,
+    });
+    expect(session.lifecycle).toEqual(["reconcile", "close"]);
+    expect(endContext).toMatchObject({
+      reason: "completed",
+      cleanup: "failed",
+    });
+    expect(observed.find((event) => event.type === "run_finished"))
+      .toMatchObject({ reason: "completed", cleanup: "failed" });
+  });
+
+  test("aggregates reconciliation and close failures before SessionEnd", async () => {
+    const repo = await repository();
+    const session = new FakeSession();
+    session.reconcileImpl = async () => {
+      throw new Error("reconcile failed");
+    };
+    session.closeImpl = async () => {
+      throw new Error("close failed");
+    };
+    let endCalls = 0;
+    const controller = startAgentRun({
+      repoPath: repo.worktreePath,
+      task: "Aggregate cleanup",
+      templateId: "template:test",
+      checkpointStore: new MemoryProductionCheckpointStore(),
+      callModel: queuedModel([
+        turn(
+          plan([["inspect", "Inspect", "in_progress"]]),
+          action("read", "read_file", { path: "README.md" }),
+        ),
+        turn(plan([["inspect", "Inspect", "completed"]])),
+      ]),
+      openSession: async () =>
+        session as unknown as E2bTaskSession,
+      sessionEnd(context) {
+        endCalls += 1;
+        expect(context).toMatchObject({
+          reason: "completed",
+          cleanup: "failed",
+          error: { code: "AGGREGATE_ERROR" },
+        });
+      },
+    });
+
+    await expect(controller.result).resolves.toMatchObject({
+      status: "completed",
+      cleanup: "failed",
+      exitCode: 1,
+      error: { code: "AGGREGATE_ERROR" },
+    });
+    expect(session.lifecycle).toEqual(["reconcile", "close"]);
+    expect(endCalls).toBe(1);
+  });
+
+  test("reports a shutdown timeout only after cleanup reaches terminal state", async () => {
+    const repo = await repository();
+    const session = new FakeSession();
+    let reconciliationStarted!: () => void;
+    let releaseReconciliation!: () => void;
+    const started = new Promise<void>((resolve) => {
+      reconciliationStarted = resolve;
+    });
+    const released = new Promise<void>((resolve) => {
+      releaseReconciliation = resolve;
+    });
+    session.reconcileImpl = async () => {
+      reconciliationStarted();
+      await released;
+      return null;
+    };
+    const controller = startAgentRun({
+      repoPath: repo.worktreePath,
+      task: "Await cleanup",
+      templateId: "template:test",
+      checkpointStore: new MemoryProductionCheckpointStore(),
+      callModel: queuedModel([
+        turn(
+          plan([["inspect", "Inspect", "in_progress"]]),
+          action("read", "read_file", { path: "README.md" }),
+        ),
+        turn(plan([["inspect", "Inspect", "completed"]])),
+      ]),
+      openSession: async () =>
+        session as unknown as E2bTaskSession,
+      shutdownTimeoutMs: 5,
+    });
+
+    await started;
+    let settled = false;
+    void controller.result.then(() => {
+      settled = true;
+    });
+    await Bun.sleep(10);
+    expect(settled).toBe(false);
+    releaseReconciliation();
+    await expect(controller.result).resolves.toMatchObject({
+      status: "completed",
+      cleanup: "failed",
+      exitCode: 1,
+      error: { code: "SHUTDOWN_TIMEOUT" },
+    });
+    expect(session.lifecycle).toEqual(["reconcile", "close"]);
+  });
+
+  test("keeps prompt text and hostile error names out of observation events", async () => {
+    const repo = await repository();
+    const secretTask = "SECRET_TASK_TEXT";
+    const error = new Error(`provider echoed ${secretTask}`);
+    error.name = "BAD\u001B[2J";
+    const observed: AgentEvent[] = [];
+    const controller = startAgentRun({
+      repoPath: repo.worktreePath,
+      task: secretTask,
+      templateId: "template:test",
+      checkpointStore: new MemoryProductionCheckpointStore(),
+      callModel: async () => {
+        throw error;
+      },
+      openSession: async () =>
+        new FakeSession() as unknown as E2bTaskSession,
+      eventSink: (event) => observed.push(event),
+    });
+
+    const result = await controller.result;
+    expect(result).toMatchObject({
+      status: "failed",
+      error: { code: "RUNTIME_ERROR" },
+    });
+    expect(JSON.stringify(result)).not.toContain(secretTask);
+    expect(JSON.stringify(observed)).not.toContain(secretTask);
+    expect(JSON.stringify(observed)).not.toContain("\u001B");
+    expect(observed.find((event) => event.type === "run_finished"))
+      .toMatchObject({
+        error: {
+          code: "RUNTIME_ERROR",
+          message: "Run failed. See stderr for diagnostics.",
+        },
+      });
+  });
+
   test("uses exit code 2 for invalid usage without external activity", async () => {
     let opened = 0;
     const controller = startAgentRun({
@@ -689,6 +863,20 @@ describe("host-side production runner", () => {
       exitCode: 2,
     });
     expect(opened).toBe(0);
+  });
+
+  test("uses exit code 2 for an existing non-repository directory", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "not-a-repo-"));
+    temporaryRoots.push(root);
+    const controller = startAgentRun({
+      repoPath: root,
+      task: "task",
+      templateId: "template:test",
+    });
+    await expect(controller.result).resolves.toMatchObject({
+      status: "failed",
+      exitCode: 2,
+    });
   });
 });
 
@@ -731,6 +919,8 @@ class FakeSession {
         options: McpToolCallOptions,
       ) => Promise<ToolResult>)
     | undefined;
+  reconcileImpl: (() => Promise<null>) | undefined;
+  closeImpl: (() => Promise<void>) | undefined;
 
   async call(
     request: ModelToolRequest,
@@ -749,11 +939,13 @@ class FakeSession {
 
   async reconcileActiveMutation(): Promise<null> {
     this.lifecycle.push("reconcile");
+    if (this.reconcileImpl) return this.reconcileImpl();
     return null;
   }
 
   async close(): Promise<void> {
     this.lifecycle.push("close");
+    await this.closeImpl?.();
   }
 }
 

@@ -1,15 +1,25 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm, stat } from "node:fs/promises";
+import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { McpToolClient } from "../src/mcp/client";
 import {
   E2bTaskSessionError,
+  MutationRecoveryBlockedError,
+  REMOTE_MUTATION_JOURNAL_PATH,
   createE2bTaskSession,
+  recoverE2bTaskSession,
   type E2bSandbox,
   type E2bSandboxFactory,
 } from "../src/sandbox/e2b-session";
+import {
+  E2bSessionRecoveryError,
+  FileE2bSessionRecoveryStore,
+  MemoryE2bSessionRecoveryStore,
+} from "../src/sandbox/session-recovery";
+import { mutationInputHash } from "../src/tools/mutation-journal";
+import type { ModelToolRequest, ToolResult } from "../src/tools/contracts";
 import type {
   E2bCommandStartOptions,
   E2bCommandHandle,
@@ -164,6 +174,38 @@ describe("repository bundle intake", () => {
   });
 });
 
+describe("E2B session recovery store", () => {
+  test("persists a strict mode-0600 lease and fails closed on corruption", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "session-recovery-"));
+    temporaryRoots.push(root);
+    const leasePath = path.join(root, "nested", "session.json");
+    const store = new FileE2bSessionRecoveryStore(leasePath);
+    const state = {
+      version: 1 as const,
+      runIdentity: "durable-run",
+      sandboxId: "sandbox-test",
+      serverPid: 42,
+      remoteRepoPath: "/workspace/tasks/durable-run",
+      baseSha: "a".repeat(40),
+      activeMutation: null,
+    };
+
+    expect(await store.load()).toBeNull();
+    await store.save(state);
+    expect((await stat(leasePath)).mode & 0o777).toBe(0o600);
+    expect(await store.load()).toEqual(state);
+
+    await writeFile(leasePath, '{"version":1,"unexpected":true}\n');
+    await expect(store.load()).rejects.toBeInstanceOf(
+      E2bSessionRecoveryError,
+    );
+
+    await store.clear();
+    await store.clear();
+    expect(await store.load()).toBeNull();
+  });
+});
+
 class FakeSandbox implements E2bSandbox {
   readonly sandboxId = "sandbox-test";
   readonly writes = new Map<string, string | ArrayBuffer>();
@@ -180,6 +222,7 @@ class FakeSandbox implements E2bSandbox {
     },
   };
   manifest = "";
+  mutationJournal = "";
   baseSha = "";
   taskId = "";
   provisionExitCode = 0;
@@ -197,9 +240,15 @@ class FakeSandbox implements E2bSandbox {
   }
 
   async readText(remotePath: string): Promise<string> {
-    expect(remotePath).toBe(RUNTIME_MANIFEST_PATH);
     if (this.readError) throw this.readError;
-    return this.manifest;
+    if (remotePath === RUNTIME_MANIFEST_PATH) return this.manifest;
+    if (remotePath === REMOTE_MUTATION_JOURNAL_PATH) {
+      if (!this.mutationJournal) {
+        throw Object.assign(new Error("missing journal"), { code: "ENOENT" });
+      }
+      return this.mutationJournal;
+    }
+    throw new Error(`Unexpected read path: ${remotePath}`);
   }
 
   async run() {
@@ -235,6 +284,16 @@ class FakeClient {
   ];
   closeCalls = 0;
   closeError: unknown;
+  callError: unknown;
+  calls: ModelToolRequest[] = [];
+  callGate: Promise<void> | undefined;
+  result: ToolResult = {
+    success: true,
+    output: "ok",
+    truncated: false,
+    originalTokenCount: 1,
+    codec: "test",
+  };
 
   async listTools() {
     return { tools: this.tools.map((name) => ({ name })) };
@@ -243,6 +302,13 @@ class FakeClient {
   async close(): Promise<void> {
     this.closeCalls += 1;
     if (this.closeError) throw this.closeError;
+  }
+
+  async call(request: ModelToolRequest): Promise<ToolResult> {
+    this.calls.push(request);
+    await this.callGate;
+    if (this.callError) throw this.callError;
+    return this.result;
   }
 }
 
@@ -256,6 +322,7 @@ async function sessionFixture(options: {
   const sandbox = options.sandbox ?? new FakeSandbox();
   const client = options.client ?? new FakeClient();
   let reconcileCalls = 0;
+  let reconnectCalls = 0;
   sandbox.manifest = JSON.stringify(await createRuntimeManifest(projectRoot));
 
   const factory: E2bSandboxFactory = {
@@ -278,6 +345,11 @@ async function sessionFixture(options: {
       expect(metadata.creationId).toMatch(/^[0-9a-f-]{36}$/);
       expect(Object.keys(metadata)).toEqual(["creationId"]);
     },
+    async connect(sandboxId) {
+      reconnectCalls += 1;
+      expect(sandboxId).toBe(sandbox.sandboxId);
+      return sandbox;
+    },
   };
 
   return {
@@ -287,6 +359,10 @@ async function sessionFixture(options: {
     get reconcileCalls() {
       return reconcileCalls;
     },
+    get reconnectCalls() {
+      return reconnectCalls;
+    },
+    factory,
     create: (overrides: Partial<Parameters<typeof createE2bTaskSession>[0]> = {}) =>
       createE2bTaskSession(
         {
@@ -393,5 +469,169 @@ describe("E2B task session", () => {
 
     await expect(session.close()).rejects.toBeInstanceOf(AggregateError);
     expect(setup.sandbox.killCalls).toBe(1);
+  });
+
+  test("persists a sandbox lease and recovers a completed mutation", async () => {
+    const setup = await sessionFixture();
+    const store = new MemoryE2bSessionRecoveryStore();
+    const runIdentity = "recovery-run";
+    const session = await setup.create({
+      recovery: { runIdentity, store },
+    });
+    const request: ModelToolRequest = {
+      name: "run_shell",
+      input: { cwd: ".", command: "printf safe" },
+    };
+    const operationId = crypto.randomUUID();
+
+    expect((await store.load())?.sandboxId).toBe("sandbox-test");
+    await session.call(request, { operationId });
+    const completed = (await store.load())?.activeMutation;
+    expect(completed).toMatchObject({
+      operationId,
+      status: "completed",
+    });
+    setup.sandbox.mutationJournal = JSON.stringify({
+      version: 1,
+      active: completed,
+    });
+
+    const recovered = await recoverE2bTaskSession(
+      { runIdentity, store },
+      {
+        sandboxFactory: setup.factory,
+        connectClient: async () =>
+          setup.client as unknown as McpToolClient,
+      },
+    );
+
+    expect(setup.reconnectCalls).toBe(1);
+    expect(recovered.recoveredMutation).toMatchObject({
+      operationId,
+      status: "completed",
+    });
+    await recovered.close();
+    expect(await store.load()).toBeNull();
+  });
+
+  test("leaves an ambiguous mutation in place and refuses replay", async () => {
+    const setup = await sessionFixture();
+    const store = new MemoryE2bSessionRecoveryStore();
+    const runIdentity = "blocked-run";
+    const request: ModelToolRequest = {
+      name: "run_shell",
+      input: { cwd: ".", command: "printf ambiguous" },
+    };
+    const operationId = crypto.randomUUID();
+    const activeMutation = {
+      operationId,
+      toolName: "run_shell" as const,
+      inputHash: mutationInputHash(request),
+      status: "in_flight" as const,
+      startedAt: new Date().toISOString(),
+      completedAt: null,
+      result: null,
+    };
+    await store.save({
+      version: 1,
+      runIdentity,
+      sandboxId: setup.sandbox.sandboxId,
+      serverPid: null,
+      remoteRepoPath: "/workspace/tasks/task-5",
+      baseSha: "a".repeat(40),
+      activeMutation,
+    });
+    setup.sandbox.mutationJournal = JSON.stringify({
+      version: 1,
+      active: activeMutation,
+    });
+
+    await expect(
+      recoverE2bTaskSession(
+        { runIdentity, store, reconcileTimeoutMs: 0 },
+        {
+          sandboxFactory: setup.factory,
+          connectClient: async () =>
+            setup.client as unknown as McpToolClient,
+        },
+      ),
+    ).rejects.toBeInstanceOf(MutationRecoveryBlockedError);
+    expect(setup.sandbox.killCalls).toBe(0);
+    expect((await store.load())?.activeMutation?.status).toBe("in_flight");
+  });
+
+  test("waits for an active call before clearing the session lease", async () => {
+    const client = new FakeClient();
+    let releaseCall!: () => void;
+    client.callGate = new Promise<void>((resolve) => {
+      releaseCall = resolve;
+    });
+    const setup = await sessionFixture({ client });
+    const store = new MemoryE2bSessionRecoveryStore();
+    const session = await setup.create({
+      recovery: { runIdentity: "close-order-run", store },
+    });
+    const call = session.call({
+      name: "run_shell",
+      input: { cwd: ".", command: "printf complete" },
+    });
+    await Bun.sleep(10);
+    const close = session.close();
+    await Bun.sleep(10);
+
+    expect(client.closeCalls).toBe(0);
+    expect(setup.sandbox.killCalls).toBe(0);
+    releaseCall();
+    await call;
+    await close;
+    expect(client.closeCalls).toBe(1);
+    expect(setup.sandbox.killCalls).toBe(1);
+    expect(await store.load()).toBeNull();
+    await expect(
+      session.call({
+        name: "read_file",
+        input: { path: "README.md" },
+      }),
+    ).rejects.toThrow("closing or closed");
+  });
+
+  test("requires terminal reconciliation before closing an ambiguous mutation", async () => {
+    const client = new FakeClient();
+    client.callError = new Error("transport disconnected");
+    const setup = await sessionFixture({ client });
+    const store = new MemoryE2bSessionRecoveryStore();
+    const session = await setup.create({
+      recovery: { runIdentity: "cancel-reconcile-run", store },
+    });
+    await expect(
+      session.call({
+        name: "run_shell",
+        input: { cwd: ".", command: "printf maybe" },
+      }),
+    ).rejects.toThrow("transport disconnected");
+    const active = (await store.load())?.activeMutation;
+    expect(active?.status).toBe("in_flight");
+
+    await expect(session.close()).rejects.toBeInstanceOf(
+      MutationRecoveryBlockedError,
+    );
+    expect(setup.sandbox.killCalls).toBe(0);
+    setup.sandbox.mutationJournal = JSON.stringify({
+      version: 1,
+      active: {
+        ...active,
+        status: "completed",
+        completedAt: new Date().toISOString(),
+        result: client.result,
+      },
+    });
+
+    expect(await session.reconcileActiveMutation(0)).toMatchObject({
+      operationId: active?.operationId,
+      status: "completed",
+    });
+    await session.close();
+    expect(setup.sandbox.killCalls).toBe(1);
+    expect(await store.load()).toBeNull();
   });
 });

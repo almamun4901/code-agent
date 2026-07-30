@@ -19,7 +19,10 @@ function shellEnvironment(repoPath: string): Record<string, string> {
   };
 }
 
-export async function runShellTool(input: RunShellInput): Promise<RawToolResult> {
+export async function runShellTool(
+  input: RunShellInput,
+  signal?: AbortSignal,
+): Promise<RawToolResult> {
   const repoPath = await validateRepoPath(input.repoPath);
   const cwd = resolveRepoChild(repoPath, input.cwd, { allowDot: true });
   if (!input.command.trim()) {
@@ -46,6 +49,12 @@ export async function runShellTool(input: RunShellInput): Promise<RawToolResult>
   const result = await runProcess(command, wrapper ? repoPath : cwd, {
     timeoutMs: wrapper ? timeoutMs + 1_500 : timeoutMs,
     env: shellEnvironment(repoPath),
+    signal,
+    ...(wrapper
+      ? {
+          onAbort: () => cancelRunnerProcesses(wrapper, repoPath),
+        }
+      : {}),
   });
   const sections = [
     result.stdout ? `STDOUT\n${result.stdout.trimEnd()}` : "",
@@ -60,6 +69,23 @@ export async function runShellTool(input: RunShellInput): Promise<RawToolResult>
       cwd: input.cwd,
     },
   };
+}
+
+async function cancelRunnerProcesses(
+  wrapper: string,
+  repoPath: string,
+): Promise<void> {
+  const cancellation = Bun.spawn(
+    ["sudo", wrapper, "--cancel", repoPath],
+    {
+      cwd: repoPath,
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+      env: shellEnvironment(repoPath),
+    },
+  );
+  await cancellation.exited;
 }
 
 export function shellCommand(

@@ -4,10 +4,21 @@ import {
   CallToolResultSchema,
   type ListToolsResult,
 } from "@modelcontextprotocol/sdk/types.js";
-import type { ModelToolRequest, ToolResult } from "../tools/contracts";
+import {
+  isMutatingToolCall,
+  type ModelToolRequest,
+  type ToolResult,
+} from "../tools/contracts";
 import { toolResultWireSchema } from "./schemas";
 
 const MCP_TOOL_TIMEOUT_MS = 60_000;
+export const MUTATION_OPERATION_META_KEY =
+  "terminal-native-coding-agent/operation-id";
+
+export type McpToolCallOptions = {
+  operationId?: string;
+  signal?: AbortSignal;
+};
 
 export class McpResultValidationError extends Error {
   constructor(message: string) {
@@ -38,15 +49,27 @@ export class McpToolClient {
     return this.#client.listTools();
   }
 
-  async call(call: ModelToolRequest): Promise<ToolResult> {
+  async call(
+    call: ModelToolRequest,
+    options: McpToolCallOptions = {},
+  ): Promise<ToolResult> {
     this.assertOpen();
+    const operationId = isMutatingToolCall(call)
+      ? (options.operationId ?? crypto.randomUUID())
+      : undefined;
     const rawResult = await this.#client.callTool(
       {
         name: call.name,
         arguments: call.input,
+        ...(operationId
+          ? { _meta: { [MUTATION_OPERATION_META_KEY]: operationId } }
+          : {}),
       },
       CallToolResultSchema,
-      { timeout: MCP_TOOL_TIMEOUT_MS },
+      {
+        timeout: MCP_TOOL_TIMEOUT_MS,
+        ...(options.signal ? { signal: options.signal } : {}),
+      },
     );
     const result = CallToolResultSchema.parse(rawResult);
 

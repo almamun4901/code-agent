@@ -3,7 +3,10 @@ import { ToolExecutionError } from "./errors";
 import { assertSafeExistingPath, validateRepoPath } from "./path-utils";
 import { runProcess } from "./process";
 
-export async function ripgrepTool(input: RipgrepInput): Promise<RawToolResult> {
+export async function ripgrepTool(
+  input: RipgrepInput,
+  signal?: AbortSignal,
+): Promise<RawToolResult> {
   const repoPath = await validateRepoPath(input.repoPath);
   if (!input.pattern) {
     throw new ToolExecutionError("Search pattern must not be empty.", "INVALID_PATTERN");
@@ -21,7 +24,7 @@ export async function ripgrepTool(input: RipgrepInput): Promise<RawToolResult> {
     args.push(".");
   }
 
-  const result = await runProcess(args, repoPath);
+  const result = await runProcess(args, repoPath, { signal });
   if (result.exitCode === 1) {
     return {
       output: "",

@@ -15,7 +15,7 @@ sandbox listing is empty.
 | S6-01 | Offline regression | Typecheck, tests, sandbox unit tests, and Step 0 regression pass |
 | S6-02 | Policy diagnostics | Obvious attacks return stable policy codes and the next safe tool works |
 | S6-03 | Template definition | The image defines separate `agent` and `runner` identities and an immutable runtime |
-| S6-04 | Template build | E2B builds the exact `step-6-v1` runtime from the filtered source payload |
+| S6-04 | Template build | E2B builds the exact current runtime from the filtered source payload |
 | S6-05 | MCP transport | The six-tool MCP connection works and fails promptly after process loss |
 | S6-06 | Tool surface | Model-visible schemas omit `repoPath`; Git exposes only status, diff, and commit |
 | S6-07 | Runtime isolation | Shell commands run as `runner` and cannot alter `/opt/agent` or Git metadata |
@@ -27,13 +27,14 @@ sandbox listing is empty.
 | S6-13 | Host isolation | Sandbox mutations do not change the host fixture or project |
 | S6-14 | Lifecycle cleanup | The sandbox is gone after success, failure, or process loss |
 | S6-15 | Opt-in behavior | Ordinary test runs skip live E2B tests and create no sandbox |
+| S6-16 | Mutation recovery | Cancellation journals `CANCELLED`; reconnect preserves the exact worktree without replay |
 
 ## Prerequisites
 
 - Bun 1.3 or newer
 - Git
 - ripgrep (`rg`)
-- An E2B account and API key for S6-04 through S6-15
+- An E2B account and API key for S6-04 through S6-16
 - Permission to upload the filtered runtime payload to E2B
 
 Run the local prerequisite check:
@@ -59,7 +60,7 @@ ignored local `.env` file:
 
 ```text
 E2B_API_KEY=<configured locally>
-E2B_TEMPLATE_NAME=terminal-coding-agent-tools:step-6-v1
+E2B_TEMPLATE_NAME=terminal-coding-agent-tools:mutation-recovery-v1
 ```
 
 ## Safety rules
@@ -71,7 +72,7 @@ E2B_TEMPLATE_NAME=terminal-coding-agent-tools:step-6-v1
 - Do not use wildcard or guessed sandbox IDs for cleanup.
 - Do not capture environment dumps, credentials, or provider response headers.
 - Stop if the template name is not exactly
-  `terminal-coding-agent-tools:step-6-v1`.
+  `terminal-coding-agent-tools:mutation-recovery-v1`.
 
 ## S6-01 — Run the complete local regression
 
@@ -141,7 +142,7 @@ Pass criteria:
 - only `package.json`, `bun.lock`, and `src/` are copied into the image.
 - the command exits without contacting E2B.
 
-## S6-04 — Build the Step 6 E2B template
+## S6-04 — Build the current E2B template
 
 Running this command uploads `package.json`, `bun.lock`, and `src/` to E2B.
 It excludes `.env`, `.git`, `.agent`, dependencies, tests, documentation,
@@ -163,7 +164,7 @@ Build with an explicit name so a stale local setting cannot select an older
 template:
 
 ```sh
-E2B_TEMPLATE_NAME=terminal-coding-agent-tools:step-6-v1 \
+E2B_TEMPLATE_NAME=terminal-coding-agent-tools:mutation-recovery-v1 \
   bun run e2b:template:build
 ```
 
@@ -171,14 +172,14 @@ Pass criteria:
 
 - the build succeeds;
 - the final JSON contains `templateId`, `templateRef`, `buildId`, and the
-  exact Step 6 name;
+  exact current template name;
 - the runtime checks find Bun, Git, ripgrep, and the pinned Tree-sitter WASM
   files;
 - no secret appears in the build log.
 
 Copy the returned tagged `templateRef` into `E2B_TEMPLATE_ID` in the ignored
 local `.env`. Do not copy the bare `templateId`; E2B resolves an untagged ID
-as `:default`, but this project builds the `:step-6-v1` tag.
+as `:default`, but this project builds the `:mutation-recovery-v1` tag.
 
 ```text
 E2B_TEMPLATE_ID=<returned-template-ref>
@@ -209,7 +210,7 @@ Pass criteria:
 If the final listing is not empty, stop and follow
 [Cleanup after a failed live case](#cleanup-after-a-failed-live-case).
 
-## S6-06 through S6-14 — Run the full live safety gate
+## S6-06 through S6-14 and S6-16 — Run the full live gate
 
 Cost: one short-lived sandbox. Run this only after S6-05 passes.
 
@@ -306,10 +307,22 @@ Pass criteria:
 - closing the task session makes reconnecting to its sandbox fail;
 - the final account listing reports no running sandbox.
 
+### S6-16 — Mutation recovery
+
+Pass criteria:
+
+- cancelling a real shell mutation produces a terminal journal result with
+  code `CANCELLED` before session cleanup;
+- recovery after simulated host transport loss reconnects the same sandbox;
+- the completed mutation is observed without replay and its worktree artifact
+  appears exactly once;
+- both recovery sessions terminate their sandboxes and clear their host
+  leases.
+
 Expected test summary:
 
 ```text
-1 pass
+3 pass
 0 fail
 ```
 
@@ -328,7 +341,7 @@ Pass criteria:
 
 ## Cleanup after a failed live case
 
-If a sandbox remains, first verify that its template ID matches the Step 6
+If a sandbox remains, first verify that its template ID matches the current
 template. Then terminate that exact sandbox ID:
 
 ```sh
@@ -360,6 +373,7 @@ Record one row per case:
 | S6-05 |  | PASS / FAIL |  |  |  |  |
 | S6-06–S6-14 |  | PASS / FAIL |  |  |  |  |
 | S6-15 |  | PASS / FAIL |  |  |  |  |
+| S6-16 |  | PASS / FAIL |  |  |  |  |
 
 For a failure, attach:
 

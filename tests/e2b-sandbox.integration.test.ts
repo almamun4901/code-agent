@@ -4,7 +4,11 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Sandbox } from "e2b";
-import { createE2bTaskSession } from "../src/sandbox/e2b-session";
+import {
+  createE2bTaskSession,
+  recoverE2bTaskSession,
+} from "../src/sandbox/e2b-session";
+import { MemoryE2bSessionRecoveryStore } from "../src/sandbox/session-recovery";
 import {
   readLiveE2bConfig,
   toolStdout,
@@ -447,4 +451,121 @@ test.skipIf(!LIVE_ENABLED)(
     }
   },
   240_000,
+);
+
+test.skipIf(!LIVE_ENABLED)(
+  "cancelled E2B mutations reconcile before sandbox cleanup",
+  async () => {
+    const repository = await createTemporaryRepository();
+    const store = new MemoryE2bSessionRecoveryStore();
+    let session:
+      | Awaited<ReturnType<typeof createE2bTaskSession>>
+      | undefined;
+    try {
+      session = await createE2bTaskSession({
+        localRepoPath: repository.worktreePath,
+        taskId: "mutation-cancel-live",
+        templateId,
+        recovery: {
+          runIdentity: "mutation-cancel-live",
+          store,
+        },
+      });
+      const controller = new AbortController();
+      const operationId = crypto.randomUUID();
+      const pending = session.call(
+        {
+          name: "run_shell",
+          input: { cwd: ".", command: "sleep 30" },
+        },
+        { operationId, signal: controller.signal },
+      );
+
+      await Bun.sleep(250);
+      controller.abort();
+      await expect(pending).rejects.toThrow();
+      expect(await session.reconcileActiveMutation(10_000)).toMatchObject({
+        operationId,
+        status: "completed",
+        result: {
+          success: false,
+          metadata: { code: "CANCELLED" },
+        },
+      });
+
+      const sandboxId = session.sandboxId;
+      await session.close();
+      session = undefined;
+      expect(await store.load()).toBeNull();
+      await expect(Sandbox.connect(sandboxId)).rejects.toThrow();
+    } finally {
+      await session?.reconcileActiveMutation(10_000).catch(() => {});
+      await session?.close().catch(() => {});
+      await repository.cleanup();
+    }
+  },
+  120_000,
+);
+
+test.skipIf(!LIVE_ENABLED)(
+  "completed E2B mutations survive host transport loss without replay",
+  async () => {
+    const repository = await createTemporaryRepository();
+    const store = new MemoryE2bSessionRecoveryStore();
+    const runIdentity = "mutation-reconnect-live";
+    let original:
+      | Awaited<ReturnType<typeof createE2bTaskSession>>
+      | undefined;
+    let recovered:
+      | Awaited<ReturnType<typeof recoverE2bTaskSession>>
+      | undefined;
+    try {
+      original = await createE2bTaskSession({
+        localRepoPath: repository.worktreePath,
+        taskId: "mutation-reconnect-live",
+        templateId,
+        recovery: { runIdentity, store },
+      });
+      const sandboxId = original.sandboxId;
+      const operationId = crypto.randomUUID();
+      await original.call(
+        {
+          name: "run_shell",
+          input: {
+            cwd: ".",
+            command: "printf 'once\\n' >> recovery-marker.txt",
+          },
+        },
+        { operationId },
+      );
+
+      await original.client.close();
+      recovered = await recoverE2bTaskSession({ runIdentity, store });
+      original = undefined;
+
+      expect(recovered.sandboxId).toBe(sandboxId);
+      expect(recovered.recoveredMutation).toMatchObject({
+        operationId,
+        status: "completed",
+      });
+      const marker = await recovered.call({
+        name: "read_file",
+        input: { path: "recovery-marker.txt" },
+      });
+      expect(marker).toMatchObject({
+        success: true,
+        output: "1: once\n2: ",
+      });
+
+      await recovered.close();
+      recovered = undefined;
+      expect(await store.load()).toBeNull();
+      await expect(Sandbox.connect(sandboxId)).rejects.toThrow();
+    } finally {
+      await recovered?.close().catch(() => {});
+      await original?.close().catch(() => {});
+      await repository.cleanup();
+    }
+  },
+  120_000,
 );

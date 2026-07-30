@@ -16,20 +16,23 @@ import { finalizeToolResult } from "./token-budget";
 import { treeSitterSymbolsTool } from "./tree-sitter-symbols";
 import { validateToolCall } from "./validate-call";
 
-async function execute(call: RootedToolCall): Promise<RawToolResult> {
+async function execute(
+  call: RootedToolCall,
+  signal?: AbortSignal,
+): Promise<RawToolResult> {
   switch (call.name) {
     case "read_file":
       return readFileTool(call.input);
     case "edit_file":
       return editFileTool(call.input);
     case "ripgrep":
-      return ripgrepTool(call.input);
+      return ripgrepTool(call.input, signal);
     case "tree_sitter_symbols":
       return treeSitterSymbolsTool(call.input);
     case "run_shell":
-      return runShellTool(call.input);
+      return runShellTool(call.input, signal);
     case "git":
-      return gitTool(call.input);
+      return gitTool(call.input, signal);
     default:
       throw new ToolExecutionError(
         `Unknown tool: ${String((call as { name?: unknown }).name)}`,
@@ -95,10 +98,13 @@ async function dispatchValidated(
   const tokenLimit = context.tokenLimit;
 
   try {
+    throwIfAborted(context.abortSignal);
     const validatedRequest = validateToolCall(call);
     await evaluatePolicy(validatedRequest, context);
+    throwIfAborted(context.abortSignal);
     const raw = await execute(
       bindWorktreeRoot(validatedRequest, context.worktreeRoot),
+      context.abortSignal,
     );
     return finalizeToolResult(true, raw, { codec, tokenLimit });
   } catch (error) {
@@ -120,6 +126,14 @@ async function dispatchValidated(
       { codec, tokenLimit },
     );
   }
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (!signal?.aborted) return;
+  throw new ToolExecutionError(
+    "Tool execution was cancelled.",
+    "CANCELLED",
+  );
 }
 
 export async function dispatchTool(

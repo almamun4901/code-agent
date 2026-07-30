@@ -11,8 +11,10 @@ creation.
 Steps 0–6 are complete. The deterministic fake loop, live Claude loop with fake
 tools, six real local tools, crash-safe plan persistence, MCP stdio transport,
 isolated E2B execution, and the PreToolUse safety boundary have passed their
-acceptance gates. The six tools execute serially inside one short-lived,
-network-disabled E2B worktree per task.
+acceptance gates. Mutation recovery is also complete: mutating calls are
+journaled on both host and sandbox, interrupted sessions reconnect to the same
+worktree, and ambiguous operations fail closed. The six tools execute serially
+inside one short-lived, network-disabled E2B worktree per task.
 The real tools have only been exercised by deterministic tests against
 disposable repositories; no model has received them.
 
@@ -43,6 +45,10 @@ The code currently proves:
   and commit Git operations with no model-visible repository path or push;
 - persistent MCP stdio client/server transport with canonical direct-call
   parity, strict result decoding, and child-process lifecycle handling;
+- durable operation IDs, host session leases, and sandbox mutation journals
+  for edit apply, shell, and Git commit;
+- same-sandbox reconnection, terminal cancellation reconciliation, and
+  duplicate-mutation prevention;
 - separate `agent` and `runner` identities, immutable runtime ownership,
   protected linked-worktree Git metadata, and a fixed root-owned shell wrapper;
 - component-wise symlink rejection, no-follow file access, controlled shell
@@ -94,6 +100,7 @@ src/tools/dispatcher.ts
     +---- PreToolUse allow/deny + serialized execution
     +---- typed file/Git tools as agent
     +---- run_shell through root-owned wrapper as runner
+    +---- operation journal before every mutation
     +---- capped, canonical serialized ToolResult
     |
     v
@@ -107,10 +114,12 @@ network-disabled E2B task worktree
 branch-backed worktree under `/workspace/tasks`, and connects to the MCP server
 through streamed E2B stdin/stdout. The sandbox starts with internet disabled;
 typed tools run as `agent`, while arbitrary shell commands run as `runner`
-through the fixed wrapper. Later roadmap steps add the remaining lifecycle
-hooks, telemetry, and an Ink terminal UI.
-The model loop and Step 2 real-tool dispatcher remain
-deliberately disconnected until ADR 0009 mutation recovery lands.
+through the fixed wrapper. Its host lease records the exact sandbox and active
+mutation; recovery verifies the sandbox journal before reconnecting or
+refusing replay. Later roadmap steps add the production runner, remaining
+lifecycle hooks, telemetry, and an Ink terminal UI. The model loop and Step 2
+real-tool dispatcher remain deliberately disconnected until the OpenRouter
+provider and production runner prerequisites land.
 
 ## Setup
 
@@ -230,6 +239,9 @@ The authoritative agent instructions and exact sequence are in
   E2B runtime, worktree provisioning, lifecycle ownership, and live gates.
 - [`docs/plans/phase-6-pretooluse-safety-hook.md`](docs/plans/phase-6-pretooluse-safety-hook.md):
   threat model, structural confinement, red-team matrix, and acceptance gates.
+- [`docs/plans/mutation-recovery.md`](docs/plans/mutation-recovery.md):
+  operation journaling, same-sandbox recovery, cancellation, and acceptance
+  evidence.
 - [`docs/testing/step-5-manual-terminal-tests.md`](docs/testing/step-5-manual-terminal-tests.md)
   and [`docs/testing/step-6-manual-safety-tests.md`](docs/testing/step-6-manual-safety-tests.md):
   ordered local and opt-in live verification procedures.

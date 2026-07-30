@@ -51,3 +51,12 @@ Before the first live-model real-tool run after Steps 5–6, require idempotency
 keys, a write-ahead execution journal, or operation-specific reconciliation for
 every mutating tool. Do not expose `edit_file`, `run_shell`, or mutating git
 operations to a model until that recovery contract is verified.
+
+## Revisit outcome
+
+ADR 0013 supplies the required host lease, sandbox execution journal,
+same-sandbox recovery, fail-closed ambiguity handling, and cancellation
+reconciliation. Offline ordering, replay, corruption, and race tests pass; the
+live E2B gate verifies cancellation, same-sandbox reconnection, and zero
+orphaned sandboxes. The revisit gate is closed before the first live model
+receives the real tool surface.

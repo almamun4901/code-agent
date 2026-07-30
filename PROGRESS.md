@@ -15,7 +15,7 @@ are complete and merged. The host-side production runner is implemented on
 external activity, persists validated pending turns and stable mutation
 operation IDs, supports provider-native sequential actions and full plan
 revision, runs actions through the owned E2B MCP session, and reconciles
-before cleanup. Type checking, 174 offline tests, 15 focused MCP tests, 33
+before cleanup. Type checking, 175 offline tests, 15 focused MCP tests, 33
 focused sandbox tests, 4 focused safety tests, and all smoke checks pass.
 The live gate reached a real free-model `rewrite_plan -> read_file -> observed
 plan` sequence through E2B and cleaned every sandbox, but repeated diagnostic
@@ -817,15 +817,16 @@ terminal run could pass.
   operation ID before MCP execution; publish the new plan only with a terminal
   observation. Support full plan revision and provider-native sequential tool
   calls without weakening mutation reconciliation. See ADR 0014.
-- Current status of the step in progress: Branch `feat/agent-runtime` has two
-  scoped implementation/test commits plus this documentation handoff. Type
-  checking, 174 offline tests, 15 focused MCP tests, 33 focused sandbox tests,
+- Current status of the step in progress: Branch `feat/agent-runtime` has
+  scoped implementation, test, documentation, and review-fix commits. Type
+  checking, 175 offline tests, 15 focused MCP tests, 33 focused sandbox tests,
   4 focused safety tests, fake-loop regression, template inspection, and diff
   checks pass. The live gate completed a real `rewrite_plan`, E2B MCP
   `read_file`, and observed follow-up plan, and every attempt left zero
-  running sandboxes. A complete terminal live run is pending the free-model
-  daily quota reset.
-- Next session should start with: Run the pre-landing review. Rerun
+  running sandboxes. Pre-landing review found and fixed semantic checkpoint
+  replay validation and unbounded persisted inputs; the final review is clean.
+  A complete terminal live run is pending the free-model daily quota reset.
+- Next session should start with: Rerun
   `bun run test:runtime:integration` when the free allowance resets, then push
   and merge the runner prerequisite before creating the terminal-interface
   branch.

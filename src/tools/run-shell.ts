@@ -19,7 +19,10 @@ function shellEnvironment(repoPath: string): Record<string, string> {
   };
 }
 
-export async function runShellTool(input: RunShellInput): Promise<RawToolResult> {
+export async function runShellTool(
+  input: RunShellInput,
+  signal?: AbortSignal,
+): Promise<RawToolResult> {
   const repoPath = await validateRepoPath(input.repoPath);
   const cwd = resolveRepoChild(repoPath, input.cwd, { allowDot: true });
   if (!input.command.trim()) {
@@ -46,6 +49,7 @@ export async function runShellTool(input: RunShellInput): Promise<RawToolResult>
   const result = await runProcess(command, wrapper ? repoPath : cwd, {
     timeoutMs: wrapper ? timeoutMs + 1_500 : timeoutMs,
     env: shellEnvironment(repoPath),
+    signal,
   });
   const sections = [
     result.stdout ? `STDOUT\n${result.stdout.trimEnd()}` : "",

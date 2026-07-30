@@ -38,20 +38,31 @@ const HARDENED_GIT_CONFIG = [
   "core.pager=cat",
 ];
 
-async function git(repoPath: string, args: string[]) {
+async function git(
+  repoPath: string,
+  args: string[],
+  signal?: AbortSignal,
+) {
   return runProcess(
     ["/usr/bin/git", ...HARDENED_GIT_CONFIG, ...args],
     repoPath,
-    { env: GIT_ENVIRONMENT },
+    { env: GIT_ENVIRONMENT, signal },
   );
 }
 
-export async function gitTool(input: GitInput): Promise<RawToolResult> {
+export async function gitTool(
+  input: GitInput,
+  signal?: AbortSignal,
+): Promise<RawToolResult> {
   const repoPath = await validateRepoPath(input.repoPath);
 
   switch (input.subcommand) {
     case "status": {
-      const result = await git(repoPath, ["status", "--porcelain=v1", "--branch"]);
+      const result = await git(
+        repoPath,
+        ["status", "--porcelain=v1", "--branch"],
+        signal,
+      );
       requireSuccessfulProcess("git status", result);
       const lines = result.stdout.trimEnd().split("\n");
       const branchLine = lines[0] ?? "";
@@ -71,7 +82,7 @@ export async function gitTool(input: GitInput): Promise<RawToolResult> {
         resolveRepoChild(repoPath, input.path);
         args.push("--", input.path);
       }
-      const result = await git(repoPath, args);
+      const result = await git(repoPath, args, signal);
       requireSuccessfulProcess("git diff", result);
       return {
         output: result.stdout.trimEnd(),
@@ -86,12 +97,16 @@ export async function gitTool(input: GitInput): Promise<RawToolResult> {
         );
       }
       if (input.addAll) {
-        const add = await git(repoPath, ["add", "-A"]);
+        const add = await git(repoPath, ["add", "-A"], signal);
         requireSuccessfulProcess("git add", add);
       }
-      const commit = await git(repoPath, ["commit", "-m", input.message]);
+      const commit = await git(
+        repoPath,
+        ["commit", "-m", input.message],
+        signal,
+      );
       requireSuccessfulProcess("git commit", commit);
-      const rev = await git(repoPath, ["rev-parse", "HEAD"]);
+      const rev = await git(repoPath, ["rev-parse", "HEAD"], signal);
       requireSuccessfulProcess("git rev-parse", rev);
       const sha = rev.stdout.trim();
       return {

@@ -113,4 +113,45 @@ describe("mutation execution journal", () => {
       await readFile(join(repo.worktreePath, "mutation.log"), "utf8"),
     ).toBe("once\n");
   });
+
+  test("cancels an in-flight shell mutation and journals its terminal result", async () => {
+    const repo = await createTemporaryRepository();
+    repositories.push(repo);
+    const journal = new MemoryMutationJournal();
+    const server = createMcpToolServer(
+      { worktreeRoot: repo.worktreePath },
+      { mutationJournal: journal },
+    );
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    const client = await McpToolClient.connect(clientTransport);
+    clients.push(client);
+    const controller = new AbortController();
+    const operationId = crypto.randomUUID();
+    const pending = client.call(
+      {
+        name: "run_shell",
+        input: { cwd: ".", command: "sleep 5" },
+      },
+      { operationId, signal: controller.signal },
+    );
+
+    await Bun.sleep(25);
+    controller.abort();
+    await expect(pending).rejects.toThrow();
+
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      if ((await journal.load()).active?.status === "completed") break;
+      await Bun.sleep(25);
+    }
+    expect((await journal.load()).active).toMatchObject({
+      operationId,
+      status: "completed",
+      result: {
+        success: false,
+        metadata: { code: "CANCELLED" },
+      },
+    });
+  });
 });

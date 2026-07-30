@@ -79,9 +79,14 @@ export function createMcpToolServer(
   async function handleTool(
     request: ModelToolRequest,
     meta: Record<string, unknown> | undefined,
+    signal: AbortSignal,
   ): Promise<CallToolResult> {
+    const requestContext = {
+      ...serializedContext,
+      abortSignal: signal,
+    };
     if (!isMutatingToolCall(request)) {
-      return toMcpResult(await dispatchTool(request, serializedContext));
+      return toMcpResult(await dispatchTool(request, requestContext));
     }
 
     const operationId = meta?.[MUTATION_OPERATION_META_KEY];
@@ -128,7 +133,7 @@ export function createMcpToolServer(
       );
     }
 
-    const result = await dispatchTool(request, serializedContext);
+    const result = await dispatchTool(request, requestContext);
     await completeMutation(mutationJournal, operationId, result);
     return toMcpResult(result);
   }
@@ -142,7 +147,7 @@ export function createMcpToolServer(
       annotations: readOnlyAnnotations,
     },
     async (input, extra) =>
-      handleTool({ name: "read_file", input }, extra._meta),
+      handleTool({ name: "read_file", input }, extra._meta, extra.signal),
   );
 
   server.registerTool(
@@ -155,7 +160,7 @@ export function createMcpToolServer(
       annotations: mutatingAnnotations,
     },
     async (input, extra) =>
-      handleTool({ name: "edit_file", input }, extra._meta),
+      handleTool({ name: "edit_file", input }, extra._meta, extra.signal),
   );
 
   server.registerTool(
@@ -167,7 +172,7 @@ export function createMcpToolServer(
       annotations: readOnlyAnnotations,
     },
     async (input, extra) =>
-      handleTool({ name: "ripgrep", input }, extra._meta),
+      handleTool({ name: "ripgrep", input }, extra._meta, extra.signal),
   );
 
   server.registerTool(
@@ -179,7 +184,11 @@ export function createMcpToolServer(
       annotations: readOnlyAnnotations,
     },
     async (input, extra) =>
-      handleTool({ name: "tree_sitter_symbols", input }, extra._meta),
+      handleTool(
+        { name: "tree_sitter_symbols", input },
+        extra._meta,
+        extra.signal,
+      ),
   );
 
   server.registerTool(
@@ -194,7 +203,7 @@ export function createMcpToolServer(
       },
     },
     async (input, extra) =>
-      handleTool({ name: "run_shell", input }, extra._meta),
+      handleTool({ name: "run_shell", input }, extra._meta, extra.signal),
   );
 
   server.registerTool(
@@ -215,6 +224,7 @@ export function createMcpToolServer(
           >["input"],
         },
         extra._meta,
+        extra.signal,
       ),
   );
 

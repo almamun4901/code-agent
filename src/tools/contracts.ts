@@ -128,6 +128,7 @@ export type ToolExecutionQueue = {
 };
 
 export type DispatcherContext = PreToolUseContext & {
+  abortSignal?: AbortSignal;
   preToolUse?: PreToolUse;
   executionQueue?: ToolExecutionQueue;
   tokenLimit?: number;

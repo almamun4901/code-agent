@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm, stat } from "node:fs/promises";
+import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,7 +13,11 @@ import {
   type E2bSandbox,
   type E2bSandboxFactory,
 } from "../src/sandbox/e2b-session";
-import { MemoryE2bSessionRecoveryStore } from "../src/sandbox/session-recovery";
+import {
+  E2bSessionRecoveryError,
+  FileE2bSessionRecoveryStore,
+  MemoryE2bSessionRecoveryStore,
+} from "../src/sandbox/session-recovery";
 import { mutationInputHash } from "../src/tools/mutation-journal";
 import type { ModelToolRequest, ToolResult } from "../src/tools/contracts";
 import type {
@@ -167,6 +171,38 @@ describe("repository bundle intake", () => {
     await expect(
       createRepositoryBundle("relative/repository"),
     ).rejects.toBeInstanceOf(RepositoryBundleError);
+  });
+});
+
+describe("E2B session recovery store", () => {
+  test("persists a strict mode-0600 lease and fails closed on corruption", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "session-recovery-"));
+    temporaryRoots.push(root);
+    const leasePath = path.join(root, "nested", "session.json");
+    const store = new FileE2bSessionRecoveryStore(leasePath);
+    const state = {
+      version: 1 as const,
+      runIdentity: "durable-run",
+      sandboxId: "sandbox-test",
+      serverPid: 42,
+      remoteRepoPath: "/workspace/tasks/durable-run",
+      baseSha: "a".repeat(40),
+      activeMutation: null,
+    };
+
+    expect(await store.load()).toBeNull();
+    await store.save(state);
+    expect((await stat(leasePath)).mode & 0o777).toBe(0o600);
+    expect(await store.load()).toEqual(state);
+
+    await writeFile(leasePath, '{"version":1,"unexpected":true}\n');
+    await expect(store.load()).rejects.toBeInstanceOf(
+      E2bSessionRecoveryError,
+    );
+
+    await store.clear();
+    await store.clear();
+    expect(await store.load()).toBeNull();
   });
 });
 

@@ -5,8 +5,7 @@ import type {
   TreeSitterSymbolsInput,
 } from "./contracts";
 import { ToolExecutionError } from "./errors";
-import { readFile } from "node:fs/promises";
-import { resolveRepoChild, validateRepoPath } from "./path-utils";
+import { openExistingNoFollow, validateRepoPath } from "./path-utils";
 
 type LanguageName = "python" | "javascript" | "typescript" | "tsx";
 
@@ -118,7 +117,6 @@ export async function treeSitterSymbolsTool(
   input: TreeSitterSymbolsInput,
 ): Promise<RawToolResult> {
   const repoPath = await validateRepoPath(input.repoPath);
-  const filePath = resolveRepoChild(repoPath, input.path);
   const languageName = languageForExtension(path.extname(input.path).toLowerCase());
   if (!languageName) {
     throw new ToolExecutionError(
@@ -129,8 +127,19 @@ export async function treeSitterSymbolsTool(
 
   let source: string;
   try {
-    source = await readFile(filePath, "utf8");
-  } catch {
+    const handle = await openExistingNoFollow(repoPath, input.path);
+    try {
+      source = await handle.readFile("utf8");
+    } finally {
+      await handle.close();
+    }
+  } catch (error) {
+    if (
+      error instanceof ToolExecutionError &&
+      error.code !== "PATH_NOT_FOUND"
+    ) {
+      throw error;
+    }
     throw new ToolExecutionError(
       `Source file could not be read: ${input.path}`,
       "FILE_NOT_FOUND",

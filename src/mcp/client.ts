@@ -4,7 +4,7 @@ import {
   CallToolResultSchema,
   type ListToolsResult,
 } from "@modelcontextprotocol/sdk/types.js";
-import type { ToolCall, ToolResult } from "../tools/contracts";
+import type { ModelToolRequest, ToolResult } from "../tools/contracts";
 import { toolResultWireSchema } from "./schemas";
 
 const MCP_TOOL_TIMEOUT_MS = 60_000;
@@ -38,7 +38,7 @@ export class McpToolClient {
     return this.#client.listTools();
   }
 
-  async call(call: ToolCall): Promise<ToolResult> {
+  async call(call: ModelToolRequest): Promise<ToolResult> {
     this.assertOpen();
     const rawResult = await this.#client.callTool(
       {

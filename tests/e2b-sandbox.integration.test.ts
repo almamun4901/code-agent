@@ -5,13 +5,15 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Sandbox } from "e2b";
 import { createE2bTaskSession } from "../src/sandbox/e2b-session";
+import {
+  readLiveE2bConfig,
+  toolStdout,
+} from "./support/live-e2b-config";
 import { createTemporaryRepository } from "./support/temp-repo";
 
-const templateId = process.env.E2B_TEMPLATE_ID?.trim() ?? "";
-const LIVE_ENABLED =
-  process.env.RUN_LIVE_E2B_TEST === "1" &&
-  Boolean(process.env.E2B_API_KEY?.trim()) &&
-  Boolean(templateId);
+const liveConfig = readLiveE2bConfig();
+const templateId = liveConfig.templateRef;
+const LIVE_ENABLED = liveConfig.enabled;
 const projectRoot = fileURLToPath(new URL("..", import.meta.url));
 
 async function gitStatus(cwd: string): Promise<string> {
@@ -59,9 +61,18 @@ test.skipIf(!LIVE_ENABLED)(
     try {
       session = await createE2bTaskSession({
         localRepoPath: repository.worktreePath,
-        taskId: "step-5-live",
+        taskId: "step-6-live",
         templateId,
       });
+      const observer = await Sandbox.connect(session.sandboxId);
+      const runtimeDigestBefore = (
+        await observer.commands.run("sha256sum /opt/agent/package.json")
+      ).stdout;
+      const gitMarkerDigestBefore = (
+        await observer.commands.run(
+          `sha256sum ${session.remoteRepoPath}/.git`,
+        )
+      ).stdout;
 
       const tools = (await session.client.listTools()).tools;
       expect(tools.map((tool) => tool.name).sort()).toEqual([
@@ -72,11 +83,24 @@ test.skipIf(!LIVE_ENABLED)(
         "run_shell",
         "tree_sitter_symbols",
       ]);
+      for (const tool of tools) {
+        expect(tool.inputSchema.properties).not.toHaveProperty("repoPath");
+      }
+      const gitSchema = tools.find((tool) => tool.name === "git")
+        ?.inputSchema as {
+          oneOf?: Array<{
+            properties?: { subcommand?: { const?: string } };
+          }>;
+        };
+      expect(
+        gitSchema.oneOf?.map(
+          (branch) => branch.properties?.subcommand?.const,
+        ).sort(),
+      ).toEqual(["commit", "diff", "status"]);
 
       const read = await session.client.call({
         name: "read_file",
         input: {
-          repoPath: session.remoteRepoPath,
           path: "src/sample.ts",
         },
       });
@@ -86,7 +110,6 @@ test.skipIf(!LIVE_ENABLED)(
       const preview = await session.client.call({
         name: "edit_file",
         input: {
-          repoPath: session.remoteRepoPath,
           path: "src/sample.ts",
           mode: "preview",
           oldText: "return value + 1;",
@@ -99,7 +122,6 @@ test.skipIf(!LIVE_ENABLED)(
       const applied = await session.client.call({
         name: "edit_file",
         input: {
-          repoPath: session.remoteRepoPath,
           path: "src/sample.ts",
           mode: "apply",
           oldText: "return value + 1;",
@@ -112,7 +134,6 @@ test.skipIf(!LIVE_ENABLED)(
       const search = await session.client.call({
         name: "ripgrep",
         input: {
-          repoPath: session.remoteRepoPath,
           pattern: "return value + 2",
           fixedString: true,
         },
@@ -123,7 +144,6 @@ test.skipIf(!LIVE_ENABLED)(
       const symbols = await session.client.call({
         name: "tree_sitter_symbols",
         input: {
-          repoPath: session.remoteRepoPath,
           path: "src/sample.ts",
         },
       });
@@ -133,7 +153,6 @@ test.skipIf(!LIVE_ENABLED)(
       const shell = await session.client.call({
         name: "run_shell",
         input: {
-          repoPath: session.remoteRepoPath,
           cwd: ".",
           command: [
             `if test -e ${shellQuote(sentinelPath)}; then`,
@@ -153,10 +172,206 @@ test.skipIf(!LIVE_ENABLED)(
       expect(shell.output).toContain("HOST_UNREACHABLE");
       expect(shell.output).not.toContain(sentinelSecret);
 
+      const identity = await session.client.call({
+        name: "run_shell",
+        input: { cwd: ".", command: "id -un" },
+      });
+      expect(identity).toMatchObject({
+        success: true,
+        metadata: { exitCode: 0 },
+      });
+      expect(identity.output).toContain("runner");
+
+      const outsideWrite = await session.client.call({
+        name: "run_shell",
+        input: {
+          cwd: ".",
+          command:
+            "printf 'escape\\n' > /workspace/tasks/outside-runner.txt",
+        },
+      });
+      expect(Number(outsideWrite.metadata?.exitCode)).not.toBe(0);
+      expect(
+        (
+          await observer.commands.run(
+            "test ! -e /workspace/tasks/outside-runner.txt",
+          )
+        ).exitCode,
+      ).toBe(0);
+
+      const encodedRuntime = Buffer.from(
+        "/opt/agent/package.json",
+      ).toString("base64");
+      const runtimeMutation = await session.client.call({
+        name: "run_shell",
+        input: {
+          cwd: ".",
+          command:
+            `bun -e 'await Bun.write(Buffer.from("${encodedRuntime}","base64").toString(),"poison")'`,
+        },
+      });
+      expect(Number(runtimeMutation.metadata?.exitCode)).not.toBe(0);
+
+      const encodedGitMarker = Buffer.from(
+        `${session.remoteRepoPath}/.git`,
+      ).toString("base64");
+      const gitMutation = await session.client.call({
+        name: "run_shell",
+        input: {
+          cwd: ".",
+          command:
+            `bun -e 'await Bun.write(Buffer.from("${encodedGitMarker}","base64").toString(),"poison")'`,
+        },
+      });
+      expect(Number(gitMutation.metadata?.exitCode)).not.toBe(0);
+
+      expect(
+        (
+          await observer.commands.run("sha256sum /opt/agent/package.json")
+        ).stdout,
+      ).toBe(runtimeDigestBefore);
+      expect(
+        (
+          await observer.commands.run(
+            `sha256sum ${session.remoteRepoPath}/.git`,
+          )
+        ).stdout,
+      ).toBe(gitMarkerDigestBefore);
+
+      const directNetwork = await session.client.call({
+        name: "run_shell",
+        input: {
+          cwd: ".",
+          command: "curl https://example.com",
+        },
+      });
+      expect(directNetwork).toMatchObject({
+        success: false,
+        metadata: { code: "SHELL_EGRESS_UTILITY" },
+      });
+
+      const encodedUrl = Buffer.from("https://example.com").toString(
+        "base64",
+      );
+      const hexHost = Buffer.from("example.com").toString("hex");
+      const networkAttempts = [
+        {
+          name: "bun-http",
+          command:
+            `bun -e 'await fetch(Buffer.from("${encodedUrl}","base64").toString()); console.log("NETWORK_"+"REACHED")'`,
+        },
+        {
+          name: "node-http",
+          command:
+            `node -e 'fetch(Buffer.from("${encodedUrl}","base64").toString()).then(()=>console.log("NETWORK_"+"REACHED")).catch(()=>process.exit(2))'`,
+        },
+        {
+          name: "python-http",
+          command:
+            `python3 -c 'import urllib.request; urllib.request.urlopen(bytes.fromhex("${Buffer.from("https://example.com").toString("hex")}").decode(),timeout=3); print("NETWORK_"+"REACHED")'`,
+        },
+        {
+          name: "raw-tcp",
+          command:
+            `python3 -c 'import socket; socket.create_connection((bytes.fromhex("${hexHost}").decode(),443),3); print("NETWORK_"+"REACHED")'`,
+        },
+        {
+          name: "dns",
+          command:
+            `python3 -c 'import socket; socket.gethostbyname(bytes.fromhex("${hexHost}").decode()); print("NETWORK_"+"REACHED")'`,
+        },
+      ];
+      for (const attempt of networkAttempts) {
+        const result = await session.client.call({
+          name: "run_shell",
+          input: {
+            cwd: ".",
+            command: attempt.command,
+            timeoutMs: 6_000,
+          },
+        });
+        expect(toolStdout(result.output)).not.toContain(
+          "NETWORK_REACHED",
+        );
+        if (attempt.name === "python-http") {
+          expect(result.output).not.toContain("ModuleNotFoundError");
+        }
+        expect(
+          result.metadata?.timedOut === true ||
+            Number(result.metadata?.exitCode) !== 0,
+        ).toBe(true);
+      }
+
+      const environment = await session.client.call({
+        name: "run_shell",
+        input: { cwd: ".", command: "env" },
+      });
+      expect(environment.success).toBe(true);
+      for (const forbidden of [
+        "ANTHROPIC",
+        "OPENAI",
+        "E2B",
+        "GITHUB",
+        "API_KEY",
+        "TOKEN",
+        "GIT_CONFIG",
+        "NODE_OPTIONS",
+        "BUN_OPTIONS",
+        "LD_PRELOAD",
+        "PYTHONPATH",
+      ]) {
+        expect(environment.output).not.toContain(forbidden);
+      }
+
+      for (const command of [
+        "sh -c 'sleep 60 &'",
+        "(sh -c 'sleep 60 &' &) ; exit 0",
+      ]) {
+        const background = await session.client.call({
+          name: "run_shell",
+          input: { cwd: ".", command },
+        });
+        expect(background.metadata?.exitCode).toBe(0);
+        const runnerProcesses = await observer.commands.run(
+          [
+            "if pgrep -u runner >/dev/null; then",
+            "  printf 'RUNNER_PROCESS_FOUND\\n';",
+            "else",
+            "  printf 'NO_RUNNER_PROCESS\\n';",
+            "fi",
+          ].join(" "),
+        );
+        expect(runnerProcesses.stdout).toBe("NO_RUNNER_PROCESS\n");
+      }
+
+      await observer.commands.run(
+        [
+          "printf 'outside-unchanged\\n' > /tmp/safety-outside.txt",
+          `ln -s /tmp/safety-outside.txt ${session.remoteRepoPath}/escape.txt`,
+        ].join(" && "),
+      );
+      const symlinkRead = await session.client.call({
+        name: "read_file",
+        input: { path: "escape.txt" },
+      });
+      const symlinkEdit = await session.client.call({
+        name: "edit_file",
+        input: {
+          path: "escape.txt",
+          mode: "preview",
+          oldText: "outside",
+          newText: "changed",
+        },
+      });
+      expect(symlinkRead.metadata?.code).toBe("SYMLINK_PATH");
+      expect(symlinkEdit.metadata?.code).toBe("SYMLINK_PATH");
+      expect(
+        (await observer.commands.run("cat /tmp/safety-outside.txt")).stdout,
+      ).toBe("outside-unchanged\n");
+
       const positiveControl = await session.client.call({
         name: "read_file",
         input: {
-          repoPath: session.remoteRepoPath,
           path: "remote-marker.txt",
         },
       });
@@ -169,7 +384,6 @@ test.skipIf(!LIVE_ENABLED)(
       const absoluteRead = await session.client.call({
         name: "read_file",
         input: {
-          repoPath: session.remoteRepoPath,
           path: sentinelPath,
         },
       });
@@ -178,18 +392,9 @@ test.skipIf(!LIVE_ENABLED)(
         metadata: { code: "INVALID_PATH" },
       });
 
-      const outsideRoot = await session.client.call({
-        name: "read_file",
-        input: { repoPath: "/tmp", path: "repository.bundle" },
-      });
-      expect(outsideRoot).toMatchObject({
-        success: false,
-        metadata: { code: "OUTSIDE_DEVELOPMENT_ROOT" },
-      });
-
       const dirty = await session.client.call({
         name: "git",
-        input: { repoPath: session.remoteRepoPath, subcommand: "status" },
+        input: { subcommand: "status" },
       });
       expect(dirty).toMatchObject({
         success: true,
@@ -197,13 +402,12 @@ test.skipIf(!LIVE_ENABLED)(
       });
       const diff = await session.client.call({
         name: "git",
-        input: { repoPath: session.remoteRepoPath, subcommand: "diff" },
+        input: { subcommand: "diff" },
       });
       expect(diff.output).toContain("return value + 2");
       const commit = await session.client.call({
         name: "git",
         input: {
-          repoPath: session.remoteRepoPath,
           subcommand: "commit",
           message: "test: verify E2B isolation",
           addAll: true,
@@ -220,7 +424,6 @@ test.skipIf(!LIVE_ENABLED)(
       ).toBe(originalHostFile);
       expect(await gitStatus(projectRoot)).toBe(projectStatusBefore);
 
-      const observer = await Sandbox.connect(session.sandboxId);
       expect(session.serverPid).not.toBeNull();
       await observer.commands.kill(session.serverPid!);
       await Bun.sleep(100);
@@ -228,7 +431,6 @@ test.skipIf(!LIVE_ENABLED)(
         session.client.call({
           name: "read_file",
           input: {
-            repoPath: session.remoteRepoPath,
             path: "src/sample.ts",
           },
         }),

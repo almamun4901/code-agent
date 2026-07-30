@@ -5,12 +5,11 @@ import {
   E2bStdioTransport,
   e2bCommandController,
 } from "../src/sandbox/e2b-stdio-transport";
+import { readLiveE2bConfig } from "./support/live-e2b-config";
 
-const LIVE_ENABLED =
-  process.env.RUN_LIVE_E2B_TEST === "1" &&
-  Boolean(process.env.E2B_API_KEY?.trim()) &&
-  Boolean(process.env.E2B_TEMPLATE_ID?.trim());
-const templateId = process.env.E2B_TEMPLATE_ID?.trim() ?? "";
+const liveConfig = readLiveE2bConfig();
+const LIVE_ENABLED = liveConfig.enabled;
+const templateId = liveConfig.templateRef;
 const sandboxes: Sandbox[] = [];
 const clients: McpToolClient[] = [];
 
@@ -29,6 +28,7 @@ test.skipIf(!LIVE_ENABLED)(
     const sandbox = await Sandbox.create(templateId, {
       timeoutMs: 180_000,
       secure: true,
+      allowInternetAccess: false,
       lifecycle: { onTimeout: "kill" },
     });
     sandboxes.push(sandbox);
@@ -48,7 +48,7 @@ test.skipIf(!LIVE_ENABLED)(
     const transport = new E2bStdioTransport({
       commands: e2bCommandController(sandbox.commands),
       command:
-        "bun run /opt/agent/src/mcp/stdio-server.ts --development-root /workspace/tasks",
+        "bun run /opt/agent/src/mcp/stdio-server.ts --worktree-root /workspace/tasks/probe --allowed-parent /workspace/tasks",
       cwd: "/opt/agent",
     });
     const client = await McpToolClient.connect(transport);
@@ -66,7 +66,6 @@ test.skipIf(!LIVE_ENABLED)(
       await client.call({
         name: "read_file",
         input: {
-          repoPath: "/workspace/tasks/probe",
           path: "probe.txt",
         },
       }),
@@ -84,7 +83,6 @@ test.skipIf(!LIVE_ENABLED)(
       client.call({
         name: "read_file",
         input: {
-          repoPath: "/workspace/tasks/probe",
           path: "probe.txt",
         },
       }),

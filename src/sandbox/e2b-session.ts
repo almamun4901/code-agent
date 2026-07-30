@@ -23,8 +23,13 @@ const REMOTE_BUNDLE_PATH = "/tmp/repository.bundle";
 const REMOTE_CONFIG_PATH = "/tmp/provision-task.json";
 const REMOTE_TASKS_ROOT = "/workspace/tasks";
 const REMOTE_RUNTIME_ROOT = "/opt/agent";
-const SERVER_COMMAND =
-  "bun run /opt/agent/src/mcp/stdio-server.ts --development-root /workspace/tasks";
+function serverCommand(worktreeRoot: string): string {
+  return [
+    "bun run /opt/agent/src/mcp/stdio-server.ts",
+    `--worktree-root ${worktreeRoot}`,
+    `--allowed-parent ${REMOTE_TASKS_ROOT}`,
+  ].join(" ");
+}
 const expectedTools = [
   "edit_file",
   "git",
@@ -83,6 +88,7 @@ export type E2bSandboxFactory = {
     options: {
       timeoutMs: number;
       secure: true;
+      allowInternetAccess: false;
       lifecycle: { onTimeout: "kill" };
       metadata: Record<string, string>;
     },
@@ -316,6 +322,7 @@ export async function createE2bTaskSession(
       sandbox = await sandboxFactory.create(options.templateId, {
         timeoutMs,
         secure: true,
+        allowInternetAccess: false,
         lifecycle: { onTimeout: "kill" },
         metadata: creationMetadata,
       });
@@ -371,7 +378,7 @@ export async function createE2bTaskSession(
 
     transport = new E2bStdioTransport({
       commands: sandbox.commands,
-      command: SERVER_COMMAND,
+      command: serverCommand(result.remoteRepoPath),
       cwd: REMOTE_RUNTIME_ROOT,
     });
     client = await connectClient(transport);

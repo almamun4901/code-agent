@@ -7,14 +7,16 @@
 
 ---
 
-## Current state (updated: 2026-07-28)
+## Current state (updated: 2026-07-30)
 
-**Overall:** Steps 0–5 are complete. Step 5 landed on `main` with the pinned
-E2B runtime, remote stdio transport, exact Git-bundle worktrees, owned cleanup,
-and opt-in live gates. Merged-main verification reports 121 offline tests and
-24 focused sandbox tests passing, both live E2B gates passing, and zero running
-sandboxes afterward. Step 6 owns the deferred command, traversal, symlink, and
-environment defenses.
+**Overall:** Steps 0–6 are complete. Step 6 binds every model request to one
+canonical task root, serializes execution, runs shell commands as a restricted
+`runner`, protects the runtime and Git control state, rejects symlinked typed
+paths, scrubs process environments, disables sandbox internet, removes Git
+push, and kills leftover runner processes. Final verification reports 138
+offline tests, 15 focused MCP tests, 28 focused sandbox tests, and 4 focused
+safety tests passing; both live E2B gates pass and leave zero running
+sandboxes. ADR 0009 mutation recovery is now the mandatory next change.
 
 **Step-by-step:**
 
@@ -26,7 +28,7 @@ environment defenses.
 | 3 — Plan schema + persistence | complete | Repeated hard-kill recovery passed without committed-read replay |
 | 4 — MCP transport (stdio) | complete | Six tools have canonical direct/MCP parity; lifecycle and mutation checks pass |
 | 5 — Sandbox (E2B) | complete | Six remote tools, exact task worktree, host-isolation sentinel, process-loss handling, and cleanup verified on merged `main` |
-| 6 — PreToolUse safety hook | not started | — |
+| 6 — PreToolUse safety hook | complete | Exact-root binding, two identities, symlink-safe files, offline shell, reduced Git, and red-team/live gates pass |
 | 7 — TUI (Ink) | not started | — |
 | 8 — Remaining hooks + budget | not started | — |
 | 9 — Telemetry | not started | — |
@@ -80,6 +82,16 @@ environment defenses.
   Each explicit substep is checked and committed separately; the completed
   branch is pushed, merged only after all gates pass, reverified on `main`,
   and then `main` is pushed. See `AGENTS.md` and `CLAUDE.md`.
+- Model-visible tool schemas contain no repository root. The MCP session binds
+  one realpath-resolved worktree, validates before policy, returns structured
+  denials, and serializes all tools. See ADR 0012.
+- Arbitrary shell is not made safe through parsing. It runs as `runner`
+  through a fixed root-owned wrapper with a controlled environment, timeout,
+  descendant cleanup, protected Git/runtime permissions, and E2B networking
+  disabled. Typed tools and Git run as `agent`. See ADR 0012.
+- Git push is absent from the sandbox contract. Git status, diff, and commit
+  run with hooks, helpers, signing, pagers, and external diff execution
+  disabled; publication remains a trusted host operation.
 
 ---
 
@@ -96,7 +108,8 @@ environment defenses.
 - [ ] OpenRouter account/credits not yet set up — deferred until after Steps
   5–6, but flagging so it is not a surprise at the live real-tool boundary.
 - [ ] Choose and verify mutation-recovery reconciliation before the first
-  live-model real-tool run after Steps 5–6; this is a blocking ADR 0009 revisit.
+  live-model real-tool run, OpenRouter, or Step 7; this is the mandatory next
+  branch and a blocking ADR 0009 revisit.
 - [x] Resolve the focused live-gate failure. The initial ambiguous E2B create
   response was followed by a successful bounded run. Template workspace
   ownership and the newline-aware probe assertion were corrected; the real
@@ -106,6 +119,8 @@ environment defenses.
 - [x] Complete Step 5 review, documentation, scoped commits, and feature-branch
   push.
 - [x] Merge and complete merged-main verification.
+- [x] Complete Step 6 security, engineering, documentation, red-team, and live
+  E2B acceptance gates.
 
 ---
 
@@ -658,6 +673,42 @@ environment defenses.
   Keep destructive-command, traversal, symlink, and environment defenses in
   Step 6, and resolve ADR 0009 mutation reconciliation before any live model
   receives real mutating tools.
+
+### 2026-07-30 — PreToolUse safety boundary landing
+
+- What was done: Implemented strict model-visible schemas without `repoPath`,
+  immutable canonical task-root binding, structured fail-closed PreToolUse
+  decisions, and per-session serialization. Rebuilt the E2B runtime around
+  separate `agent` and `runner` identities, a root-owned execution wrapper,
+  shared task-source permissions, protected linked-worktree Git metadata, and
+  disabled internet. Added component-wise symlink rejection, no-follow file
+  access, protected paths, controlled shell and Git environments, descendant
+  cleanup, internal and host timeouts, reduced Git operations, ADR 0012, the
+  implementation plan, manual cases, and offline/live red-team coverage.
+- What broke / had to be reworked: Live testing exposed a missing E2B
+  `default` template tag, absent template environment propagation, GNU
+  `timeout` rejecting millisecond units, a Python network probe that echoed its
+  success marker inside a failure traceback, and E2B throwing on `pgrep`'s
+  expected exit 1. The implementation now requires a tagged template,
+  hardcodes security defaults for the canonical layout, converts milliseconds
+  to fractional seconds, checks network stdout separately, and normalizes the
+  no-runner-process observation. Review also tightened unknown-field rejection
+  and complete existing-file writes.
+- Decisions made this session: Regex denials are diagnostics, not confinement.
+  Exact root binding, Unix identities and permissions, no-follow typed access,
+  process cleanup, and network denial are the boundary. Ordinary task content
+  remains deletable; runtime, Git control state, credentials, the host, and
+  external systems remain protected. See ADR 0012.
+- Current status of the step in progress: Step 6 is complete. `/cso` reports
+  no findings at its 8/10 confidence threshold and `bun audit --json` reports
+  no advisories. `/review` has no unresolved findings. Typecheck, 138 offline
+  tests, 15 focused MCP tests, 28 focused sandbox tests, 4 focused safety
+  tests, the Step 0 regression, template dry-run, both live E2B gates, sandbox
+  cleanup, and `git diff --check` pass.
+- Next session should start with: Implement ADR 0009 mutation recovery on
+  `fix/mutation-recovery`. Define write-ahead state or operation-specific
+  reconciliation for `edit_file`, `run_shell`, and Git mutation before
+  OpenRouter, Step 7, or any live-model access to mutating real tools.
 
 ---
 

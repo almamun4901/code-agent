@@ -107,7 +107,12 @@ merge sequence is finished. Never silently reuse a branch from an earlier step.
 - Type check: `bun run typecheck`
 - Offline deterministic suite: `bun test`
 - Focused MCP stdio suite: `bun run test:mcp`
+- Focused sandbox suite: `bun run test:sandbox`
+- Focused safety/red-team suite: `bun run test:safety`
 - Step 0 regression: `bun run loop-fake.ts`
+- Offline E2B template verification: `bun run e2b:template:check`
+- Explicit live E2B transport gate: `bun run test:e2b:transport`
+- Explicit live E2B safety gate: `bun run test:e2b:safety`
 - Explicit live Phase 1 gate: `bun run test:integration`
 
 The live gate requires `ANTHROPIC_API_KEY` and opts in with
@@ -131,7 +136,14 @@ and canned tool results to Anthropic. Normal `bun test` never makes that call.
   repeated hard-kill recovery, and committed-tool non-replay.
 - `tests/anthropic.integration.test.ts` is the opt-in live acceptance gate.
 - `src/tools/dispatcher.ts` validates and routes all six real tools, invokes
-  the Step 6 policy seam, normalizes failures, and caps serialized results.
+  the structured PreToolUse policy, binds the immutable task root, serializes
+  execution, normalizes failures, and caps serialized results.
+- `src/tools/path-utils.ts` owns strict relative-path validation,
+  component-wise symlink rejection, protected paths, and no-follow opens.
+- `src/tools/pretooluse-policy.ts` fast-fails obvious shell attacks without
+  claiming to prove arbitrary shell safety.
+- `src/tools/run-shell.ts` selects the fixed E2B wrapper and supplies only the
+  controlled shell environment.
 - `src/tools/token-budget.ts` enforces the 4,000-token offline
   `o200k_base` result budget.
 - `src/mcp/schemas.ts` owns exact MCP discovery schemas and strict
@@ -140,15 +152,26 @@ and canned tool results to Anthropic. Normal `bun test` never makes that call.
   valid call to the unchanged dispatcher.
 - `src/mcp/client.ts` owns the persistent connection, 60-second request
   timeout, result validation, and idempotent shutdown.
-- `src/mcp/stdio-server.ts` requires an absolute `--development-root` and
-  reserves stdout for MCP messages.
+- `src/mcp/stdio-server.ts` requires one canonical `--worktree-root` beneath
+  an absolute `--allowed-parent` and reserves stdout for MCP messages.
+- `src/sandbox/template.ts` builds the immutable network-disabled E2B runtime
+  with separate `agent` and `runner` identities.
+- `src/sandbox/runner-wrapper.sh` validates the task root, drops permanently
+  to `runner`, enforces timeout, and kills remaining runner processes.
+- `src/sandbox/provision-task.ts` creates the exact linked worktree and applies
+  the shared-source/protected-Git permission layout.
 - `tests/support/temp-repo.ts` creates disposable worktrees and a local bare
   remote without touching the project worktree.
 - `tests/tools.test.ts` covers the real dispatcher and all six tools.
 - `tests/mcp.test.ts` covers discovery, direct/MCP parity, mutations, failures,
   result budgets, and stdio lifecycle.
+- `tests/safety.test.ts` and the opt-in E2B safety suite cover policy denial,
+  traversal, symlinks, structural shell escape failure, offline networking,
+  protected state, credential absence, and recovery of the next safe call.
 
 ## Current step
 
-Check `PROGRESS.md` for the authoritative answer — do not rely on this
-file's memory of it, since this section is not kept in sync.
+Step 6 is complete. The mandatory next work is ADR 0009 mutation recovery on
+`fix/mutation-recovery`; it must land before OpenRouter, Step 7, or any
+live-model access to mutating real tools. Check `PROGRESS.md` for the
+authoritative answer.

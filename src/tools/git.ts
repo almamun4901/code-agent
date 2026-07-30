@@ -3,8 +3,47 @@ import { ToolExecutionError } from "./errors";
 import { resolveRepoChild, validateRepoPath } from "./path-utils";
 import { requireSuccessfulProcess, runProcess } from "./process";
 
+const GIT_ENVIRONMENT = {
+  PATH: "/usr/local/bin:/usr/bin:/bin",
+  HOME: "/tmp/agent-git-home",
+  TMPDIR: "/tmp",
+  LANG: "C.UTF-8",
+  LC_ALL: "C.UTF-8",
+  GIT_PAGER: "cat",
+  PAGER: "cat",
+  GIT_TERMINAL_PROMPT: "0",
+  GIT_ASKPASS: "/bin/false",
+  SSH_ASKPASS: "/bin/false",
+  GIT_CONFIG_NOSYSTEM: "1",
+};
+
+const HARDENED_GIT_CONFIG = [
+  "-c",
+  "color.ui=false",
+  "-c",
+  "core.hooksPath=/dev/null",
+  "-c",
+  "core.fsmonitor=false",
+  "-c",
+  "credential.helper=",
+  "-c",
+  "commit.gpgSign=false",
+  "-c",
+  "tag.gpgSign=false",
+  "-c",
+  "gpg.program=/bin/false",
+  "-c",
+  "gpg.ssh.program=/bin/false",
+  "-c",
+  "core.pager=cat",
+];
+
 async function git(repoPath: string, args: string[]) {
-  return runProcess(["git", "-c", "color.ui=false", ...args], repoPath);
+  return runProcess(
+    ["/usr/bin/git", ...HARDENED_GIT_CONFIG, ...args],
+    repoPath,
+    { env: GIT_ENVIRONMENT },
+  );
 }
 
 export async function gitTool(input: GitInput): Promise<RawToolResult> {
@@ -58,25 +97,6 @@ export async function gitTool(input: GitInput): Promise<RawToolResult> {
       return {
         output: commit.stdout.trimEnd(),
         metadata: { sha, addAll: input.addAll },
-      };
-    }
-    case "push": {
-      if (!input.remote.trim() || !input.branch.trim()) {
-        throw new ToolExecutionError(
-          "Push requires explicit non-empty remote and branch.",
-          "INVALID_PUSH_TARGET",
-        );
-      }
-      const result = await git(repoPath, [
-        "push",
-        "--",
-        input.remote,
-        `${input.branch}:${input.branch}`,
-      ]);
-      requireSuccessfulProcess("git push", result);
-      return {
-        output: [result.stdout, result.stderr].filter(Boolean).join("\n").trimEnd(),
-        metadata: { remote: input.remote, branch: input.branch },
       };
     }
   }

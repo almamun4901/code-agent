@@ -16,6 +16,8 @@ import { finalizeToolResult } from "./token-budget";
 import { treeSitterSymbolsTool } from "./tree-sitter-symbols";
 import { validateToolCall } from "./validate-call";
 
+class PolicyDeniedError extends ToolExecutionError {}
+
 async function execute(
   call: RootedToolCall,
   signal?: AbortSignal,
@@ -59,13 +61,24 @@ async function evaluatePolicy(
   try {
     decision = await defaultPreToolUse(request, {
       worktreeRoot: context.worktreeRoot,
+      abortSignal: context.abortSignal,
     });
     if (decision.outcome === "allow" && context.preToolUse) {
       decision = await context.preToolUse(request, {
         worktreeRoot: context.worktreeRoot,
+        abortSignal: context.abortSignal,
       });
     }
   } catch (error) {
+    if (
+      context.abortSignal?.aborted ||
+      (error instanceof Error && error.name === "AbortError")
+    ) {
+      throw new ToolExecutionError(
+        "PreToolUse policy evaluation was cancelled.",
+        "CANCELLED",
+      );
+    }
     throw new ToolExecutionError(
       `PreToolUse policy failed: ${
         error instanceof Error ? error.message : "unknown policy failure"
@@ -87,7 +100,7 @@ async function evaluatePolicy(
       "POLICY_FAILURE",
     );
   }
-  throw new ToolExecutionError(decision.reason, decision.code);
+  throw new PolicyDeniedError(decision.reason, decision.code);
 }
 
 async function dispatchValidated(
@@ -121,6 +134,9 @@ async function dispatchValidated(
         metadata: {
           code: normalized.code,
           exitCode: normalized.exitCode,
+          ...(normalized instanceof PolicyDeniedError
+            ? { denied: true }
+            : {}),
         },
       },
       { codec, tokenLimit },

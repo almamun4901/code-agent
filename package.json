@@ -3,10 +3,17 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "bin": {
+    "agent": "./bin/agent.ts"
+  },
   "scripts": {
     "phase1": "bun run src/loop.ts",
     "mcp:stdio": "bun run src/mcp/stdio-server.ts",
-    "test": "bun test tests/loop.test.ts tests/openrouter.test.ts tests/agent-runtime.test.ts tests/tools.test.ts tests/safety.test.ts tests/checkpoint.test.ts tests/mcp.test.ts tests/mutation-recovery.test.ts tests/e2b-stdio-transport.test.ts tests/e2b-template.test.ts tests/e2b-session.test.ts tests/e2b-sandbox-admin.test.ts tests/manual-preflight.test.ts",
+    "test": "bun test tests/loop.test.ts tests/openrouter.test.ts tests/agent-runtime.test.ts tests/runtime-events.test.ts tests/tui.test.tsx tests/cli.test.ts tests/tui-pty.test.ts tests/tools.test.ts tests/safety.test.ts tests/checkpoint.test.ts tests/mcp.test.ts tests/mutation-recovery.test.ts tests/e2b-stdio-transport.test.ts tests/e2b-template.test.ts tests/e2b-session.test.ts tests/e2b-sandbox-admin.test.ts tests/manual-preflight.test.ts",
+    "test:tui": "bun test tests/tui.test.tsx",
+    "test:cli": "bun test tests/cli.test.ts",
+    "test:tui:pty": "bun test tests/tui-pty.test.ts",
+    "test:tui:integration": "RUN_LIVE_E2B_TEST=1 bun test tests/tui-live.integration.test.ts",
     "test:runtime": "bun test tests/agent-runtime.test.ts",
     "test:mcp": "bun test tests/mcp.test.ts",
     "test:sandbox": "bun test tests/e2b-stdio-transport.test.ts tests/e2b-template.test.ts tests/e2b-session.test.ts tests/e2b-sandbox-admin.test.ts",
@@ -33,12 +40,16 @@
     "diff": "^9.0.0",
     "e2b": "2.14.1",
     "gpt-tokenizer": "3.4.0",
+    "ink": "7.1.1",
+    "react": "19.2.8",
     "tree-sitter-wasms": "0.1.13",
     "web-tree-sitter": "0.20.8",
     "zod": "^4.3.6"
   },
   "devDependencies": {
     "@types/bun": "^1.3.14",
+    "@types/react": "19.2.14",
+    "ink-testing-library": "4.0.0",
     "typescript": "^5.9.3"
   }
 }

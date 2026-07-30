@@ -251,9 +251,16 @@ class FakeSandbox implements E2bSandbox {
     throw new Error(`Unexpected read path: ${remotePath}`);
   }
 
-  async run() {
+  async run(command = "") {
     this.runCalls += 1;
     if (this.runError) throw this.runError;
+    if (command === `test ! -e ${REMOTE_MUTATION_JOURNAL_PATH}`) {
+      return {
+        exitCode: this.mutationJournal ? 1 : 0,
+        stderr: "",
+        stdout: "",
+      };
+    }
     return {
       exitCode: this.provisionExitCode,
       stderr: this.provisionExitCode === 0 ? "" : "provision failed",
@@ -285,6 +292,7 @@ class FakeClient {
   closeCalls = 0;
   closeError: unknown;
   callError: unknown;
+  callErrors: unknown[] = [];
   calls: ModelToolRequest[] = [];
   callGate: Promise<void> | undefined;
   result: ToolResult = {
@@ -307,6 +315,10 @@ class FakeClient {
   async call(request: ModelToolRequest): Promise<ToolResult> {
     this.calls.push(request);
     await this.callGate;
+    if (this.callErrors.length > 0) {
+      const error = this.callErrors.shift();
+      if (error) throw error;
+    }
     if (this.callError) throw this.callError;
     return this.result;
   }
@@ -630,6 +642,39 @@ describe("E2B task session", () => {
       operationId: active?.operationId,
       status: "completed",
     });
+    await session.close();
+    expect(setup.sandbox.killCalls).toBe(1);
+    expect(await store.load()).toBeNull();
+  });
+
+  test("closes safely when a cancelled mutation never reached the remote queue", async () => {
+    const client = new FakeClient();
+    client.callErrors = [new Error("request cancelled"), undefined];
+    const setup = await sessionFixture({ client });
+    const store = new MemoryE2bSessionRecoveryStore();
+    const session = await setup.create({
+      recovery: { runIdentity: "cancel-before-remote-run", store },
+    });
+
+    await expect(
+      session.call({
+        name: "run_shell",
+        input: { cwd: ".", command: "printf never-started" },
+      }),
+    ).rejects.toThrow("request cancelled");
+
+    expect(await session.reconcileActiveMutation(0)).toMatchObject({
+      status: "completed",
+      result: {
+        success: false,
+        metadata: { code: "CANCELLED" },
+      },
+    });
+    expect(client.calls.at(-1)).toEqual({
+      name: "read_file",
+      input: { path: ".git" },
+    });
+
     await session.close();
     expect(setup.sandbox.killCalls).toBe(1);
     expect(await store.load()).toBeNull();

@@ -116,6 +116,7 @@ export type PreToolUseDecision =
 
 export type PreToolUseContext = {
   worktreeRoot: string;
+  abortSignal?: AbortSignal;
 };
 
 export type PreToolUse = (

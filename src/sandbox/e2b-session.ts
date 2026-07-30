@@ -1,7 +1,7 @@
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { Sandbox } from "e2b";
+import type { Sandbox } from "e2b";
 import { z } from "zod";
 import {
   McpToolClient,
@@ -37,6 +37,7 @@ const DEFAULT_TIMEOUT_MS = 900_000;
 const MIN_TIMEOUT_MS = 60_000;
 const MAX_TIMEOUT_MS = 3_600_000;
 const DEFAULT_RECONCILE_TIMEOUT_MS = 35_000;
+const CREATE_REQUEST_TIMEOUT_MS = 25_000;
 const RECONCILE_POLL_MS = 100;
 const REMOTE_BUNDLE_PATH = "/tmp/repository.bundle";
 const REMOTE_CONFIG_PATH = "/tmp/provision-task.json";
@@ -84,6 +85,7 @@ export type E2bTaskSessionOptions = {
   templateId: string;
   baseRef?: string;
   timeoutMs?: number;
+  signal?: AbortSignal;
   recovery?: {
     runIdentity: string;
     store: E2bSessionRecoveryStore;
@@ -117,6 +119,7 @@ export type E2bSandboxFactory = {
       allowInternetAccess: false;
       lifecycle: { onTimeout: "kill" };
       metadata: Record<string, string>;
+      requestTimeoutMs: number;
     },
   ): Promise<E2bSandbox>;
   connect?(sandboxId: string): Promise<E2bSandbox>;
@@ -140,12 +143,15 @@ function sandboxAdapter(sandbox: Sandbox): E2bSandbox {
 
 export const defaultE2bSandboxFactory: E2bSandboxFactory = {
   async create(templateId, options) {
+    const { Sandbox } = await import("e2b");
     return sandboxAdapter(await Sandbox.create(templateId, options));
   },
   async connect(sandboxId) {
+    const { Sandbox } = await import("e2b");
     return sandboxAdapter(await Sandbox.connect(sandboxId));
   },
   async reconcileCreateFailure(metadata) {
+    const { Sandbox } = await import("e2b");
     const paginator = Sandbox.list({
       query: { metadata, state: ["running", "paused"] },
     });
@@ -295,16 +301,30 @@ class OwnedE2bTaskSession implements E2bTaskSession {
     if (state.activeMutation.status === "completed") {
       return state.activeMutation;
     }
+    const earlierRequestsDrained = await this.#drainEarlierRequests();
     const completed = await reconcileRemoteMutation(
       this.#sandbox,
       state,
       timeoutMs,
+      earlierRequestsDrained,
     );
     await this.#recovery.store.save({
       ...state,
       activeMutation: completed,
     });
     return completed;
+  }
+
+  async #drainEarlierRequests(): Promise<boolean> {
+    try {
+      await this.client.call({
+        name: "read_file",
+        input: { path: ".git" },
+      });
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   async #close(): Promise<void> {
@@ -513,6 +533,7 @@ export async function createE2bTaskSession(
   } = {},
 ): Promise<E2bTaskSession> {
   const timeoutMs = validateOptions(options);
+  throwIfSessionAborted(options.signal);
   if (options.recovery) {
     if (!options.recovery.runIdentity.trim()) {
       throw new E2bTaskSessionError(
@@ -540,6 +561,7 @@ export async function createE2bTaskSession(
   let client: McpToolClient | undefined;
 
   try {
+    throwIfSessionAborted(options.signal);
     const expectedManifest = await createRuntimeManifest(agentProjectRoot);
     const creationMetadata = {
       taskId: options.taskId,
@@ -553,7 +575,9 @@ export async function createE2bTaskSession(
         allowInternetAccess: false,
         lifecycle: { onTimeout: "kill" },
         metadata: creationMetadata,
+        requestTimeoutMs: CREATE_REQUEST_TIMEOUT_MS,
       });
+      throwIfSessionAborted(options.signal);
     } catch (createError) {
       try {
         await sandboxFactory.reconcileCreateFailure({
@@ -573,12 +597,14 @@ export async function createE2bTaskSession(
       await sandbox.readText(RUNTIME_MANIFEST_PATH),
       expectedManifest,
     );
+    throwIfSessionAborted(options.signal);
 
     const bundleBytes = await readFile(bundle.bundlePath);
     await sandbox.write(
       REMOTE_BUNDLE_PATH,
       new Uint8Array(bundleBytes).buffer,
     );
+    throwIfSessionAborted(options.signal);
     await sandbox.write(
       REMOTE_CONFIG_PATH,
       `${JSON.stringify({
@@ -593,6 +619,7 @@ export async function createE2bTaskSession(
       `bun run ${REMOTE_RUNTIME_ROOT}/src/sandbox/provision-task.ts ${REMOTE_CONFIG_PATH}`,
       { cwd: REMOTE_RUNTIME_ROOT, timeoutMs: 60_000 },
     );
+    throwIfSessionAborted(options.signal);
     if (provisioned.exitCode !== 0) {
       throw new E2bTaskSessionError(
         `E2B task provisioning failed: ${provisioned.stderr.trim() || "No diagnostic output."}`,
@@ -610,9 +637,11 @@ export async function createE2bTaskSession(
       cwd: REMOTE_RUNTIME_ROOT,
     });
     client = await connectClient(transport);
+    throwIfSessionAborted(options.signal);
     const discovered = (await client.listTools()).tools
       .map((tool) => tool.name)
       .sort();
+    throwIfSessionAborted(options.signal);
     if (JSON.stringify(discovered) !== JSON.stringify(expectedTools)) {
       throw new E2bTaskSessionError(
         "E2B MCP server did not expose the exact six-tool contract.",
@@ -659,6 +688,7 @@ export async function recoverE2bTaskSession(
     runIdentity: string;
     store: E2bSessionRecoveryStore;
     reconcileTimeoutMs?: number;
+    signal?: AbortSignal;
   },
   dependencies: {
     sandboxFactory?: E2bSandboxFactory;
@@ -667,7 +697,9 @@ export async function recoverE2bTaskSession(
     ) => Promise<McpToolClient>;
   } = {},
 ): Promise<E2bTaskSession> {
+  throwIfSessionAborted(options.signal);
   const state = await options.store.load();
+  throwIfSessionAborted(options.signal);
   if (!state) {
     throw new E2bTaskSessionError(
       "No E2B session recovery record exists.",
@@ -781,10 +813,21 @@ export async function recoverE2bTaskSession(
   }
 }
 
+function throwIfSessionAborted(signal: AbortSignal | undefined): void {
+  if (!signal?.aborted) return;
+  throw new DOMException(
+    typeof signal.reason === "string"
+      ? signal.reason
+      : "E2B session setup was cancelled.",
+    "AbortError",
+  );
+}
+
 async function reconcileRemoteMutation(
   sandbox: E2bSandbox,
   state: E2bSessionRecoveryState,
   timeoutMs: number,
+  earlierRequestsDrained = false,
 ): Promise<MutationRecord> {
   const active = state.activeMutation;
   if (!active) {
@@ -804,6 +847,12 @@ async function reconcileRemoteMutation(
     try {
       serialized = await sandbox.readText(REMOTE_MUTATION_JOURNAL_PATH);
     } catch (error) {
+      if (
+        earlierRequestsDrained &&
+        await remoteMutationJournalIsAbsent(sandbox)
+      ) {
+        return cancelledBeforeRemoteExecution(active);
+      }
       if (Date.now() >= deadline) {
         throw new MutationRecoveryBlockedError(
           `Mutation ${active.operationId} has no readable sandbox journal result.`,
@@ -863,6 +912,38 @@ async function reconcileRemoteMutation(
 
     await Bun.sleep(Math.min(RECONCILE_POLL_MS, Math.max(1, deadline - Date.now())));
   }
+}
+
+async function remoteMutationJournalIsAbsent(
+  sandbox: E2bSandbox,
+): Promise<boolean> {
+  try {
+    const result = await sandbox.run(
+      `test ! -e ${REMOTE_MUTATION_JOURNAL_PATH}`,
+      { timeoutMs: 5_000 },
+    );
+    return result.exitCode === 0;
+  } catch {
+    return false;
+  }
+}
+
+function cancelledBeforeRemoteExecution(
+  active: MutationRecord,
+): MutationRecord {
+  return {
+    ...active,
+    status: "completed",
+    completedAt: new Date().toISOString(),
+    result: {
+      success: false,
+      output: "Mutation was cancelled before remote execution began.",
+      truncated: false,
+      originalTokenCount: 0,
+      codec: "reconciliation",
+      metadata: { code: "CANCELLED" },
+    },
+  };
 }
 
 export type { JSONRPCMessage };

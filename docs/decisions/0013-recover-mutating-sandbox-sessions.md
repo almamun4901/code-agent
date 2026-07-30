@@ -32,6 +32,13 @@ session cleanup. In E2B, the fixed root-owned wrapper terminates the sandbox's
 isolated `runner` identity so descendants cannot keep the request ambiguous
 after the MCP caller aborts.
 
+Cancellation can also arrive after the host lease is written but before the
+remote server accepts the request. Reconciliation sends a read-only barrier
+through the same serialized MCP execution queue. If the barrier completes and
+the remote journal is provably absent, every earlier request has drained and
+the mutation is durably completed as `CANCELLED` without execution. A missing
+journal without that proof remains ambiguous and fails closed.
+
 ## Alternatives considered
 
 - **Replay every mutation in a fresh sandbox** — rejected because arbitrary
@@ -49,6 +56,9 @@ after the MCP caller aborts.
 - Journal files are strict, atomic, mode 0600, and fail closed on corruption.
 - An ambiguous operation may require operator inspection instead of automatic
   progress; safety is preferred to duplicate mutation.
+- The serialized read-only barrier closes the host-written/remote-accepted
+  cancellation race without treating transport failure or an unreadable
+  journal as proof that no mutation ran.
 - This contract relies on the Step 6 boundary: sandbox internet is disabled,
   Git push is unavailable, and tool side effects stay inside the owned E2B
   session.

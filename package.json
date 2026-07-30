@@ -6,7 +6,7 @@
   "scripts": {
     "phase1": "bun run src/loop.ts",
     "mcp:stdio": "bun run src/mcp/stdio-server.ts",
-    "test": "bun test tests/loop.test.ts tests/tools.test.ts tests/safety.test.ts tests/checkpoint.test.ts tests/mcp.test.ts tests/e2b-stdio-transport.test.ts tests/e2b-template.test.ts tests/e2b-session.test.ts tests/e2b-sandbox-admin.test.ts tests/manual-preflight.test.ts",
+    "test": "bun test tests/loop.test.ts tests/tools.test.ts tests/safety.test.ts tests/checkpoint.test.ts tests/mcp.test.ts tests/mutation-recovery.test.ts tests/e2b-stdio-transport.test.ts tests/e2b-template.test.ts tests/e2b-session.test.ts tests/e2b-sandbox-admin.test.ts tests/manual-preflight.test.ts",
     "test:mcp": "bun test tests/mcp.test.ts",
     "test:sandbox": "bun test tests/e2b-stdio-transport.test.ts tests/e2b-template.test.ts tests/e2b-session.test.ts tests/e2b-sandbox-admin.test.ts",
     "test:safety": "bun test tests/safety.test.ts",

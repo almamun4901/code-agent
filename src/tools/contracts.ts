@@ -76,6 +76,21 @@ export type ModelToolRequest =
 
 export type ToolCall = ModelToolRequest;
 
+export function isMutatingToolCall(call: ModelToolRequest): boolean {
+  switch (call.name) {
+    case "edit_file":
+      return call.input.mode === "apply";
+    case "run_shell":
+      return true;
+    case "git":
+      return call.input.subcommand === "commit";
+    case "read_file":
+    case "ripgrep":
+    case "tree_sitter_symbols":
+      return false;
+  }
+}
+
 export type ToolMetadata = Record<
   string,
   string | number | boolean | null | undefined

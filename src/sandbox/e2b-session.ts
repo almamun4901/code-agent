@@ -23,11 +23,14 @@ const REMOTE_BUNDLE_PATH = "/tmp/repository.bundle";
 const REMOTE_CONFIG_PATH = "/tmp/provision-task.json";
 const REMOTE_TASKS_ROOT = "/workspace/tasks";
 const REMOTE_RUNTIME_ROOT = "/opt/agent";
+export const REMOTE_MUTATION_JOURNAL_PATH =
+  "/tmp/terminal-agent-mutation-journal.json";
 function serverCommand(worktreeRoot: string): string {
   return [
     "bun run /opt/agent/src/mcp/stdio-server.ts",
     `--worktree-root ${worktreeRoot}`,
     `--allowed-parent ${REMOTE_TASKS_ROOT}`,
+    `--mutation-journal ${REMOTE_MUTATION_JOURNAL_PATH}`,
   ].join(" ");
 }
 const expectedTools = [

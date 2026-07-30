@@ -1,10 +1,11 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { realpath, stat } from "node:fs/promises";
 import path from "node:path";
+import { FileMutationJournal } from "../tools/mutation-journal";
 import { createMcpToolServer } from "./server";
 
 const USAGE =
-  "Usage: bun run src/mcp/stdio-server.ts --worktree-root <absolute-directory> --allowed-parent <absolute-directory>";
+    "Usage: bun run src/mcp/stdio-server.ts --worktree-root <absolute-directory> --allowed-parent <absolute-directory> --mutation-journal <absolute-file>";
 
 async function canonicalDirectory(value: string, label: string): Promise<string> {
   if (!path.isAbsolute(value)) {
@@ -24,13 +25,22 @@ async function canonicalDirectory(value: string, label: string): Promise<string>
 
 export async function parseWorktreeBoundary(
   args: string[],
-): Promise<{ worktreeRoot: string; allowedParent: string }> {
+): Promise<{
+  worktreeRoot: string;
+  allowedParent: string;
+  mutationJournalPath: string;
+}> {
+  const hasExplicitJournal = args.length === 6;
   if (
-    args.length !== 4 ||
+    (args.length !== 4 && !hasExplicitJournal) ||
     args[0] !== "--worktree-root" ||
     !args[1] ||
     args[2] !== "--allowed-parent" ||
-    !args[3]
+    !args[3] ||
+    (hasExplicitJournal &&
+      (args[4] !== "--mutation-journal" ||
+        !args[5] ||
+        !path.isAbsolute(args[5])))
   ) {
     throw new Error(USAGE);
   }
@@ -47,12 +57,22 @@ export async function parseWorktreeBoundary(
       `Worktree root must be a child of the allowed parent: ${worktreeRoot}`,
     );
   }
-  return { worktreeRoot, allowedParent };
+  return {
+    worktreeRoot,
+    allowedParent,
+    mutationJournalPath: hasExplicitJournal
+      ? args[5]!
+      : path.join(allowedParent, ".terminal-agent-mutation-journal.json"),
+  };
 }
 
 export async function runStdioServer(args: string[]): Promise<void> {
-  const { worktreeRoot } = await parseWorktreeBoundary(args);
-  const server = createMcpToolServer({ worktreeRoot });
+  const { worktreeRoot, mutationJournalPath } =
+    await parseWorktreeBoundary(args);
+  const server = createMcpToolServer(
+    { worktreeRoot },
+    { mutationJournal: new FileMutationJournal(mutationJournalPath) },
+  );
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }

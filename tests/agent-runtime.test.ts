@@ -164,6 +164,118 @@ describe("production agent loop", () => {
     );
   });
 
+  test("accepts a sequential plan then action handshake", async () => {
+    const repo = await repository();
+    const prepared = await prepareAgentRun(
+      repo.worktreePath,
+      "Inspect sequentially",
+    );
+    const store = new MemoryProductionCheckpointStore();
+    const session = new FakeSession();
+
+    const result = await runProductionLoop({
+      ...prepared,
+      callModel: queuedModel([
+        turn(plan([["inspect", "Inspect sequentially", "in_progress"]])),
+        {
+          content: [
+            action("read-sequential", "read_file", {
+              path: "README.md",
+            }),
+          ],
+          stopReason: "tool_use",
+          usage: { inputTokens: 10, outputTokens: 5 },
+        },
+        turn(plan([["inspect", "Inspect sequentially", "completed"]])),
+      ]),
+      session,
+      checkpointStore: store,
+    });
+
+    expect(result).toMatchObject({
+      status: "completed",
+      modelTurns: 3,
+      acceptedTurns: 3,
+      toolCalls: 1,
+      planRewrites: 2,
+    });
+    expect(session.calls[0]?.request.name).toBe("read_file");
+  });
+
+  test("supports provider-native action chains and bounded replanning", async () => {
+    const repo = await repository();
+    const prepared = await prepareAgentRun(
+      repo.worktreePath,
+      "Inspect and verify",
+    );
+    const session = new FakeSession();
+
+    const result = await runProductionLoop({
+      ...prepared,
+      callModel: queuedModel([
+        turn(
+          plan([
+            ["setup", "Understand the task", "completed"],
+            ["inspect", "Inspect the file", "in_progress"],
+            ["verify", "Verify repository state", "pending"],
+          ]),
+        ),
+        {
+          content: [
+            action("read-chain", "read_file", { path: "README.md" }),
+          ],
+          stopReason: "tool_use",
+          usage: { inputTokens: 10, outputTokens: 5 },
+        },
+        {
+          content: [
+            action("git-chain", "git", { subcommand: "status" }),
+          ],
+          stopReason: "tool_use",
+          usage: { inputTokens: 10, outputTokens: 5 },
+        },
+        turn(
+          plan([
+            ["setup", "Understand the task", "completed"],
+            ["inspect", "Inspect the file", "completed"],
+            ["verify", "Verify repository state", "in_progress"],
+          ]),
+        ),
+        turn(
+          plan([
+            ["final", "Record verified completion", "in_progress"],
+          ]),
+        ),
+        {
+          content: [
+            action("final-status", "git", { subcommand: "status" }),
+          ],
+          stopReason: "tool_use",
+          usage: { inputTokens: 10, outputTokens: 5 },
+        },
+        turn(
+          plan([
+            ["final", "Record verified completion", "completed"],
+          ]),
+        ),
+      ]),
+      session,
+      checkpointStore: new MemoryProductionCheckpointStore(),
+    });
+
+    expect(result).toMatchObject({
+      status: "completed",
+      modelTurns: 7,
+      toolCalls: 3,
+      planRewrites: 4,
+    });
+    expect(session.calls.map((call) => call.request.name)).toEqual([
+      "read_file",
+      "git",
+      "git",
+    ]);
+  });
+
   test("rejects two malformed turns and persists the terminal failure", async () => {
     const repo = await repository();
     const prepared = await prepareAgentRun(repo.worktreePath, "Fail closed");

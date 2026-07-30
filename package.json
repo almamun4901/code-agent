@@ -23,6 +23,7 @@
     "e2b:sandbox:kill": "bun run src/sandbox/sandbox-admin.ts kill",
     "test:integration": "RUN_LIVE_ANTHROPIC_TEST=1 bun test tests/anthropic.integration.test.ts",
     "test:openrouter:integration": "RUN_LIVE_OPENROUTER_TEST=1 bun test tests/openrouter.integration.test.ts",
+    "test:runtime:integration": "RUN_LIVE_AGENT_RUNTIME_TEST=1 bun test tests/agent-runtime.integration.test.ts",
     "test:all": "bun test",
     "typecheck": "tsc --noEmit"
   },

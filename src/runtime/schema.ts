@@ -50,7 +50,7 @@ const pendingTurnSchema = z
       ]),
     ),
     plan: z.array(TodoItemSchema).min(1).max(20),
-    planToolId: z.string().min(1),
+    planToolId: z.string().min(1).nullable(),
     action: z
       .object({
         toolUseId: z.string().min(1),

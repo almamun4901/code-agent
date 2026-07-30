@@ -63,15 +63,18 @@ const SYSTEM_PROMPT = [
   "You are a coding agent operating in an isolated repository worktree.",
   "Use the strict plan/action protocol below.",
   "",
-  "Every response must:",
+  "A plan response must:",
   "1. Call rewrite_plan exactly once and before every other tool call.",
   "2. Keep a complete plan of 1-20 concise tasks with unique stable IDs.",
-  "3. On the first turn, create the plan with completed*, one in_progress, then pending*.",
-  "4. On later turns, preserve task IDs, descriptions, order, and count.",
+  "3. Keep at least one task in_progress while work remains.",
+  "4. On later turns, rewrite the complete current plan; revise it when new",
+  "   information changes the necessary work.",
   "5. Complete the active task only after enough successful observations.",
   "6. Keep the active task incomplete after a failed tool observation.",
-  "7. If work remains, call exactly one repository tool after rewrite_plan.",
+  "7. If work remains, call at most one repository tool after rewrite_plan.",
   "8. When every task is completed, call only rewrite_plan.",
+  "9. Between plan rewrites, action responses may call exactly one repository",
+  "   tool without repeating rewrite_plan. Rewrite the plan when status changes.",
   "",
   "Use repository-relative paths. Inspect before editing, preview edits before",
   "applying them, verify changes, and do not attempt to publish or access the host.",
@@ -243,13 +246,13 @@ async function commitPendingTurn(
   pending: PendingProductionTurn,
   options: ProductionLoopOptions,
 ): Promise<ProductionAgentState> {
-  const results: ToolResultBlock[] = [
-    {
+  const results: ToolResultBlock[] = pending.planToolId
+    ? [{
       type: "tool_result",
       toolUseId: pending.planToolId,
       content: JSON.stringify({ accepted: true }),
-    },
-  ];
+    }]
+    : [];
   let lastToolSucceeded: boolean | null = null;
   let lastToolResult: ProductionAgentState["lastToolResult"] = null;
   let toolIncrement = 0;
@@ -311,7 +314,8 @@ async function commitPendingTurn(
       ...state.counters,
       committedTurns: state.counters.committedTurns + 1,
       toolCalls: state.counters.toolCalls + toolIncrement,
-      planRewrites: state.counters.planRewrites + 1,
+      planRewrites:
+        state.counters.planRewrites + (pending.planToolId ? 1 : 0),
     },
   };
   await options.checkpointStore.save(next);
@@ -342,14 +346,48 @@ function validateProductionTurn(
       "A turn must contain one plan call, at most one action, and unique IDs.",
     );
   }
-  const [planCall, actionCall] = calls;
-  if (!planCall || planCall.name !== "rewrite_plan") {
+  const [firstCall, secondCall] = calls;
+  if (!firstCall) {
     throw new ProductionTurnProtocolError(
-      "rewrite_plan must be the first tool call.",
+      "A turn must contain a tool call.",
     );
   }
-  if (calls.some((call) => call.name === "rewrite_plan") && calls.length > 1 &&
-      actionCall?.name === "rewrite_plan") {
+
+  if (firstCall.name !== "rewrite_plan") {
+    if (
+      calls.length !== 1 ||
+      state.plan.length === 0
+    ) {
+      throw new ProductionTurnProtocolError(
+        "An action-only turn requires a committed incomplete plan.",
+      );
+    }
+    let request: ModelToolRequest;
+    try {
+      request = validateToolCall({
+        name: firstCall.name,
+        input: firstCall.input,
+      });
+    } catch (error) {
+      throw new ProductionTurnProtocolError(
+        error instanceof Error ? error.message : "Invalid repository action.",
+      );
+    }
+    return {
+      assistantContent: content,
+      plan: state.plan,
+      planToolId: null,
+      action: {
+        toolUseId: firstCall.id,
+        operationId: crypto.randomUUID(),
+        request,
+      },
+    };
+  }
+
+  const planCall = firstCall;
+  const actionCall = secondCall;
+  if (actionCall?.name === "rewrite_plan") {
     throw new ProductionTurnProtocolError(
       "A turn must contain exactly one rewrite_plan call.",
     );
@@ -365,11 +403,9 @@ function validateProductionTurn(
   const complete = parsed.data.plan.every(
     (task) => task.status === "completed",
   );
-  if (complete === Boolean(actionCall)) {
+  if (complete && actionCall) {
     throw new ProductionTurnProtocolError(
-      complete
-        ? "A completed plan must not include a repository action."
-        : "An incomplete plan must include exactly one repository action.",
+      "A completed plan must not include a repository action.",
     );
   }
 
@@ -413,55 +449,29 @@ function validatePlan(plan: TodoItem[], state: ProductionAgentState): void {
   }
   const completed = countCompleted(plan);
   const statuses = plan.map((task) => task.status);
-  const expected = plan.map((_, index) =>
-    index < completed
-      ? "completed"
-      : index === completed
-        ? "in_progress"
-        : "pending",
-  );
   if (
-    completed === plan.length
-      ? statuses.some((status) => status !== "completed")
-      : statuses.some((status, index) => status !== expected[index])
+    completed !== plan.length &&
+    !statuses.includes("in_progress")
   ) {
     throw new ProductionTurnProtocolError(
-      "Plan statuses must be completed*, one in_progress, then pending*.",
+      "An incomplete plan must contain an in_progress task.",
     );
   }
   if (state.plan.length === 0) {
-    if (completed !== 0) {
+    if (completed === plan.length) {
       throw new ProductionTurnProtocolError(
-        "The initial plan cannot contain completed tasks.",
+        "The initial plan must contain an in-progress task.",
       );
     }
     return;
   }
-  if (
-    plan.length !== state.plan.length ||
-    plan.some(
-      (task, index) =>
-        task.id !== state.plan[index]?.id ||
-        task.description !== state.plan[index]?.description,
-    )
-  ) {
-    throw new ProductionTurnProtocolError(
-      "Plan task IDs, descriptions, order, and count must remain stable.",
-    );
-  }
   const previousCompleted = countCompleted(state.plan);
-  const maximumCompleted =
-    state.lastToolSucceeded === true
-      ? previousCompleted + 1
-      : previousCompleted;
   if (
-    completed < previousCompleted ||
-    completed > maximumCompleted
+    completed >
+    previousCompleted + (state.lastToolSucceeded === true ? 1 : 0)
   ) {
     throw new ProductionTurnProtocolError(
-      state.lastToolSucceeded
-        ? "A successful action may complete at most the active task."
-        : "The active task cannot complete without a successful action.",
+      "Plan completion may advance by one only after a successful action.",
     );
   }
 }
@@ -565,9 +575,7 @@ function toResult(state: ProductionAgentState): ProductionLoopResult {
 }
 
 function countCompleted(plan: TodoItem[]): number {
-  return plan.findIndex((task) => task.status !== "completed") === -1
-    ? plan.length
-    : plan.findIndex((task) => task.status !== "completed");
+  return plan.filter((task) => task.status === "completed").length;
 }
 
 function throwIfAborted(signal: AbortSignal | undefined): void {

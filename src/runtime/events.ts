@@ -88,10 +88,15 @@ export function createAgentEventPublisher(
         sequence: ++sequence,
         timestamp: now().toISOString(),
       } as AgentEvent;
-      try {
-        sink?.(structuredClone(event));
-      } catch {
-        // Observation must never affect execution.
+      if (sink) {
+        const snapshot = structuredClone(event);
+        queueMicrotask(() => {
+          try {
+            sink(snapshot);
+          } catch {
+            // Observation must never affect execution.
+          }
+        });
       }
       return event;
     },

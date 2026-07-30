@@ -16,6 +16,12 @@ import { toolResultWireSchema } from "../mcp/schemas";
 import type { ModelToolRequest } from "../tools/contracts";
 import { validateToolCall } from "../tools/validate-call";
 import type { ProductionCheckpointStore } from "./checkpoint";
+import {
+  type AgentEventPublisher,
+  safeToolSummary,
+  toolOutcome,
+  usageFromCounters,
+} from "./events";
 import type {
   PendingProductionTurn,
   ProductionAgentState,
@@ -44,6 +50,7 @@ export type ProductionLoopOptions = {
   checkpointStore: ProductionCheckpointStore;
   maxModelTurns?: number;
   signal?: AbortSignal;
+  events?: AgentEventPublisher;
 };
 
 export class ProductionTurnProtocolError extends Error {
@@ -157,6 +164,12 @@ export async function runProductionLoop(
   const maxModelTurns = options.maxModelTurns ?? 50;
   let state = await initializeState(options);
   validateRecoveredState(state, options);
+  options.events?.emit({
+    type: "state_loaded",
+    lifecycle: state.lifecycle,
+    plan: state.plan,
+    usage: usageFromCounters(state.counters),
+  });
 
   if (state.lifecycle === "failed") {
     throw new ProductionTurnProtocolError(
@@ -206,6 +219,10 @@ export async function runProductionLoop(
             `Model violated the production turn protocol twice: ${protocolError.message}`,
         };
         await options.checkpointStore.save(state);
+        options.events?.emit({
+          type: "usage_updated",
+          usage: usageFromCounters(state.counters),
+        });
         throw protocolError;
       }
       state = {
@@ -226,6 +243,10 @@ export async function runProductionLoop(
         ],
       };
       await options.checkpointStore.save(state);
+      options.events?.emit({
+        type: "usage_updated",
+        usage: usageFromCounters(state.counters),
+      });
       continue;
     }
 
@@ -235,6 +256,10 @@ export async function runProductionLoop(
       pendingTurn,
     };
     await options.checkpointStore.save(state);
+    options.events?.emit({
+      type: "usage_updated",
+      usage: usageFromCounters(state.counters),
+    });
   }
 
   return toResult(state);
@@ -259,10 +284,37 @@ async function commitPendingTurn(
   if (pending.action) {
     throwIfAborted(options.signal);
     const request = validateToolCall(pending.action.request);
-    const rawResult = await options.session.call(request, {
+    const startedAt = performance.now();
+    options.events?.emit({
+      type: "tool_started",
       operationId: pending.action.operationId,
-      ...(options.signal ? { signal: options.signal } : {}),
+      toolName: request.name,
+      summary: safeToolSummary(request),
     });
+    let rawResult;
+    try {
+      rawResult = await options.session.call(request, {
+        operationId: pending.action.operationId,
+        ...(options.signal ? { signal: options.signal } : {}),
+      });
+      options.events?.emit({
+        type: "tool_finished",
+        operationId: pending.action.operationId,
+        durationMs: Math.max(0, performance.now() - startedAt),
+        outcome: toolOutcome(rawResult),
+      });
+    } catch (error) {
+      options.events?.emit({
+        type: "tool_finished",
+        operationId: pending.action.operationId,
+        durationMs: Math.max(0, performance.now() - startedAt),
+        outcome:
+          options.signal?.aborted || isAbortError(error)
+            ? "cancelled"
+            : "failed",
+      });
+      throw error;
+    }
     const { metadata, ...resultWithoutMetadata } = rawResult;
     const persistedResult: NonNullable<
       ProductionAgentState["lastToolResult"]
@@ -318,7 +370,19 @@ async function commitPendingTurn(
     },
   };
   await options.checkpointStore.save(next);
+  options.events?.emit({
+    type: "plan_committed",
+    plan: next.plan,
+  });
   return next;
+}
+
+function isAbortError(error: unknown): boolean {
+  return (
+    error instanceof DOMException && error.name === "AbortError"
+  ) || (
+    error instanceof Error && error.name === "AbortError"
+  );
 }
 
 function validateProductionTurn(

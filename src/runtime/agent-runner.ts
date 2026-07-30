@@ -20,6 +20,10 @@ import {
   runProductionLoop,
   type ProductionLoopResult,
 } from "./production-loop";
+import {
+  createAgentEventPublisher,
+  type AgentEventSink,
+} from "./events";
 
 const MAX_TASK_BYTES = 32 * 1024;
 
@@ -37,6 +41,7 @@ export type HeadlessAgentRunOptions = {
   templateId?: string;
   signal?: AbortSignal;
   maxModelTurns?: number;
+  eventSink?: AgentEventSink;
   modelProvider?: AgentModelProvider;
   callModel?: CallModel;
   checkpointStore?: ProductionCheckpointStore;
@@ -111,6 +116,11 @@ export async function runHeadlessAgent(
   options: HeadlessAgentRunOptions,
 ): Promise<ProductionLoopResult> {
   const prepared = await prepareAgentRun(options.repoPath, options.task);
+  const events = createAgentEventPublisher(options.eventSink);
+  events.emit({
+    type: "run_started",
+    runIdentity: prepared.runIdentity,
+  });
   const checkpointStore =
     options.checkpointStore ??
     new FileProductionCheckpointStore(prepared.canonicalRepoPath);
@@ -141,6 +151,7 @@ export async function runHeadlessAgent(
       checkpointStore,
       maxModelTurns: options.maxModelTurns,
       signal: options.signal,
+      events,
     });
   }
 
@@ -181,6 +192,7 @@ export async function runHeadlessAgent(
       checkpointStore,
       maxModelTurns: options.maxModelTurns,
       signal: options.signal,
+      events,
     });
   } catch (error) {
     runError = error;

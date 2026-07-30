@@ -9,14 +9,14 @@
 
 ## Current state (updated: 2026-07-30)
 
-**Overall:** Steps 0–6 are complete. Step 6 binds every model request to one
-canonical task root, serializes execution, runs shell commands as a restricted
-`runner`, protects the runtime and Git control state, rejects symlinked typed
-paths, scrubs process environments, disables sandbox internet, removes Git
-push, and kills leftover runner processes. Final verification reports 138
-offline tests, 15 focused MCP tests, 28 focused sandbox tests, and 4 focused
-safety tests passing; both live E2B gates pass and leave zero running
-sandboxes. ADR 0009 mutation recovery is now the mandatory next change.
+**Overall:** Steps 0–6 and the ADR 0009 mutation-recovery prerequisite are
+complete. Mutating edit, shell, and Git calls now use durable operation IDs,
+host session leases, sandbox journals, same-sandbox reconnection, fail-closed
+ambiguity handling, and terminal cancellation reconciliation. Final
+verification reports 150 offline tests, 15 focused MCP tests, 33 focused
+sandbox tests, and 4 focused safety tests passing. The four-case live E2B gate
+passes and leaves zero running sandboxes. OpenRouter is the mandatory next
+change before the headless production runner and Step 7.
 
 **Step-by-step:**
 
@@ -29,7 +29,7 @@ sandboxes. ADR 0009 mutation recovery is now the mandatory next change.
 | 4 — MCP transport (stdio) | complete | Six tools have canonical direct/MCP parity; lifecycle and mutation checks pass |
 | 5 — Sandbox (E2B) | complete | Six remote tools, exact task worktree, host-isolation sentinel, process-loss handling, and cleanup verified on merged `main` |
 | 6 — PreToolUse safety hook | complete | Exact-root binding, two identities, symlink-safe files, offline shell, reduced Git, and red-team/live gates pass |
-| 7 — TUI (Ink) | not started | — |
+| 7 — TUI (Ink) | not started | Mutation recovery complete; OpenRouter and the headless production runner remain prerequisites |
 | 8 — Remaining hooks + budget | not started | — |
 | 9 — Telemetry | not started | — |
 | 10 — Eval + PR posting | not started | — |
@@ -92,6 +92,11 @@ sandboxes. ADR 0009 mutation recovery is now the mandatory next change.
 - Git push is absent from the sandbox contract. Git status, diff, and commit
   run with hooks, helpers, signing, pagers, and external diff execution
   disabled; publication remains a trusted host operation.
+- Mutating calls use host-generated operation IDs, a durable host-owned E2B
+  lease, and a sandbox execution journal. Recovery reconnects the exact
+  sandbox, returns matching terminal results, and never replays ambiguous
+  work. Cancellation must reach a terminal journal result before cleanup. See
+  ADR 0013.
 
 ---
 
@@ -107,9 +112,11 @@ sandboxes. ADR 0009 mutation recovery is now the mandatory next change.
   not decided. Doesn't block anything until step 9.
 - [ ] OpenRouter account/credits not yet set up — deferred until after Steps
   5–6, but flagging so it is not a surprise at the live real-tool boundary.
-- [ ] Choose and verify mutation-recovery reconciliation before the first
-  live-model real-tool run, OpenRouter, or Step 7; this is the mandatory next
-  branch and a blocking ADR 0009 revisit.
+- [x] Choose and verify mutation-recovery reconciliation before the first
+  live-model real-tool run, OpenRouter, or Step 7; this closes the blocking ADR
+  0009 revisit.
+- [ ] Implement and verify the OpenRouter provider boundary before connecting
+  the production model/tool runner or starting Step 7.
 - [x] Resolve the focused live-gate failure. The initial ambiguous E2B create
   response was followed by a successful bounded run. Template workspace
   ownership and the newline-aware probe assertion were corrected; the real
@@ -709,6 +716,35 @@ sandboxes. ADR 0009 mutation recovery is now the mandatory next change.
   `fix/mutation-recovery`. Define write-ahead state or operation-specific
   reconciliation for `edit_file`, `run_shell`, and Git mutation before
   OpenRouter, Step 7, or any live-model access to mutating real tools.
+
+### 2026-07-30 — Mutating tool recovery
+
+- What was done: Added strict atomic host leases and sandbox mutation journals,
+  stable input hashes, operation IDs for edit apply, shell, and Git commit,
+  same-sandbox reconnection, duplicate-result replay, abort propagation,
+  terminal reconciliation, and cleanup ordering. Versioned and rebuilt the
+  filtered E2B runtime as
+  `terminal-coding-agent-tools:mutation-recovery-v1`.
+- What broke / had to be reworked: The first live cancellation run showed that
+  MCP cancellation stopped the host request but left the sandbox runner child
+  alive until timeout. The root-owned wrapper now exposes a validated
+  cancellation path that terminates the sandbox's isolated `runner` identity;
+  cancellation then journals `CANCELLED` before cleanup. Review also closed
+  journal serialization, canonical hashing, close/call race, and contradictory
+  record-schema gaps.
+- Decisions made this session: Preserve the exact owned E2B worktree across
+  host restart and fail closed on missing, mismatched, or in-flight mutation
+  state. Never infer that transport loss means a mutation did not run. See ADR
+  0013.
+- Current status of the step in progress: The mutation-recovery prerequisite
+  is complete. Typecheck, 150 offline tests, 15 focused MCP tests, 33 focused
+  sandbox tests, 4 focused safety tests, the fake-loop regression, template
+  inspection, and diff checks pass. The final live E2B suite passes all four
+  transport/isolation/cancellation/reconnection cases and leaves zero running
+  sandboxes.
+- Next session should start with: Implement the OpenRouter provider boundary
+  on a fresh branch from updated `main`, verify normalized tool calls, then
+  build the headless production runner before Step 7.
 
 ---
 

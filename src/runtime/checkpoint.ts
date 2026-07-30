@@ -16,6 +16,7 @@ import {
 
 const STATE_FILE = "state.json";
 const TEMP_PREFIX = ".state.json.tmp-";
+const MAX_STATE_BYTES = 2 * 1024 * 1024;
 
 export type ProductionCheckpointStore = {
   load(): Promise<ProductionAgentState | null>;
@@ -48,8 +49,19 @@ export class FileProductionCheckpointStore
 
     let serialized: string;
     try {
-      serialized = await Bun.file(this.statePath).text();
+      serialized = await Bun.file(this.statePath)
+        .slice(0, MAX_STATE_BYTES + 1)
+        .text();
+      if (
+        new TextEncoder().encode(serialized).byteLength >
+        MAX_STATE_BYTES
+      ) {
+        throw new ProductionCheckpointError(
+          `Checkpoint exceeds the ${MAX_STATE_BYTES}-byte limit.`,
+        );
+      }
     } catch (error) {
+      if (error instanceof ProductionCheckpointError) throw error;
       if (isMissingError(error)) return null;
       throw new ProductionCheckpointError(
         `Could not read checkpoint "${this.statePath}".`,
@@ -69,6 +81,12 @@ export class FileProductionCheckpointStore
 
   async save(state: ProductionAgentState): Promise<void> {
     const validated = ProductionAgentStateSchema.parse(state);
+    const serialized = `${JSON.stringify(validated, null, 2)}\n`;
+    if (new TextEncoder().encode(serialized).byteLength > MAX_STATE_BYTES) {
+      throw new ProductionCheckpointError(
+        `Checkpoint exceeds the ${MAX_STATE_BYTES}-byte limit.`,
+      );
+    }
     await this.prepareDirectory(true);
     await this.removeOrphanTemps();
     const tempPath = join(
@@ -82,7 +100,7 @@ export class FileProductionCheckpointStore
         constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY,
         0o600,
       );
-      await handle.writeFile(`${JSON.stringify(validated, null, 2)}\n`);
+      await handle.writeFile(serialized);
       await handle.sync();
       await handle.close();
       handle = undefined;
@@ -149,6 +167,11 @@ export class FileProductionCheckpointStore
       if (stats.isSymbolicLink()) {
         throw new ProductionCheckpointError(
           `Refusing symlinked checkpoint "${this.statePath}".`,
+        );
+      }
+      if (!stats.isFile() || stats.size > MAX_STATE_BYTES) {
+        throw new ProductionCheckpointError(
+          `Refusing checkpoint "${this.statePath}" because it is not a regular file within the ${MAX_STATE_BYTES}-byte limit.`,
         );
       }
     } catch (error) {

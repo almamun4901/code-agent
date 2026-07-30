@@ -20,6 +20,8 @@ import {
   type ProductionLoopResult,
 } from "./production-loop";
 
+const MAX_TASK_BYTES = 32 * 1024;
+
 export type PreparedAgentRun = {
   canonicalRepoPath: string;
   task: string;
@@ -56,6 +58,14 @@ export async function prepareAgentRun(
   const normalizedTask = task.trim();
   if (!normalizedTask) {
     throw new AgentRunConfigurationError("Task must not be blank.");
+  }
+  if (
+    new TextEncoder().encode(normalizedTask).byteLength >
+    MAX_TASK_BYTES
+  ) {
+    throw new AgentRunConfigurationError(
+      `Task must not exceed ${MAX_TASK_BYTES} UTF-8 bytes.`,
+    );
   }
   if (!path.isAbsolute(repoPath)) {
     throw new AgentRunConfigurationError(

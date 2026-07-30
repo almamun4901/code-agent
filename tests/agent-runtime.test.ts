@@ -372,6 +372,9 @@ describe("host-side production runner", () => {
       prepareAgentRun(repo.worktreePath, "  "),
     ).rejects.toBeInstanceOf(AgentRunConfigurationError);
     await expect(
+      prepareAgentRun(repo.worktreePath, "x".repeat(32 * 1024 + 1)),
+    ).rejects.toThrow("must not exceed");
+    await expect(
       prepareAgentRun("relative/repo", "task"),
     ).rejects.toThrow("absolute");
     await expect(

@@ -114,27 +114,38 @@ merge sequence is finished. Never silently reuse a branch from an earlier step.
 - Explicit live E2B transport gate: `bun run test:e2b:transport`
 - Explicit live E2B safety gate: `bun run test:e2b:safety`
 - Explicit live Phase 1 gate: `bun run test:integration`
+- Explicit live routed-provider gate: `bun run test:openrouter:integration`
 
-The live gate requires `ANTHROPIC_API_KEY` and opts in with
+The historical Phase 1 gate requires `ANTHROPIC_API_KEY` and opts in with
 `RUN_LIVE_ANTHROPIC_TEST=1`. It sends the synthetic Phase 1 prompt, plan state,
 and canned tool results to Anthropic. Normal `bun test` never makes that call.
+
+The final routed-provider gate requires `OPENROUTER_API_KEY` and opts in with
+`RUN_LIVE_OPENROUTER_TEST=1`. It runs the same multi-turn strict tool-call
+scenario through OpenRouter. Normal `bun test` never makes this call either.
 
 ## Current implementation structure
 
 - `src/loop.ts` owns plan/act/observe/recover orchestration and all semantic
   validation of model turns.
+- `src/model/contracts.ts` owns the provider-neutral request, response, usage,
+  error, and cancellation boundary.
+- `src/model/openrouter.ts` translates that boundary to OpenRouter's
+  OpenAI-compatible tool-call API and is the production provider adapter.
 - `src/plan/schema.ts` owns strict Zod schemas for TodoWrite input and the
   provider-neutral versioned runtime checkpoint.
 - `src/state/checkpoint.ts` owns fail-closed loading and durable atomic
   `.agent/state.json` replacement.
 - `src/model/anthropic.ts` translates the provider-neutral loop contract to the
-  Anthropic Messages API and sanitizes provider errors.
+  historical Phase 1 Anthropic Messages API and sanitizes provider errors.
 - `src/tools/fake-read-file.ts` returns canned fixture data without filesystem
   access.
 - `tests/loop.test.ts` covers the state machine and trust boundary offline.
 - `tests/checkpoint.test.ts` covers state validation, filesystem safety,
   repeated hard-kill recovery, and committed-tool non-replay.
 - `tests/anthropic.integration.test.ts` is the opt-in live acceptance gate.
+- `tests/openrouter.integration.test.ts` is the opt-in final-provider
+  tool-call acceptance gate.
 - `src/tools/dispatcher.ts` validates and routes all six real tools, invokes
   the structured PreToolUse policy, binds the immutable task root, serializes
   execution, normalizes failures, and caps serialized results.

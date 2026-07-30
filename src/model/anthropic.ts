@@ -6,85 +6,45 @@ import type {
   MessageParam,
   Tool,
 } from "@anthropic-ai/sdk/resources/messages/messages";
-
-export type TextBlock = {
-  type: "text";
-  text: string;
-};
-
-export type ToolUseBlock = {
-  type: "tool_use";
-  id: string;
-  name: string;
-  input: unknown;
-};
-
-export type ToolResultBlock = {
-  type: "tool_result";
-  toolUseId: string;
-  content: string;
-  isError?: boolean;
-};
-
-export type AssistantBlock = TextBlock | ToolUseBlock;
-export type UserBlock = TextBlock | ToolResultBlock;
-
-export type ConversationMessage =
-  | { role: "user"; content: string | UserBlock[] }
-  | { role: "assistant"; content: AssistantBlock[] };
-
-export type ModelToolDefinition = {
-  name: string;
-  description: string;
-  inputSchema: {
-    type: "object";
-    properties: Record<string, unknown>;
-    required?: string[];
-    additionalProperties?: boolean;
-  };
-  strict?: boolean;
-};
-
-export type ModelRequest = {
-  system: string;
-  messages: ConversationMessage[];
-  tools: ModelToolDefinition[];
-  maxTokens: number;
-};
-
-export type ModelTurn = {
-  content: AssistantBlock[];
-  stopReason: Message["stop_reason"];
-  usage: {
-    inputTokens: number;
-    outputTokens: number;
-  };
-};
-
-export type CallModel = (request: ModelRequest) => Promise<ModelTurn>;
+import {
+  ModelConfigurationError,
+  ModelProviderError,
+  ModelRequestCancelledError,
+  type AssistantBlock,
+  type CallModel,
+  type ConversationMessage,
+  type ModelRequest,
+  type ModelToolDefinition,
+  type UserBlock,
+} from "./contracts";
+export {
+  ModelConfigurationError,
+  ModelProviderError,
+  ModelRequestCancelledError,
+} from "./contracts";
+export type {
+  AssistantBlock,
+  CallModel,
+  CallModelOptions,
+  ConversationMessage,
+  ModelRequest,
+  ModelStopReason,
+  ModelToolDefinition,
+  ModelTurn,
+  TextBlock,
+  ToolResultBlock,
+  ToolUseBlock,
+  UserBlock,
+} from "./contracts";
 
 type MessagesClient = {
   messages: {
-    create(params: MessageCreateParamsNonStreaming): Promise<Message>;
+    create(
+      params: MessageCreateParamsNonStreaming,
+      options?: { signal?: AbortSignal },
+    ): Promise<Message>;
   };
 };
-
-export class ModelConfigurationError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "ModelConfigurationError";
-  }
-}
-
-export class ModelProviderError extends Error {
-  readonly status: number | undefined;
-
-  constructor(message: string, status?: number) {
-    super(message);
-    this.name = "ModelProviderError";
-    this.status = status;
-  }
-}
 
 type AnthropicModelOptions = {
   apiKey?: string;
@@ -125,19 +85,22 @@ export function createAnthropicModel(
     process.env.ANTHROPIC_MODEL?.trim() ||
     DEFAULT_MODEL;
 
-  return async (request: ModelRequest): Promise<ModelTurn> => {
+  return async (request, callOptions = {}) => {
     try {
-      const response = await client.messages.create({
-        model,
-        max_tokens: request.maxTokens,
-        system: request.system,
-        messages: request.messages.map(toAnthropicMessage),
-        tools: request.tools.map(toAnthropicTool),
-        tool_choice: {
-          type: "auto",
-          disable_parallel_tool_use: false,
+      const response = await client.messages.create(
+        {
+          model,
+          max_tokens: request.maxTokens,
+          system: request.system,
+          messages: request.messages.map(toAnthropicMessage),
+          tools: request.tools.map(toAnthropicTool),
+          tool_choice: {
+            type: "auto",
+            disable_parallel_tool_use: false,
+          },
         },
-      });
+        callOptions.signal ? { signal: callOptions.signal } : undefined,
+      );
 
       return {
         content: response.content.map((block): AssistantBlock => {
@@ -166,8 +129,15 @@ export function createAnthropicModel(
       };
     } catch (error) {
       if (
+        callOptions.signal?.aborted ||
+        (error instanceof Error && error.name === "AbortError")
+      ) {
+        throw new ModelRequestCancelledError();
+      }
+      if (
         error instanceof ModelConfigurationError ||
-        error instanceof ModelProviderError
+        error instanceof ModelProviderError ||
+        error instanceof ModelRequestCancelledError
       ) {
         throw error;
       }

@@ -66,10 +66,13 @@ task prompt
 src/loop.ts
   plan / act / observe / recover
     |
-    +---- normalized ModelRequest ----> src/model/anthropic.ts
-    |                                      |
-    |                                      v
-    |                                Anthropic Messages API
+    +---- normalized ModelRequest ----> src/model/contracts.ts
+                                           |
+                                           v
+                                    provider adapters
+                                     /             \
+                                    v               v
+                         src/model/openrouter.ts  src/model/anthropic.ts
     |
     +---- validated read_file ------> src/tools/fake-read-file.ts
     |                                      |

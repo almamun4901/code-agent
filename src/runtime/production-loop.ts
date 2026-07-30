@@ -92,8 +92,6 @@ const TOOL_DEFINITIONS: ModelToolDefinition[] = [
       properties: {
         plan: {
           type: "array",
-          minItems: 1,
-          maxItems: MAX_PLAN_TASKS,
           items: {
             type: "object",
             properties: {
@@ -456,11 +454,11 @@ function validatePlan(plan: TodoItem[], state: ProductionAgentState): void {
   }
   const previousCompleted = countCompleted(state.plan);
   if (
-    completed >
-    previousCompleted + (state.lastToolSucceeded === true ? 1 : 0)
+    completed > previousCompleted &&
+    state.lastToolSucceeded !== true
   ) {
     throw new ProductionTurnProtocolError(
-      "Plan completion may advance by one only after a successful action.",
+      "Plan completion may advance only after a successful action.",
     );
   }
 }

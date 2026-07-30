@@ -1,6 +1,7 @@
 import { realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import type { CallModel } from "../model/contracts";
+import { createAnthropicModel } from "../model/anthropic";
 import { createOpenRouterModel } from "../model/openrouter";
 import {
   createE2bTaskSession,
@@ -28,12 +29,15 @@ export type PreparedAgentRun = {
   runIdentity: string;
 };
 
+export type AgentModelProvider = "anthropic" | "openrouter";
+
 export type HeadlessAgentRunOptions = {
   repoPath: string;
   task: string;
   templateId?: string;
   signal?: AbortSignal;
   maxModelTurns?: number;
+  modelProvider?: AgentModelProvider;
   callModel?: CallModel;
   checkpointStore?: ProductionCheckpointStore;
   sessionRecoveryStore?: E2bSessionRecoveryStore;
@@ -147,7 +151,13 @@ export async function runHeadlessAgent(
       "E2B_TEMPLATE_ID is required to start a production run.",
     );
   }
-  const callModel = options.callModel ?? createOpenRouterModel();
+  const callModel =
+    options.callModel ??
+    createConfiguredModel(
+      parseModelProvider(
+        options.modelProvider ?? process.env.AGENT_MODEL_PROVIDER,
+      ),
+    );
   const recoveryStore =
     options.sessionRecoveryStore ??
     new FileE2bSessionRecoveryStore(
@@ -193,6 +203,26 @@ export async function runHeadlessAgent(
   if (runError) throw runError;
   if (cleanupError) throw cleanupError;
   return result!;
+}
+
+function parseModelProvider(
+  value: string | undefined,
+): AgentModelProvider {
+  const normalized = value?.trim() || "anthropic";
+  if (normalized !== "anthropic" && normalized !== "openrouter") {
+    throw new AgentRunConfigurationError(
+      'AGENT_MODEL_PROVIDER must be "anthropic" or "openrouter".',
+    );
+  }
+  return normalized;
+}
+
+function createConfiguredModel(
+  provider: AgentModelProvider,
+): CallModel {
+  return provider === "anthropic"
+    ? createAnthropicModel()
+    : createOpenRouterModel();
 }
 
 async function openDefaultSession(

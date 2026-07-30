@@ -411,6 +411,25 @@ describe("host-side production runner", () => {
     expect(sessionCalls).toBe(0);
   });
 
+  test("rejects an unknown model provider before opening a sandbox", async () => {
+    const repo = await repository();
+    let sessionCalls = 0;
+    await expect(
+      runHeadlessAgent({
+        repoPath: repo.worktreePath,
+        task: "Validate provider",
+        templateId: "template:test",
+        checkpointStore: new MemoryProductionCheckpointStore(),
+        modelProvider: "unknown" as "anthropic",
+        openSession: async () => {
+          sessionCalls += 1;
+          return new FakeSession() as unknown as E2bTaskSession;
+        },
+      }),
+    ).rejects.toThrow('must be "anthropic" or "openrouter"');
+    expect(sessionCalls).toBe(0);
+  });
+
   test("reconciles mutations before closing the sandbox", async () => {
     const repo = await repository();
     const session = new FakeSession();

@@ -9,17 +9,17 @@
 
 ## Current state (updated: 2026-07-30)
 
-**Overall:** Steps 0–6, mutation recovery, and the routed OpenRouter provider
-are complete and merged. The host-side production runner is also merged: it
-validates canonical repository/task identity before
-external activity, persists validated pending turns and stable mutation
-operation IDs, supports provider-native sequential actions and full plan
-revision, runs actions through the owned E2B MCP session, and reconciles
-before cleanup. Type checking, 176 offline tests, 15 focused MCP tests, 33
-focused sandbox tests, 4 focused safety tests, and all smoke checks pass.
-The complete production live gate passes through the direct Anthropic adapter
-and E2B MCP in 29.2 seconds and leaves zero running sandboxes. OpenRouter
-remains implemented and verified, but is set aside until paid capacity is
+**Overall:** Steps 0–7, mutation recovery, the routed provider boundary, and
+the host-side production runner are complete and merged. `agent run <repo>
+"<task>"` now provides responsive Ink and static non-TTY views over
+redacted, non-blocking runtime events. Cancellation aborts model, policy, and
+MCP work; reconciles mutations; closes E2B; invokes `SessionEnd` exactly once;
+and restores the terminal. Type checking, 219 offline tests, 15 focused MCP
+tests, 34 focused sandbox tests, 5 focused safety tests, and all smoke checks
+pass on merged `main`. Twenty packaged launches stayed below the two-second
+first-paint gate. The post-merge live cancellation gate completed in 5.0
+seconds and left zero E2B sandboxes. Direct Anthropic remains the default;
+OpenRouter remains implemented but is set aside until paid capacity is
 available.
 
 **Step-by-step:**
@@ -33,7 +33,7 @@ available.
 | 4 — MCP transport (stdio) | complete | Six tools have canonical direct/MCP parity; lifecycle and mutation checks pass |
 | 5 — Sandbox (E2B) | complete | Six remote tools, exact task worktree, host-isolation sentinel, process-loss handling, and cleanup verified on merged `main` |
 | 6 — PreToolUse safety hook | complete | Exact-root binding, two identities, symlink-safe files, offline shell, reduced Git, and red-team/live gates pass |
-| 7 — TUI (Ink) | not started | All prerequisites are merged and reverified; start the terminal interface on a fresh branch |
+| 7 — TUI (Ink) | complete | Responsive Ink/static views, packaged CLI, honest committed-plan events, safe cancellation, PTY gates, and live E2B cleanup verified on merged `main` |
 | 8 — Remaining hooks + budget | not started | — |
 | 9 — Telemetry | not started | — |
 | 10 — Eval + PR posting | not started | — |
@@ -108,6 +108,16 @@ available.
 - The host runner selects `anthropic` or `openrouter` without changing loop,
   sandbox, or TUI behavior. Step 7 temporarily defaults to direct Anthropic
   because the available OpenRouter free quota is exhausted. See ADR 0015.
+- Runtime observation events are sequenced, redacted, non-blocking, and
+  failure-isolated from execution. They remain separate from Step 8 lifecycle
+  hooks. See ADR 0016.
+- Shutdown has one idempotent owner: abort, reconcile, close, bounded
+  `SessionEnd`, terminal event, then terminal restoration. A deadline reports
+  failure only after cleanup reaches a terminal state. See ADR 0017.
+- If cancellation lands after the host mutation lease but before remote
+  acceptance, a read-only serialized MCP barrier proves whether the request
+  reached execution. Only a provably absent remote journal becomes terminal
+  `CANCELLED`; unreadable or in-flight state still fails closed. See ADR 0013.
 
 ---
 
@@ -143,6 +153,8 @@ available.
 - [x] Merge and complete merged-main verification.
 - [x] Complete Step 6 security, engineering, documentation, red-team, and live
   E2B acceptance gates.
+- [x] Complete Step 7 review, responsive/PTY acceptance, real E2B cancellation
+  reconciliation, branch push, PR merge, and merged-main verification.
 
 ---
 
@@ -833,6 +845,36 @@ available.
 - Next session should start with: Pull updated `main`, create
   `feat/terminal-interface`, and implement the Step 7 observation contract
   before coordinated shutdown and Ink rendering.
+
+### 2026-07-30 — Terminal interface
+
+- What was done: Added the packaged `agent run <repo> "<task>"` command,
+  sequenced and redacted observation events, an idempotent runtime controller,
+  responsive Ink layouts, plain non-TTY output, checkpoint-aware resume, and
+  PTY acceptance coverage. Recorded ADRs 0016–0017, rebuilt the private E2B
+  runtime, completed gstack review, pushed `feat/terminal-interface`, and
+  merged PR #5.
+- What broke / had to be reworked: Review found early shutdown settlement,
+  cleanup/run-reason conflation, asynchronous sink rejection, unsafe summary
+  paths, terminal-control injection, incomplete outcome visibility, and weak
+  cancellation coverage. The live gate then exposed a host-lease/remote-
+  acceptance race: immediate cancellation could precede the sandbox journal
+  and leave an ambiguous lease. A serialized read-only MCP barrier now proves
+  whether earlier requests drained before classifying a missing journal as
+  cancelled; ambiguous states still fail closed.
+- Decisions made this session: Observation is a non-blocking plane separate
+  from Step 8 hooks; shutdown retains ownership past its reporting deadline;
+  and mutation cancellation requires either a terminal remote journal or
+  serialized proof that execution never began. See ADRs 0013, 0016, and 0017.
+- Current status of the step in progress: Step 7 is complete on merged `main`.
+  Typecheck, 219 offline tests, 15 MCP tests, 34 sandbox tests, 5 safety tests,
+  fake-loop/template/diff checks, all five PTY cancellation points, and
+  responsive width tests pass. The post-merge live E2B cancellation gate
+  passed in 5.0 seconds and confirmed zero running sandboxes before and after.
+  Cold and resumed first paint remained below two seconds.
+- Next session should start with: Pull updated `main`, create a fresh branch
+  for Step 8, and review the remaining hook registry plus turn, context, and
+  dollar budget design before implementation.
 
 ---
 

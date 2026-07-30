@@ -199,7 +199,7 @@ order above.
 | 4 — MCP transport (stdio)     | complete                                              |
 | 5 — Sandbox (E2B)             | complete                                              |
 | 6 — PreToolUse safety hook    | complete                                              |
-| 7 — TUI (Ink)                 | not started                                           |
+| 7 — TUI (Ink)                 | complete                                              |
 | 8 — Remaining hooks + budget  | not started                                           |
 | 9 — Telemetry                 | not started                                           |
 | 10 — Eval + PR posting        | not started                                           |

@@ -1,7 +1,6 @@
 # Terminal Interface Implementation Plan
 
-**Status:** implemented on `feat/terminal-interface`; merge verification
-pending
+**Status:** complete; merged through PR #5 and reverified on `main`
 
 ## Scope
 
@@ -88,12 +87,12 @@ Offline coverage verifies:
 
 PTY acceptance runs the packaged executable, checks terminal restoration on
 completion, failure, and cancellation, and measures ten cold plus ten resumed
-launches. The final complete-suite measurement was 198.5 ms maximum cold
-first paint and 195.2 ms maximum resumed first paint, below the two-second
+launches. The post-merge complete-suite measurement was 449.5 ms maximum cold
+first paint and 198.2 ms maximum resumed first paint, below the two-second
 gate.
 
 The final gate runs all offline, MCP, sandbox, safety, type, fake-loop,
 template, and diff checks; performs a live E2B cancellation/reconciliation
 check; confirms no running E2B sandboxes; and completes pre-landing review
-before merge. The live cancellation gate completed in 5.6 seconds and
+before merge. The post-merge live cancellation gate completed in 5.0 seconds and
 confirmed zero running E2B sandboxes before and after the run.

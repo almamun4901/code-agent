@@ -80,7 +80,6 @@ describe("OpenRouter model adapter", () => {
     expect(body).toMatchObject({
       model: "test/tool-model",
       tool_choice: "auto",
-      parallel_tool_calls: true,
       max_tokens: 512,
       provider: {
         require_parameters: true,
@@ -88,6 +87,7 @@ describe("OpenRouter model adapter", () => {
       },
       stream: false,
     });
+    expect(body).not.toHaveProperty("parallel_tool_calls");
     expect(body.tools).toEqual([
       {
         type: "function",
@@ -182,6 +182,20 @@ describe("OpenRouter model adapter", () => {
         content: "done",
       }),
       message: "unsupported finish reason",
+    },
+    {
+      name: "in-band generation error",
+      response: completion({
+        finish_reason: "error",
+        content: "partial output",
+        error: {
+          code: 429,
+          message: "raw provider detail must not leak",
+          metadata: { error_type: "rate_limit_exceeded" },
+        },
+      }),
+      message:
+        "OpenRouter generation failed (429): rate_limit_exceeded",
     },
   ])("fails closed for $name", async ({ response, message }) => {
     const callModel = createOpenRouterModel({
@@ -369,6 +383,7 @@ function completion(
     finish_reason: string | null;
     content: string | null;
     tool_calls?: unknown[];
+    error?: unknown;
   },
 ) {
   return {
@@ -383,6 +398,7 @@ function completion(
             ? { tool_calls: choice.tool_calls }
             : {}),
         },
+        ...(choice.error ? { error: choice.error } : {}),
       },
     ],
     usage: {

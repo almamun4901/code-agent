@@ -30,6 +30,19 @@ const toolCallSchema = z
   })
   .passthrough();
 
+const generationErrorSchema = z
+  .object({
+    code: z.number().int(),
+    message: z.string(),
+    metadata: z
+      .object({
+        error_type: z.string().min(1).optional(),
+      })
+      .passthrough()
+      .optional(),
+  })
+  .passthrough();
+
 const completionSchema = z
   .object({
     choices: z
@@ -38,6 +51,7 @@ const completionSchema = z
           .object({
             index: z.number().int().nonnegative(),
             finish_reason: z.string().nullable(),
+            error: generationErrorSchema.optional(),
             message: z
               .object({
                 role: z.literal("assistant"),
@@ -173,7 +187,6 @@ function toOpenRouterRequest(request: ModelRequest, model: string) {
     ],
     tools: request.tools.map(toOpenRouterTool),
     tool_choice: "auto",
-    parallel_tool_calls: true,
     max_tokens: request.maxTokens,
     provider: {
       require_parameters: true,
@@ -253,6 +266,16 @@ function normalizeCompletion(
   const choice =
     completion.choices.find((candidate) => candidate.index === 0) ??
     completion.choices[0]!;
+  if (choice.finish_reason === "error") {
+    const code = choice.error?.code;
+    const errorType = choice.error?.metadata?.error_type;
+    throw new ModelProviderError(
+      `OpenRouter generation failed${
+        code === undefined ? "" : ` (${code})`
+      }${errorType ? `: ${errorType}` : "."}`,
+      code,
+    );
+  }
   const toolCalls = choice.message.tool_calls ?? [];
   const stopReason = normalizeStopReason(choice.finish_reason);
   if (

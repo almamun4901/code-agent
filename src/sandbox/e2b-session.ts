@@ -36,6 +36,8 @@ import type {
 const DEFAULT_TIMEOUT_MS = 900_000;
 const MIN_TIMEOUT_MS = 60_000;
 const MAX_TIMEOUT_MS = 3_600_000;
+const DEFAULT_RECONCILE_TIMEOUT_MS = 35_000;
+const RECONCILE_POLL_MS = 100;
 const REMOTE_BUNDLE_PATH = "/tmp/repository.bundle";
 const REMOTE_CONFIG_PATH = "/tmp/provision-task.json";
 const REMOTE_TASKS_ROOT = "/workspace/tasks";
@@ -179,6 +181,7 @@ export type E2bTaskSession = {
     request: ModelToolRequest,
     options?: McpToolCallOptions,
   ): Promise<ToolResult>;
+  reconcileActiveMutation(timeoutMs?: number): Promise<MutationRecord | null>;
   close(): Promise<void>;
 };
 
@@ -252,6 +255,7 @@ class OwnedE2bTaskSession implements E2bTaskSession {
     request: ModelToolRequest,
     options: McpToolCallOptions = {},
   ): Promise<ToolResult> {
+    this.#assertOpen();
     const operation = async () => this.#call(request, options);
     const previous = this.#callTail;
     let release!: () => void;
@@ -260,6 +264,7 @@ class OwnedE2bTaskSession implements E2bTaskSession {
     });
     await previous;
     try {
+      this.#assertOpen();
       return await operation();
     } finally {
       release();
@@ -267,12 +272,56 @@ class OwnedE2bTaskSession implements E2bTaskSession {
   }
 
   async close(): Promise<void> {
-    this.#closePromise ??= this.#close();
-    await this.#closePromise;
+    const closePromise = (this.#closePromise ??= this.#close());
+    try {
+      await closePromise;
+    } catch (error) {
+      if (
+        error instanceof MutationRecoveryBlockedError &&
+        this.#closePromise === closePromise
+      ) {
+        this.#closePromise = undefined;
+      }
+      throw error;
+    }
+  }
+
+  async reconcileActiveMutation(
+    timeoutMs = DEFAULT_RECONCILE_TIMEOUT_MS,
+  ): Promise<MutationRecord | null> {
+    if (!this.#recovery) return null;
+    const state = await this.#requiredRecoveryState();
+    if (!state.activeMutation) return null;
+    if (state.activeMutation.status === "completed") {
+      return state.activeMutation;
+    }
+    const completed = await reconcileRemoteMutation(
+      this.#sandbox,
+      state,
+      timeoutMs,
+    );
+    await this.#recovery.store.save({
+      ...state,
+      activeMutation: completed,
+    });
+    return completed;
   }
 
   async #close(): Promise<void> {
     const errors: unknown[] = [];
+    await this.#callTail;
+    if (this.#recovery) {
+      const state = await this.#requiredRecoveryState();
+      if (state.activeMutation?.status === "in_flight") {
+        throw new MutationRecoveryBlockedError(
+          `Mutation ${state.activeMutation.operationId} must reach a terminal journal result before the sandbox can close.`,
+          {
+            sandboxId: state.sandboxId,
+            operationId: state.activeMutation.operationId,
+          },
+        );
+      }
+    }
     try {
       await this.client.close();
     } catch (error) {
@@ -360,6 +409,14 @@ class OwnedE2bTaskSession implements E2bTaskSession {
       );
     }
     return state;
+  }
+
+  #assertOpen(): void {
+    if (this.#closePromise) {
+      throw new E2bTaskSessionError(
+        "E2B task session is closing or closed.",
+      );
+    }
   }
 }
 
@@ -601,6 +658,7 @@ export async function recoverE2bTaskSession(
   options: {
     runIdentity: string;
     store: E2bSessionRecoveryStore;
+    reconcileTimeoutMs?: number;
   },
   dependencies: {
     sandboxFactory?: E2bSandboxFactory;
@@ -663,51 +721,14 @@ export async function recoverE2bTaskSession(
 
   let recoveredMutation = state.activeMutation;
   if (state.activeMutation) {
-    let remoteState;
-    try {
-      remoteState = mutationJournalStateSchema.parse(
-        JSON.parse(
-          await sandbox.readText(REMOTE_MUTATION_JOURNAL_PATH),
-        ),
-      );
-    } catch (error) {
-      throw new MutationRecoveryBlockedError(
-        `Mutation ${state.activeMutation.operationId} has no trustworthy sandbox journal result.`,
-        {
-          sandboxId: state.sandboxId,
-          operationId: state.activeMutation.operationId,
-          cause: error,
-        },
-      );
-    }
-    const remote = remoteState.active;
-    if (
-      !remote ||
-      remote.operationId !== state.activeMutation.operationId ||
-      remote.toolName !== state.activeMutation.toolName ||
-      remote.inputHash !== state.activeMutation.inputHash
-    ) {
-      throw new MutationRecoveryBlockedError(
-        `Mutation ${state.activeMutation.operationId} does not match the sandbox journal.`,
-        {
-          sandboxId: state.sandboxId,
-          operationId: state.activeMutation.operationId,
-        },
-      );
-    }
-    if (remote.status !== "completed" || !remote.result) {
-      throw new MutationRecoveryBlockedError(
-        `Mutation ${remote.operationId} is still in flight; refusing to replay it.`,
-        {
-          sandboxId: state.sandboxId,
-          operationId: remote.operationId,
-        },
-      );
-    }
-    recoveredMutation = remote;
+    recoveredMutation = await reconcileRemoteMutation(
+      sandbox,
+      state,
+      options.reconcileTimeoutMs ?? DEFAULT_RECONCILE_TIMEOUT_MS,
+    );
     await options.store.save({
       ...state,
-      activeMutation: remote,
+      activeMutation: recoveredMutation,
     });
   }
 
@@ -757,6 +778,90 @@ export async function recoverE2bTaskSession(
           "Failed to resume the recovered E2B task session.",
           { cause: error },
         );
+  }
+}
+
+async function reconcileRemoteMutation(
+  sandbox: E2bSandbox,
+  state: E2bSessionRecoveryState,
+  timeoutMs: number,
+): Promise<MutationRecord> {
+  const active = state.activeMutation;
+  if (!active) {
+    throw new E2bTaskSessionError(
+      "Mutation reconciliation requires an active host record.",
+    );
+  }
+  if (!Number.isInteger(timeoutMs) || timeoutMs < 0) {
+    throw new E2bTaskSessionError(
+      "Mutation reconciliation timeout must be a non-negative integer.",
+    );
+  }
+  const deadline = Date.now() + timeoutMs;
+
+  while (true) {
+    let serialized: string | undefined;
+    try {
+      serialized = await sandbox.readText(REMOTE_MUTATION_JOURNAL_PATH);
+    } catch (error) {
+      if (Date.now() >= deadline) {
+        throw new MutationRecoveryBlockedError(
+          `Mutation ${active.operationId} has no readable sandbox journal result.`,
+          {
+            sandboxId: state.sandboxId,
+            operationId: active.operationId,
+            cause: error,
+          },
+        );
+      }
+    }
+
+    if (serialized !== undefined) {
+      let remoteState;
+      try {
+        remoteState = mutationJournalStateSchema.parse(
+          JSON.parse(serialized),
+        );
+      } catch (error) {
+        throw new MutationRecoveryBlockedError(
+          `Mutation ${active.operationId} has an invalid sandbox journal result.`,
+          {
+            sandboxId: state.sandboxId,
+            operationId: active.operationId,
+            cause: error,
+          },
+        );
+      }
+      const remote = remoteState.active;
+      if (
+        !remote ||
+        remote.operationId !== active.operationId ||
+        remote.toolName !== active.toolName ||
+        remote.inputHash !== active.inputHash
+      ) {
+        throw new MutationRecoveryBlockedError(
+          `Mutation ${active.operationId} does not match the sandbox journal.`,
+          {
+            sandboxId: state.sandboxId,
+            operationId: active.operationId,
+          },
+        );
+      }
+      if (remote.status === "completed" && remote.result) {
+        return remote;
+      }
+      if (Date.now() >= deadline) {
+        throw new MutationRecoveryBlockedError(
+          `Mutation ${remote.operationId} is still in flight; refusing to replay it.`,
+          {
+            sandboxId: state.sandboxId,
+            operationId: remote.operationId,
+          },
+        );
+      }
+    }
+
+    await Bun.sleep(Math.min(RECONCILE_POLL_MS, Math.max(1, deadline - Date.now())));
   }
 }
 

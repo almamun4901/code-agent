@@ -250,6 +250,7 @@ class FakeClient {
   closeError: unknown;
   callError: unknown;
   calls: ModelToolRequest[] = [];
+  callGate: Promise<void> | undefined;
   result: ToolResult = {
     success: true,
     output: "ok",
@@ -269,6 +270,7 @@ class FakeClient {
 
   async call(request: ModelToolRequest): Promise<ToolResult> {
     this.calls.push(request);
+    await this.callGate;
     if (this.callError) throw this.callError;
     return this.result;
   }
@@ -510,7 +512,7 @@ describe("E2B task session", () => {
 
     await expect(
       recoverE2bTaskSession(
-        { runIdentity, store },
+        { runIdentity, store, reconcileTimeoutMs: 0 },
         {
           sandboxFactory: setup.factory,
           connectClient: async () =>
@@ -520,5 +522,80 @@ describe("E2B task session", () => {
     ).rejects.toBeInstanceOf(MutationRecoveryBlockedError);
     expect(setup.sandbox.killCalls).toBe(0);
     expect((await store.load())?.activeMutation?.status).toBe("in_flight");
+  });
+
+  test("waits for an active call before clearing the session lease", async () => {
+    const client = new FakeClient();
+    let releaseCall!: () => void;
+    client.callGate = new Promise<void>((resolve) => {
+      releaseCall = resolve;
+    });
+    const setup = await sessionFixture({ client });
+    const store = new MemoryE2bSessionRecoveryStore();
+    const session = await setup.create({
+      recovery: { runIdentity: "close-order-run", store },
+    });
+    const call = session.call({
+      name: "run_shell",
+      input: { cwd: ".", command: "printf complete" },
+    });
+    await Bun.sleep(10);
+    const close = session.close();
+    await Bun.sleep(10);
+
+    expect(client.closeCalls).toBe(0);
+    expect(setup.sandbox.killCalls).toBe(0);
+    releaseCall();
+    await call;
+    await close;
+    expect(client.closeCalls).toBe(1);
+    expect(setup.sandbox.killCalls).toBe(1);
+    expect(await store.load()).toBeNull();
+    await expect(
+      session.call({
+        name: "read_file",
+        input: { path: "README.md" },
+      }),
+    ).rejects.toThrow("closing or closed");
+  });
+
+  test("requires terminal reconciliation before closing an ambiguous mutation", async () => {
+    const client = new FakeClient();
+    client.callError = new Error("transport disconnected");
+    const setup = await sessionFixture({ client });
+    const store = new MemoryE2bSessionRecoveryStore();
+    const session = await setup.create({
+      recovery: { runIdentity: "cancel-reconcile-run", store },
+    });
+    await expect(
+      session.call({
+        name: "run_shell",
+        input: { cwd: ".", command: "printf maybe" },
+      }),
+    ).rejects.toThrow("transport disconnected");
+    const active = (await store.load())?.activeMutation;
+    expect(active?.status).toBe("in_flight");
+
+    await expect(session.close()).rejects.toBeInstanceOf(
+      MutationRecoveryBlockedError,
+    );
+    expect(setup.sandbox.killCalls).toBe(0);
+    setup.sandbox.mutationJournal = JSON.stringify({
+      version: 1,
+      active: {
+        ...active,
+        status: "completed",
+        completedAt: new Date().toISOString(),
+        result: client.result,
+      },
+    });
+
+    expect(await session.reconcileActiveMutation(0)).toMatchObject({
+      operationId: active?.operationId,
+      status: "completed",
+    });
+    await session.close();
+    expect(setup.sandbox.killCalls).toBe(1);
+    expect(await store.load()).toBeNull();
   });
 });

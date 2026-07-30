@@ -11,6 +11,8 @@ import {
   FileMutationJournal,
   MemoryMutationJournal,
   MutationJournalError,
+  mutationInputHash,
+  mutationRecordSchema,
 } from "../src/tools/mutation-journal";
 import type { ModelToolRequest, ToolResult } from "../src/tools/contracts";
 import {
@@ -49,6 +51,44 @@ const completedResult: ToolResult = {
 };
 
 describe("mutation execution journal", () => {
+  test("hashes semantically identical inputs independently of key order", () => {
+    const first = {
+      name: "run_shell" as const,
+      input: { cwd: ".", command: "printf safe", timeoutMs: 1_000 },
+    };
+    const reordered = {
+      name: "run_shell" as const,
+      input: { timeoutMs: 1_000, command: "printf safe", cwd: "." },
+    };
+
+    expect(mutationInputHash(first)).toBe(mutationInputHash(reordered));
+  });
+
+  test("rejects contradictory in-flight and completed records", () => {
+    const base = {
+      operationId: crypto.randomUUID(),
+      toolName: "run_shell" as const,
+      inputHash: "a".repeat(64),
+      startedAt: new Date().toISOString(),
+    };
+    expect(
+      mutationRecordSchema.safeParse({
+        ...base,
+        status: "in_flight",
+        completedAt: new Date().toISOString(),
+        result: completedResult,
+      }).success,
+    ).toBe(false);
+    expect(
+      mutationRecordSchema.safeParse({
+        ...base,
+        status: "completed",
+        completedAt: null,
+        result: null,
+      }).success,
+    ).toBe(false);
+  });
+
   test("records in-flight before completion and returns the terminal replay", async () => {
     const journal = new MemoryMutationJournal();
     const operationId = crypto.randomUUID();
@@ -153,5 +193,49 @@ describe("mutation execution journal", () => {
         metadata: { code: "CANCELLED" },
       },
     });
+  });
+
+  test("serializes journal transitions with concurrent mutating requests", async () => {
+    const repo = await createTemporaryRepository();
+    repositories.push(repo);
+    const journal = new MemoryMutationJournal();
+    const server = createMcpToolServer(
+      { worktreeRoot: repo.worktreePath },
+      { mutationJournal: journal },
+    );
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    const client = await McpToolClient.connect(clientTransport);
+    clients.push(client);
+
+    const [first, second] = await Promise.all([
+      client.call(
+        {
+          name: "run_shell",
+          input: {
+            cwd: ".",
+            command: "sleep 0.05; printf 'first\\n' >> ordered.log",
+          },
+        },
+        { operationId: crypto.randomUUID() },
+      ),
+      client.call(
+        {
+          name: "run_shell",
+          input: {
+            cwd: ".",
+            command: "printf 'second\\n' >> ordered.log",
+          },
+        },
+        { operationId: crypto.randomUUID() },
+      ),
+    ]);
+
+    expect(first.success).toBe(true);
+    expect(second.success).toBe(true);
+    expect(
+      await readFile(join(repo.worktreePath, "ordered.log"), "utf8"),
+    ).toBe("first\nsecond\n");
   });
 });

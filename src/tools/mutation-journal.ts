@@ -43,7 +43,31 @@ export const mutationRecordSchema = z
     completedAt: z.string().datetime().nullable(),
     result: toolResultSchema.nullable(),
   })
-  .strict();
+  .strict()
+  .superRefine((record, context) => {
+    if (
+      record.status === "in_flight" &&
+      (record.completedAt !== null || record.result !== null)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["status"],
+        message:
+          "An in-flight mutation cannot have a completion time or result.",
+      });
+    }
+    if (
+      record.status === "completed" &&
+      (record.completedAt === null || record.result === null)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["status"],
+        message:
+          "A completed mutation requires a completion time and result.",
+      });
+    }
+  });
 
 export const mutationJournalStateSchema = z
   .object({
@@ -142,8 +166,27 @@ export class FileMutationJournal implements MutationJournal {
 
 export function mutationInputHash(call: ModelToolRequest): string {
   return createHash("sha256")
-    .update(JSON.stringify({ name: call.name, input: call.input }))
+    .update(canonicalJson({ name: call.name, input: call.input }))
     .digest("hex");
+}
+
+function canonicalJson(value: unknown): string {
+  return JSON.stringify(canonicalValue(value));
+}
+
+function canonicalValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(canonicalValue);
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value)
+        .filter(([, child]) => child !== undefined)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, child]) => [key, canonicalValue(child)]),
+    );
+  }
+  return value;
 }
 
 export async function beginMutation(

@@ -53,23 +53,24 @@ export function createMcpToolServer(
   const mutationJournal =
     options.mutationJournal ?? new MemoryMutationJournal();
   let executionTail: Promise<void> = Promise.resolve();
-  const serializedContext: DispatcherContext = {
-    ...context,
-    executionQueue: context.executionQueue ?? {
-      async run<T>(operation: () => Promise<T>): Promise<T> {
-        const previous = executionTail;
-        let release!: () => void;
-        executionTail = new Promise<void>((resolve) => {
-          release = resolve;
-        });
-        await previous;
-        try {
-          return await operation();
-        } finally {
-          release();
-        }
-      },
+  const executionQueue = context.executionQueue ?? {
+    async run<T>(operation: () => Promise<T>): Promise<T> {
+      const previous = executionTail;
+      let release!: () => void;
+      executionTail = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      await previous;
+      try {
+        return await operation();
+      } finally {
+        release();
+      }
     },
+  };
+  const dispatchContext: DispatcherContext = {
+    ...context,
+    executionQueue: undefined,
   };
   const server = new McpServer({
     name: "terminal-native-coding-agent-tools",
@@ -81,61 +82,63 @@ export function createMcpToolServer(
     meta: Record<string, unknown> | undefined,
     signal: AbortSignal,
   ): Promise<CallToolResult> {
-    const requestContext = {
-      ...serializedContext,
-      abortSignal: signal,
-    };
-    if (!isMutatingToolCall(request)) {
-      return toMcpResult(await dispatchTool(request, requestContext));
-    }
-
-    const operationId = meta?.[MUTATION_OPERATION_META_KEY];
-    if (
-      typeof operationId !== "string" ||
-      !z.string().uuid().safeParse(operationId).success
-    ) {
-      return toMcpResult(
-        finalizeToolResult(
-          false,
-          {
-            output: "Mutating MCP calls require a valid operation ID.",
-            metadata: { code: "MISSING_OPERATION_ID" },
-          },
-          {
-            codec: serializedContext.tokenCodec,
-            tokenLimit: serializedContext.tokenLimit,
-          },
-        ),
-      );
-    }
-
-    const existing = await beginMutation(
-      mutationJournal,
-      operationId,
-      request,
-    );
-    if (existing) {
-      if (existing.status === "completed" && existing.result) {
-        return toMcpResult(existing.result);
+    return executionQueue.run(async () => {
+      const requestContext = {
+        ...dispatchContext,
+        abortSignal: signal,
+      };
+      if (!isMutatingToolCall(request)) {
+        return toMcpResult(await dispatchTool(request, requestContext));
       }
-      return toMcpResult(
-        finalizeToolResult(
-          false,
-          {
-            output: `Mutation ${operationId} is still in flight and cannot be replayed.`,
-            metadata: { code: "MUTATION_IN_FLIGHT" },
-          },
-          {
-            codec: serializedContext.tokenCodec,
-            tokenLimit: serializedContext.tokenLimit,
-          },
-        ),
-      );
-    }
 
-    const result = await dispatchTool(request, requestContext);
-    await completeMutation(mutationJournal, operationId, result);
-    return toMcpResult(result);
+      const operationId = meta?.[MUTATION_OPERATION_META_KEY];
+      if (
+        typeof operationId !== "string" ||
+        !z.string().uuid().safeParse(operationId).success
+      ) {
+        return toMcpResult(
+          finalizeToolResult(
+            false,
+            {
+              output: "Mutating MCP calls require a valid operation ID.",
+              metadata: { code: "MISSING_OPERATION_ID" },
+            },
+            {
+              codec: dispatchContext.tokenCodec,
+              tokenLimit: dispatchContext.tokenLimit,
+            },
+          ),
+        );
+      }
+
+      const existing = await beginMutation(
+        mutationJournal,
+        operationId,
+        request,
+      );
+      if (existing) {
+        if (existing.status === "completed" && existing.result) {
+          return toMcpResult(existing.result);
+        }
+        return toMcpResult(
+          finalizeToolResult(
+            false,
+            {
+              output: `Mutation ${operationId} is still in flight and cannot be replayed.`,
+              metadata: { code: "MUTATION_IN_FLIGHT" },
+            },
+            {
+              codec: dispatchContext.tokenCodec,
+              tokenLimit: dispatchContext.tokenLimit,
+            },
+          ),
+        );
+      }
+
+      const result = await dispatchTool(request, requestContext);
+      await completeMutation(mutationJournal, operationId, result);
+      return toMcpResult(result);
+    });
   }
 
   server.registerTool(

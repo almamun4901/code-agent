@@ -7,20 +7,19 @@
 
 ---
 
-## Current state (updated: 2026-07-30)
+## Current state (updated: 2026-08-02)
 
-**Overall:** Steps 0–7, mutation recovery, the routed provider boundary, and
+**Overall:** Steps 0–8, mutation recovery, the routed provider boundary, and
 the host-side production runner are complete and merged. `agent run <repo>
-"<task>"` now provides responsive Ink and static non-TTY views over
-redacted, non-blocking runtime events. Cancellation aborts model, policy, and
-MCP work; reconciles mutations; closes E2B; invokes `SessionEnd` exactly once;
-and restores the terminal. Type checking, 219 offline tests, 15 focused MCP
-tests, 34 focused sandbox tests, 5 focused safety tests, and all smoke checks
-pass on merged `main`. Twenty packaged launches stayed below the two-second
-first-paint gate. The post-merge live cancellation gate completed in 5.0
-seconds and left zero E2B sandboxes. Direct Anthropic remains the default;
-OpenRouter remains implemented but is set aside until paid capacity is
-available.
+"<task>"` now runs through bounded lifecycle hooks, crash-safe paid-call
+reservations, provider-native or conservative token accounting, fixed cost
+ceilings, transactional context compaction, and checkpoint v3 recovery. Ink
+and static non-TTY views expose committed call, context, cost, and compaction
+state. Type checking, 242 offline tests, 15 focused MCP tests, 34 focused
+sandbox tests, 5 focused safety tests, and all smoke checks pass on merged
+`main`. Ten credential/resource-gated integration tests are opt-in; the
+Anthropic, OpenRouter, and E2B credentials required to run them were not
+available in this session.
 
 **Step-by-step:**
 
@@ -34,7 +33,7 @@ available.
 | 5 — Sandbox (E2B) | complete | Six remote tools, exact task worktree, host-isolation sentinel, process-loss handling, and cleanup verified on merged `main` |
 | 6 — PreToolUse safety hook | complete | Exact-root binding, two identities, symlink-safe files, offline shell, reduced Git, and red-team/live gates pass |
 | 7 — TUI (Ink) | complete | Responsive Ink/static views, packaged CLI, honest committed-plan events, safe cancellation, PTY gates, and live E2B cleanup verified on merged `main` |
-| 8 — Remaining hooks + budget | not started | — |
+| 8 — Remaining hooks + budget | complete | Eight bounded hooks, checkpoint-v3 dual ledgers, paid-call reservations, transactional compaction, recovery gates, and budget UI pass on merged `main` |
 | 9 — Telemetry | not started | — |
 | 10 — Eval + PR posting | not started | — |
 
@@ -118,6 +117,13 @@ available.
   acceptance, a read-only serialized MCP barrier proves whether the request
   reached execution. Only a provably absent remote journal becomes terminal
   `CANCELLED`; unreadable or in-flight state still fails closed. See ADR 0013.
+- Lifecycle hook authority is capability-specific: seven phases are host-owned,
+  while `PreToolUse` remains sandbox-owned after the mandatory policy. Gating
+  phases fail closed and observers aggregate bounded warnings. See ADR 0018.
+- Paid-call accounting uses a projected catalog ledger plus an observed
+  provider ledger. Every transport is reserved durably, and compaction is a
+  transactional model call whose summary is installed only after validation
+  and persistence. See ADR 0019.
 
 ---
 
@@ -875,6 +881,37 @@ available.
 - Next session should start with: Pull updated `main`, create a fresh branch
   for Step 8, and review the remaining hook registry plus turn, context, and
   dollar budget design before implementation.
+
+### 2026-08-02 — Lifecycle hooks and budget ceilings
+
+- What was done: Added all eight bounded lifecycle contracts and wired the
+  host and sandbox boundaries; introduced provider-neutral model counting and
+  normalized accounting; enforced 50-call, 200,000-context-token, and $5.00
+  projected-cost ceilings; added crash-safe call reservations, checkpoint v3,
+  transactional compaction, budget notifications, and equivalent Ink/static
+  usage views. Added ADRs 0018–0019 and opt-in live accounting gates for
+  Anthropic and OpenRouter.
+- What broke / had to be reworked: Pre-landing review found compaction recovery
+  losing historical counter baselines, Stop-denied turns failing replay
+  validation, oversized checkpoint fallbacks allowing stale in-memory
+  continuation, shutdown-reconciled mutations missing their terminal observer,
+  and terminal checkpoints incorrectly requiring the currently configured
+  provider. Each issue now has focused recovery coverage. The installed gstack
+  review bundle lacked its mandatory checklist/script, so the equivalent audit
+  was completed manually. Live provider/E2B gates could not run because their
+  credentials and template ID were absent.
+- Decisions made this session: Hook authority and failure policy are
+  capability-specific; paid-call enforcement uses projected and observed
+  ledgers; persisted limits and pricing win on resume; compaction consumes the
+  selected model's call and cost budgets and installs atomically. See ADRs
+  0018–0019.
+- Current status of the step in progress: Step 8 is complete on merged `main`.
+  Post-merge typecheck, 242 offline tests, manual preflight, sandbox-template
+  inspection, fake-loop smoke, and diff checks pass. Ten credential/resource-
+  gated integration tests remain opt-in and were skipped in this environment.
+- Next session should start with: Pull updated `main`, create a fresh branch
+  for Step 9, decide the Langfuse deployment boundary, and design telemetry as
+  an asynchronous observer over committed checkpoint-v3 state.
 
 ---
 

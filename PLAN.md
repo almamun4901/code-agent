@@ -200,6 +200,6 @@ order above.
 | 5 — Sandbox (E2B)             | complete                                              |
 | 6 — PreToolUse safety hook    | complete                                              |
 | 7 — TUI (Ink)                 | complete                                              |
-| 8 — Remaining hooks + budget  | not started                                           |
+| 8 — Remaining hooks + budget  | complete                                              |
 | 9 — Telemetry                 | not started                                           |
 | 10 — Eval + PR posting        | not started                                           |

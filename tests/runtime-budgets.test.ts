@@ -2,8 +2,8 @@ import { describe, expect, test } from "bun:test";
 import type { ModelRequest, ModelRuntime, ModelTurn, TokenEstimate } from "../src/model/contracts";
 import { catalogCostMicroUsd, pricingFor } from "../src/model/runtime";
 import { LifecycleHooks } from "../src/runtime/lifecycle";
-import { decodeProductionCheckpoint, MemoryProductionCheckpointStore, productionCheckpointBytes } from "../src/runtime/checkpoint";
-import { prepareProductionLifecycle, runProductionLoop } from "../src/runtime/production-loop";
+import { decodeProductionCheckpoint, MemoryProductionCheckpointStore, ProductionCheckpointBudgetError, productionCheckpointBytes } from "../src/runtime/checkpoint";
+import { commitReconciledProductionMutation, prepareProductionLifecycle, runProductionLoop } from "../src/runtime/production-loop";
 import { startAgentRun } from "../src/runtime/agent-runner";
 import type { ProductionAgentState } from "../src/runtime/schema";
 
@@ -129,6 +129,38 @@ describe("production lifecycle budgets", () => {
     expect(JSON.stringify(state?.transcript)).toContain("Compaction 1");
   });
 
+  test("recovers a completed checkpoint whose compaction removed earlier turns", async () => {
+    const counts = [10, 10, 100, 100, 10, 10];
+    const store = new MemoryProductionCheckpointStore();
+    await runProductionLoop({
+      ...prepared,
+      modelRuntime: runtimeFor([
+        agentTurn([["work", "Work", "in_progress"]], action("read", "read_file", { path: "README.md" })),
+        summaryTurn(),
+        agentTurn([["work", "Work", "completed"]]),
+      ], () => counts.shift() ?? 10),
+      checkpointStore: store,
+      session: session(),
+      budgetLimits: { compactAtTokens: 100, maxContextTokens: 200, maxModelCalls: 5 },
+    });
+    const resumed = runtimeFor([]);
+    await expect(runProductionLoop({ ...prepared, modelRuntime: resumed, checkpointStore: store, session: session() })).resolves.toMatchObject({ status: "completed", toolCalls: 1 });
+    expect(resumed.calls()).toBe(0);
+  });
+
+  test("persists invalid compaction output as a terminal failure", async () => {
+    const store = new MemoryProductionCheckpointStore();
+    const invalidSummary: ModelTurn = { content: [{ type: "text", text: "not json" }], stopReason: "end_turn", usage: { inputTokens: 1, outputTokens: 1 } };
+    await expect(runProductionLoop({
+      ...prepared,
+      modelRuntime: runtimeFor([invalidSummary], () => 100),
+      checkpointStore: store,
+      session: session(),
+      budgetLimits: { compactAtTokens: 100, maxContextTokens: 200 },
+    })).rejects.toThrow("invalid JSON");
+    expect(await store.load()).toMatchObject({ lifecycle: "failed", terminalCode: "COMPACTION_INVALID" });
+  });
+
   test("persists an ambiguous reservation and never replays it", async () => {
     const store = new MemoryProductionCheckpointStore();
     const failedRuntime = runtimeFor([], () => 10, new Error("connection lost"));
@@ -214,6 +246,25 @@ describe("production lifecycle budgets", () => {
       session: session(),
     });
     expect((await store.load())?.counters).toMatchObject({ modelCalls: 3, agentCalls: 3, stopRejections: 1, committedTurns: 3, planRewrites: 2 });
+    const resumed = runtimeFor([]);
+    await expect(runProductionLoop({ ...prepared, modelRuntime: resumed, checkpointStore: store, session: session() })).resolves.toMatchObject({ status: "completed" });
+    expect(resumed.calls()).toBe(0);
+  });
+
+  test("rejects a resumed runtime whose identity differs from persisted pricing", async () => {
+    const store = new MemoryProductionCheckpointStore();
+    const first = runtimeFor([agentTurn([["work", "Work", "in_progress"]])]);
+    await expect(runProductionLoop({ ...prepared, modelRuntime: first, checkpointStore: store, session: session(), budgetLimits: { maxModelCalls: 1 } })).rejects.toMatchObject({ code: "MODEL_CALL_LIMIT" });
+    const state = await store.load();
+    if (!state) throw new Error("Expected checkpoint.");
+    state.lifecycle = "running";
+    state.terminalCode = null;
+    state.terminalError = null;
+    await store.save(state);
+    const changed = runtimeFor([]);
+    changed.identity = { provider: "anthropic", model: "claude-haiku-4-5" };
+    await expect(runProductionLoop({ ...prepared, modelRuntime: changed, checkpointStore: store, session: session() })).rejects.toThrow("does not match runtime");
+    expect(changed.calls()).toBe(0);
   });
 
   test("PostToolUse observes one terminal outcome with redacted input", async () => {
@@ -233,15 +284,62 @@ describe("production lifecycle budgets", () => {
     expect(observed[0]).toMatchObject({ toolName: "read_file", summary: "README.md", outcome: "succeeded" });
   });
 
+  test("commits a shutdown-reconciled mutation and invokes PostToolUse once", async () => {
+    const store = new MemoryProductionCheckpointStore();
+    const hooks = new LifecycleHooks();
+    const observed: unknown[] = [];
+    hooks.register("PostToolUse", (context) => { observed.push(context); });
+    await expect(runProductionLoop({
+      ...prepared,
+      hooks,
+      modelRuntime: runtimeFor([
+        agentTurn([["work", "Work", "in_progress"]], action("edit", "edit_file", { path: "README.md", mode: "apply", oldText: "a", newText: "b" })),
+      ]),
+      checkpointStore: store,
+      session: { async call() { throw new DOMException("cancelled", "AbortError"); } },
+    })).rejects.toThrow("cancelled");
+    const operationId = (await store.load())?.pendingTurn?.action?.operationId;
+    if (!operationId) throw new Error("Expected pending mutation.");
+    const mutation = {
+      operationId,
+      toolName: "edit_file" as const,
+      inputHash: "b".repeat(64),
+      status: "completed" as const,
+      startedAt: new Date(0).toISOString(),
+      completedAt: new Date(1).toISOString(),
+      result: { success: true, output: "applied", truncated: false, originalTokenCount: 1, codec: "test" },
+    };
+    await expect(commitReconciledProductionMutation({ checkpointStore: store, mutation, hooks })).resolves.toBe(true);
+    await expect(commitReconciledProductionMutation({ checkpointStore: store, mutation, hooks })).resolves.toBe(false);
+    expect(observed).toHaveLength(1);
+    expect(await store.load()).toMatchObject({ pendingTurn: null, counters: { toolCalls: 1, committedTurns: 1 } });
+  });
+
   test("falls back to a replay-safe terminal checkpoint at the byte ceiling", async () => {
     const store = new MemoryProductionCheckpointStore();
     const state = baseState();
     state.transcript.push({ role: "user", content: "界".repeat(10_000) });
     state.limits.maxCheckpointBytes = 4_096;
-    await store.save(state);
+    await expect(store.save(state)).rejects.toBeInstanceOf(ProductionCheckpointBudgetError);
     const saved = await store.load();
     expect(saved).toMatchObject({ lifecycle: "failed", terminalCode: "CHECKPOINT_BUDGET_EXCEEDED", pendingModelCall: null, pendingTurn: null });
     expect(productionCheckpointBytes(saved!)).toBeLessThanOrEqual(4_096);
+  });
+
+  test("does not continue after persisting an oversized response fallback", async () => {
+    const oversized = agentTurn([["work", "Work", "in_progress"]]);
+    oversized.content.unshift({ type: "text", text: "界".repeat(10_000) });
+    const runtime = runtimeFor([oversized]);
+    const store = new MemoryProductionCheckpointStore();
+    await expect(runProductionLoop({
+      ...prepared,
+      modelRuntime: runtime,
+      checkpointStore: store,
+      session: session(),
+      budgetLimits: { maxCheckpointBytes: 4_096 },
+    })).rejects.toBeInstanceOf(ProductionCheckpointBudgetError);
+    expect(runtime.calls()).toBe(1);
+    expect(await store.load()).toMatchObject({ lifecycle: "failed", terminalCode: "CHECKPOINT_BUDGET_EXCEEDED" });
   });
 
   test("migrates only empty v2 checkpoints and refuses invented historical pricing", () => {
@@ -309,7 +407,7 @@ function baseState(): ProductionAgentState {
     version: 3, ...prepared, promptStatus: "accepted", appendedPromptContext: "", lifecycle: "running", plan: [], transcript: [{ role: "user", content: "Complete the following repository task:\nImplement safely\n\nFirst create a concrete plan, then perform one safe action per turn." }], lastToolSucceeded: null, pendingTurn: null, pendingModelCall: null,
     limits: { maxModelCalls: 50, compactAtTokens: 150_000, maxContextTokens: 200_000, maxProjectedCostMicroUsd: 5_000_000, compactAtCheckpointBytes: 1_572_864, maxCheckpointBytes: 2 * 1024 * 1024 },
     pricing: { catalogVersion: 1, identity: { provider: "injected", model: "claude-haiku-4-5" }, inputRateMicroUsdPerMillion: 1_000_000, outputRateMicroUsdPerMillion: 5_000_000 },
-    context: { lastEstimateTokens: 0, estimateSource: null, requestFingerprint: null }, cost: { projectedMicroUsd: 0, observedMicroUsd: 0, observedAvailable: false, driftMicroUsd: 0 }, compaction: { count: 0, lastPreTokens: 0, lastPostTokens: 0 }, notificationKeys: [], lastNotification: null,
+    context: { lastEstimateTokens: 0, estimateSource: null, requestFingerprint: null }, cost: { projectedMicroUsd: 0, observedMicroUsd: 0, observedAvailable: false, driftMicroUsd: 0 }, compaction: { count: 0, lastPreTokens: 0, lastPostTokens: 0, baselineCommittedTurns: 0, baselineProtocolRetries: 0, baselineToolCalls: 0, baselinePlanRewrites: 0, baselineStopRejections: 0 }, notificationKeys: [], lastNotification: null,
     counters: { modelTurns: 0, modelCalls: 0, agentCalls: 0, compactionCalls: 0, stopRejections: 0, committedTurns: 0, protocolRetries: 0, toolCalls: 0, planRewrites: 0, inputTokens: 0, outputTokens: 0 }, consecutiveInvalidAttempts: 0, terminalCode: null, terminalError: null, lastToolResult: null,
   };
 }

@@ -20,6 +20,7 @@ import {
 import {
   runProductionLoop,
   prepareProductionLifecycle,
+  commitReconciledProductionMutation,
   type ProductionLoopResult,
 } from "./production-loop";
 import { LifecycleHooks } from "./lifecycle";
@@ -157,6 +158,7 @@ export async function runHeadlessAgent(
 ): Promise<ProductionLoopResult> {
   const events = createAgentEventPublisher(options.eventSink);
   let started = false;
+  let hooksStarted = false;
   let shutdown = false;
   const beginShutdown = (reason: SessionEndContext["reason"]) => {
     if (shutdown) return;
@@ -166,8 +168,9 @@ export async function runHeadlessAgent(
   const execution = await executeAgentRun(
     options,
     events,
-    () => {
-      started = true;
+    (event) => {
+      if (event === "run_started") started = true;
+      if (event === "hooks_started") hooksStarted = true;
     },
     beginShutdown,
   );
@@ -178,7 +181,7 @@ export async function runHeadlessAgent(
       options.signal?.aborted ? "ui" : undefined,
     );
   beginShutdown(reason);
-  if (started && options.hooks) {
+  if (hooksStarted && options.hooks) {
     try {
       await options.hooks.runSessionEnd({
         reason,
@@ -227,6 +230,7 @@ export function startAgentRun(
   const events = createAgentEventPublisher(options.eventSink);
   let stopReason: "sigint" | "ui" | "runtime" | undefined;
   let runStarted = false;
+  let hooksStarted = false;
   let shutdownReason:
     | SessionEndContext["reason"]
     | undefined;
@@ -269,6 +273,7 @@ export function startAgentRun(
           });
         }
       }
+      if (event === "hooks_started") hooksStarted = true;
     },
     beginShutdown,
   );
@@ -308,7 +313,7 @@ export function startAgentRun(
         ]);
       }
     }
-    if (runStarted && options.hooks) {
+    if (hooksStarted && options.hooks) {
       try {
         await options.hooks.runSessionEnd(context);
       } catch (error) {
@@ -367,7 +372,7 @@ type ExecutionResult = {
 async function executeAgentRun(
   options: HeadlessAgentRunOptions,
   events: AgentEventPublisher,
-  lifecycleEvent: (event: "run_started") => void,
+  lifecycleEvent: (event: "run_started" | "hooks_started") => void,
   beginShutdown: (
     reason: SessionEndContext["reason"],
   ) => void = () => {},
@@ -392,8 +397,9 @@ async function executeAgentRun(
   let result: ProductionLoopResult | undefined;
   let runError: unknown;
   let cleanupError: unknown;
+  let checkpointStore: ProductionCheckpointStore | undefined;
   try {
-    const checkpointStore =
+    checkpointStore =
       options.checkpointStore ??
       new FileProductionCheckpointStore(prepared.canonicalRepoPath);
     const existing = await checkpointStore.load();
@@ -422,6 +428,7 @@ async function executeAgentRun(
       checkpointStore,
       modelRuntime,
       hooks: options.hooks,
+      onSessionStart: () => lifecycleEvent("hooks_started"),
       ...(options.maxModelTurns === undefined ? {} : { budgetLimits: { maxModelCalls: options.maxModelTurns } }),
     });
     const preparedState = await checkpointStore.load();
@@ -483,7 +490,15 @@ async function executeAgentRun(
   if (session) {
     const cleanupErrors: unknown[] = [];
     try {
-      await session.reconcileActiveMutation();
+      const mutation = await session.reconcileActiveMutation();
+      if (mutation && checkpointStore) {
+        await commitReconciledProductionMutation({
+          checkpointStore,
+          mutation,
+          hooks: options.hooks,
+          events,
+        });
+      }
     } catch (error) {
       cleanupErrors.push(error);
     }

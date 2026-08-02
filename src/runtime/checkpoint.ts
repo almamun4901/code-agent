@@ -32,6 +32,13 @@ export class ProductionCheckpointError extends Error {
   }
 }
 
+export class ProductionCheckpointBudgetError extends ProductionCheckpointError {
+  constructor() {
+    super("Checkpoint exceeded its durable byte budget; a replay-safe terminal checkpoint was saved.");
+    this.name = "ProductionCheckpointBudgetError";
+  }
+}
+
 export class FileProductionCheckpointStore
   implements ProductionCheckpointStore
 {
@@ -82,7 +89,8 @@ export class FileProductionCheckpointStore
   }
 
   async save(state: ProductionAgentState): Promise<void> {
-    const validated = boundedCheckpoint(ProductionAgentStateSchema.parse(state));
+    const bounded = boundedCheckpoint(ProductionAgentStateSchema.parse(state));
+    const validated = bounded.state;
     const serialized = `${JSON.stringify(validated, null, 2)}\n`;
     if (new TextEncoder().encode(serialized).byteLength > MAX_STATE_BYTES) {
       throw new ProductionCheckpointError(
@@ -122,6 +130,7 @@ export class FileProductionCheckpointStore
         { cause: error },
       );
     }
+    if (bounded.usedFallback) throw new ProductionCheckpointBudgetError();
   }
 
   private async prepareDirectory(create: boolean): Promise<boolean> {
@@ -197,9 +206,11 @@ export class MemoryProductionCheckpointStore
   }
 
   async save(state: ProductionAgentState): Promise<void> {
-    this.#state = boundedCheckpoint(
+    const bounded = boundedCheckpoint(
       ProductionAgentStateSchema.parse(structuredClone(state)),
     );
+    this.#state = bounded.state;
+    if (bounded.usedFallback) throw new ProductionCheckpointBudgetError();
   }
 }
 
@@ -207,8 +218,13 @@ export function productionCheckpointBytes(state: ProductionAgentState): number {
   return new TextEncoder().encode(`${JSON.stringify(state, null, 2)}\n`).byteLength;
 }
 
-function boundedCheckpoint(state: ProductionAgentState): ProductionAgentState {
-  if (productionCheckpointBytes(state) <= state.limits.maxCheckpointBytes) return state;
+function boundedCheckpoint(state: ProductionAgentState): {
+  state: ProductionAgentState;
+  usedFallback: boolean;
+} {
+  if (productionCheckpointBytes(state) <= state.limits.maxCheckpointBytes) {
+    return { state, usedFallback: false };
+  }
   const first = state.transcript[0];
   const canonical = first?.role === "user" && typeof first.content === "string"
     ? first
@@ -231,7 +247,7 @@ function boundedCheckpoint(state: ProductionAgentState): ProductionAgentState {
   if (productionCheckpointBytes(validated) > state.limits.maxCheckpointBytes) {
     throw new ProductionCheckpointError("Bounded terminal checkpoint still exceeds its configured byte limit.");
   }
-  return validated;
+  return { state: validated, usedFallback: true };
 }
 
 export function decodeProductionCheckpoint(value: unknown): ProductionAgentState {
@@ -264,7 +280,7 @@ export function decodeProductionCheckpoint(value: unknown): ProductionAgentState
     },
     context: { lastEstimateTokens: 0, estimateSource: null, requestFingerprint: null },
     cost: { projectedMicroUsd: 0, observedMicroUsd: 0, observedAvailable: false, driftMicroUsd: 0 },
-    compaction: { count: 0, lastPreTokens: 0, lastPostTokens: 0 },
+    compaction: { count: 0, lastPreTokens: 0, lastPostTokens: 0, baselineCommittedTurns: 0, baselineProtocolRetries: 0, baselineToolCalls: 0, baselinePlanRewrites: 0, baselineStopRejections: 0 },
     notificationKeys: [],
     lastNotification: null,
     counters: {

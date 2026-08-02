@@ -19,6 +19,7 @@ import {
   type TodoItem,
 } from "../plan/schema";
 import type { E2bTaskSession } from "../sandbox/e2b-session";
+import type { MutationRecord } from "../tools/mutation-journal";
 import { toolResultWireSchema } from "../mcp/schemas";
 import type { ModelToolRequest } from "../tools/contracts";
 import { validateToolCall } from "../tools/validate-call";
@@ -214,6 +215,7 @@ export async function runProductionLoop(
     );
   }
   if (state.lifecycle === "completed") return toResult(state);
+  assertRuntimeMatchesPricing(state, runtime);
 
   while (state.lifecycle === "running") {
     throwIfAborted(options.signal);
@@ -306,13 +308,18 @@ export async function prepareProductionLifecycle(options: {
   modelRuntime: ModelRuntime;
   hooks?: LifecycleHooks;
   budgetLimits?: Partial<BudgetLimits>;
+  onSessionStart?: () => void;
 }): Promise<ProductionAgentState> {
   const existing = await options.checkpointStore.load();
   const limits = { ...DEFAULT_BUDGET_LIMITS, ...(options.budgetLimits ?? {}) };
   const pricing = existing?.pricing ?? pricingFor(options.modelRuntime.identity);
   let state = existing ?? createBootstrapState(options, limits, pricing);
+  if (state.lifecycle === "running") {
+    assertRuntimeMatchesPricing(state, options.modelRuntime);
+  }
   if (!existing) await options.checkpointStore.save(state);
   if (options.hooks) {
+    options.onSessionStart?.();
     try {
       await options.hooks.runGating("SessionStart", {
         mode: existing ? "resumed" : "fresh",
@@ -360,6 +367,35 @@ export async function prepareProductionLifecycle(options: {
   return state;
 }
 
+export async function commitReconciledProductionMutation(options: {
+  checkpointStore: ProductionCheckpointStore;
+  mutation: MutationRecord;
+  hooks?: LifecycleHooks;
+  events?: AgentEventPublisher;
+}): Promise<boolean> {
+  const state = await options.checkpointStore.load();
+  if (
+    !state ||
+    state.lifecycle !== "running" ||
+    !state.pendingTurn?.action ||
+    state.pendingTurn.action.operationId !== options.mutation.operationId ||
+    options.mutation.status !== "completed" ||
+    !options.mutation.result
+  ) {
+    return false;
+  }
+  await commitPendingTurn(state, state.pendingTurn, {
+    canonicalRepoPath: state.canonicalRepoPath,
+    task: state.task,
+    runIdentity: state.runIdentity,
+    session: { async call() { return options.mutation.result!; } },
+    checkpointStore: options.checkpointStore,
+    hooks: options.hooks,
+    events: options.events,
+  });
+  return true;
+}
+
 function createBootstrapState(
   options: { canonicalRepoPath: string; task: string; runIdentity: string },
   limits: ProductionAgentState["limits"],
@@ -382,7 +418,7 @@ function createBootstrapState(
     pricing,
     context: { lastEstimateTokens: 0, estimateSource: null, requestFingerprint: null },
     cost: { projectedMicroUsd: 0, observedMicroUsd: 0, observedAvailable: false, driftMicroUsd: 0 },
-    compaction: { count: 0, lastPreTokens: 0, lastPostTokens: 0 },
+    compaction: { count: 0, lastPreTokens: 0, lastPostTokens: 0, baselineCommittedTurns: 0, baselineProtocolRetries: 0, baselineToolCalls: 0, baselinePlanRewrites: 0, baselineStopRejections: 0 },
     notificationKeys: [],
     lastNotification: null,
     counters: { modelTurns: 0, modelCalls: 0, agentCalls: 0, compactionCalls: 0, stopRejections: 0, committedTurns: 0, protocolRetries: 0, toolCalls: 0, planRewrites: 0, inputTokens: 0, outputTokens: 0 },
@@ -553,14 +589,25 @@ async function maybeCompact(
     const failed = await failState(state, "MODEL_CALL_LIMIT", "Compaction requires two remaining paid model calls.", options);
     throw new ProductionLoopLimitError(failed.terminalError!, "MODEL_CALL_LIMIT");
   }
-  const hookContext = options.hooks
-    ? await options.hooks.runGating("PreCompact", {
-        runIdentity: state.runIdentity,
-        contextTokens: estimate.tokens,
-        checkpointBytes,
-        compactionNumber: state.compaction.count + 1,
-      })
-    : { appendedContext: "" };
+  let hookContext: { appendedContext: string };
+  try {
+    hookContext = options.hooks
+      ? await options.hooks.runGating("PreCompact", {
+          runIdentity: state.runIdentity,
+          contextTokens: estimate.tokens,
+          checkpointBytes,
+          compactionNumber: state.compaction.count + 1,
+        })
+      : { appendedContext: "" };
+  } catch (error) {
+    await failState(
+      state,
+      error instanceof LifecycleHookError ? error.code : "HOOK_FAILED",
+      error instanceof Error ? error.message : "PreCompact failed.",
+      options,
+    );
+    throw error;
+  }
   state = await recordNotification(state, undefined, options, {
     kind: "compaction",
     code: "COMPACTION_STARTED",
@@ -600,7 +647,18 @@ async function installCompactionResponse(
   if (!pending || pending.kind !== "compaction" || !pending.response) {
     throw new ProductionTurnProtocolError("Compaction response was not staged.");
   }
-  const summary = pending.response.summary ?? parseCompactionSummary(turn);
+  let summary: CompactionSummary;
+  try {
+    summary = pending.response.summary ?? parseCompactionSummary(turn);
+  } catch (error) {
+    await failState(
+      state,
+      "COMPACTION_INVALID",
+      error instanceof Error ? error.message : "Compaction summary was invalid.",
+      options,
+    );
+    throw error;
+  }
   if (!state.pendingModelCall?.response) throw new ProductionTurnProtocolError("Compaction response was not staged.");
   state = {
     ...state,
@@ -621,7 +679,16 @@ async function installCompactionResponse(
     ...candidate,
     pendingModelCall: null,
     context: { lastEstimateTokens: post.tokens, estimateSource: post.source, requestFingerprint: post.fingerprint ?? null },
-    compaction: { count: state.compaction.count + 1, lastPreTokens: pending.sourceContextTokens ?? pending.inputEstimate, lastPostTokens: post.tokens },
+    compaction: {
+      count: state.compaction.count + 1,
+      lastPreTokens: pending.sourceContextTokens ?? pending.inputEstimate,
+      lastPostTokens: post.tokens,
+      baselineCommittedTurns: state.counters.committedTurns,
+      baselineProtocolRetries: state.counters.protocolRetries,
+      baselineToolCalls: state.counters.toolCalls,
+      baselinePlanRewrites: state.counters.planRewrites,
+      baselineStopRejections: state.counters.stopRejections,
+    },
   };
   await options.checkpointStore.save(state);
   state = await recordNotification(state, undefined, options, {
@@ -712,12 +779,33 @@ async function notify(state: ProductionAgentState, options: ProductionLoopOption
   title: string;
   message: string;
 }): Promise<void> {
-  if (options.hooks) await options.hooks.runObservers("Notification", context as never);
+  if (options.hooks) {
+    const warnings = await options.hooks.runObservers("Notification", context as never);
+    for (const warning of warnings) {
+      options.events?.emit({
+        type: "notification",
+        notification: {
+          kind: "warning",
+          code: warning.code,
+          title: `${warning.hook} warning`,
+          message: warning.message,
+        },
+      });
+    }
+  }
   options.events?.emit({ type: "notification", notification: context });
 }
 
 function sameIdentity(actual: ModelTurn["actualIdentity"], expected: ProductionAgentState["pricing"]["identity"]): boolean {
   return Boolean(actual && actual.provider === expected.provider && actual.model === expected.model);
+}
+
+function assertRuntimeMatchesPricing(state: ProductionAgentState, runtime: ModelRuntime): void {
+  if (!sameIdentity(runtime.identity, state.pricing.identity)) {
+    throw new ProductionTurnProtocolError(
+      `Checkpoint pricing identity ${state.pricing.identity.provider}:${state.pricing.identity.model} does not match runtime ${runtime.identity.provider}:${runtime.identity.model}.`,
+    );
+  }
 }
 
 function budgetSnapshot(state: ProductionAgentState): LifecycleBudgetSnapshot {
@@ -752,10 +840,15 @@ async function commitPendingTurn(
   let lastToolSucceeded: boolean | null = null;
   let lastToolResult: ProductionAgentState["lastToolResult"] = null;
   let toolIncrement = 0;
+  let toolDurationMs = 0;
+  let postToolSummary = "repository action";
+  let postToolName: ModelToolRequest["name"] | null = null;
 
   if (pending.action) {
     throwIfAborted(options.signal);
     const request = validateToolCall(pending.action.request);
+    postToolName = request.name;
+    postToolSummary = safeToolSummary(request);
     const now = options.now ?? (() => performance.now());
     const startedAt = now();
     options.events?.emit({
@@ -770,24 +863,13 @@ async function commitPendingTurn(
         operationId: pending.action.operationId,
         ...(options.signal ? { signal: options.signal } : {}),
       });
+      toolDurationMs = Math.max(0, now() - startedAt);
       options.events?.emit({
         type: "tool_finished",
         operationId: pending.action.operationId,
-        durationMs: Math.max(0, now() - startedAt),
+        durationMs: toolDurationMs,
         outcome: toolOutcome(rawResult),
       });
-      if (options.hooks) {
-        const warnings = await options.hooks.runObservers("PostToolUse", {
-          operationId: pending.action.operationId,
-          toolName: request.name,
-          summary: safeToolSummary(request),
-          durationMs: Math.max(0, now() - startedAt),
-          outcome: toolOutcome(rawResult),
-        });
-        for (const warning of warnings) {
-          options.events?.emit({ type: "notification", notification: { kind: "warning", code: warning.code, title: `${warning.hook} warning`, message: warning.message } });
-        }
-      }
     } catch (error) {
       const outcome = options.signal?.aborted || isAbortError(error) ? "cancelled" : "failed";
       options.events?.emit({
@@ -868,6 +950,12 @@ async function commitPendingTurn(
         await notify(rejected, options, { kind: "lifecycle", code: "STOP_REJECTED", title: "Completion rejected", message: error.message });
         return rejected;
       }
+      await failState(
+        state,
+        error instanceof LifecycleHookError ? error.code : "HOOK_FAILED",
+        error instanceof Error ? error.message : "Stop hook failed.",
+        options,
+      );
       throw error;
     }
   }
@@ -894,6 +982,18 @@ async function commitPendingTurn(
     },
   };
   await options.checkpointStore.save(next);
+  if (pending.action && postToolName && options.hooks) {
+    const warnings = await options.hooks.runObservers("PostToolUse", {
+      operationId: pending.action.operationId,
+      toolName: postToolName,
+      summary: postToolSummary,
+      durationMs: toolDurationMs,
+      outcome: lastToolResult ? toolOutcome(lastToolResult) : "failed",
+    });
+    for (const warning of warnings) {
+      options.events?.emit({ type: "notification", notification: { kind: "warning", code: warning.code, title: `${warning.hook} warning`, message: warning.message } });
+    }
+  }
   options.events?.emit({
     type: "plan_committed",
     plan: next.plan,
@@ -1111,7 +1211,7 @@ async function initializeState(
     pricing,
     context: { lastEstimateTokens: 0, estimateSource: null, requestFingerprint: null },
     cost: { projectedMicroUsd: 0, observedMicroUsd: 0, observedAvailable: false, driftMicroUsd: 0 },
-    compaction: { count: 0, lastPreTokens: 0, lastPostTokens: 0 },
+    compaction: { count: 0, lastPreTokens: 0, lastPostTokens: 0, baselineCommittedTurns: 0, baselineProtocolRetries: 0, baselineToolCalls: 0, baselinePlanRewrites: 0, baselineStopRejections: 0 },
     notificationKeys: [],
     lastNotification: null,
     counters: {
@@ -1234,6 +1334,7 @@ function validateRecoveredTranscript(state: ProductionAgentState): void {
   let protocolRetries = 0;
   let toolCalls = 0;
   let planRewrites = 0;
+  let stopRejections = 0;
 
   for (let index = 1; index < state.transcript.length; index += 1) {
     const message = state.transcript[index];
@@ -1247,9 +1348,15 @@ function validateRecoveredTranscript(state: ProductionAgentState): void {
         continue;
       }
       if (message.content.startsWith("Compaction ")) {
-        historicalPlan = state.plan;
-        historicalToolSucceeded = state.lastToolSucceeded;
-        historicalToolResult = state.lastToolResult;
+        const compacted = parseCompactionTranscriptContext(message.content);
+        historicalPlan = compacted.plan;
+        historicalToolResult = compacted.lastToolResult;
+        historicalToolSucceeded = compacted.lastToolResult?.success ?? null;
+        committedTurns = state.compaction.baselineCommittedTurns;
+        protocolRetries = state.compaction.baselineProtocolRetries;
+        toolCalls = state.compaction.baselineToolCalls;
+        planRewrites = state.compaction.baselinePlanRewrites;
+        stopRejections = state.compaction.baselineStopRejections;
         continue;
       }
       if (
@@ -1316,6 +1423,18 @@ function validateRecoveredTranscript(state: ProductionAgentState): void {
     if (validated.planToolId) {
       const planResult = results[resultIndex++];
       if (
+        planResult &&
+        planResult.isError === true &&
+        isRejectedStopResult(planResult.content) &&
+        validated.action === null &&
+        validated.plan.every((task) => task.status === "completed")
+      ) {
+        committedTurns += 1;
+        stopRejections += 1;
+        index += 1;
+        continue;
+      }
+      if (
         !planResult ||
         planResult.isError === true ||
         !isAcceptedPlanResult(planResult.content)
@@ -1368,6 +1487,7 @@ function validateRecoveredTranscript(state: ProductionAgentState): void {
     protocolRetries !== state.counters.protocolRetries ||
     toolCalls !== state.counters.toolCalls ||
     planRewrites !== state.counters.planRewrites ||
+    stopRejections !== state.counters.stopRejections ||
     JSON.stringify(historicalPlan) !== JSON.stringify(state.plan) ||
     historicalToolSucceeded !== state.lastToolSucceeded ||
     JSON.stringify(historicalToolResult) !==
@@ -1376,6 +1496,40 @@ function validateRecoveredTranscript(state: ProductionAgentState): void {
     throw new ProductionTurnProtocolError(
       "Checkpoint transcript does not match its committed state.",
     );
+  }
+}
+
+function parseCompactionTranscriptContext(content: string): {
+  plan: TodoItem[];
+  lastToolResult: ProductionAgentState["lastToolResult"];
+} {
+  const planLine = content.split("\n").find((line) => line.startsWith("Current plan: "));
+  const resultLine = content.split("\n").find((line) => line.startsWith("Last terminal tool result: "));
+  if (!planLine || !resultLine) {
+    throw new ProductionTurnProtocolError("Checkpoint compaction context is incomplete.");
+  }
+  try {
+    const plan = TodoWriteInputSchema.shape.plan.parse(JSON.parse(planLine.slice("Current plan: ".length)));
+    const resultValue: unknown = JSON.parse(resultLine.slice("Last terminal tool result: ".length));
+    const lastToolResult = resultValue === null
+      ? null
+      : toolResultWireSchema.parse(resultValue);
+    return { plan, lastToolResult };
+  } catch {
+    throw new ProductionTurnProtocolError("Checkpoint compaction context is invalid.");
+  }
+}
+
+function isRejectedStopResult(content: string): boolean {
+  try {
+    const decoded: unknown = JSON.parse(content);
+    return typeof decoded === "object" && decoded !== null && !Array.isArray(decoded) &&
+      Object.keys(decoded).every((key) => ["accepted", "code", "reason"].includes(key)) &&
+      "accepted" in decoded && decoded.accepted === false &&
+      "code" in decoded && typeof decoded.code === "string" &&
+      "reason" in decoded && typeof decoded.reason === "string";
+  } catch {
+    return false;
   }
 }
 

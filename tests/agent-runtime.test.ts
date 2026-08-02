@@ -1031,7 +1031,7 @@ function initialState(
     },
     context: { lastEstimateTokens: 0, estimateSource: null, requestFingerprint: null },
     cost: { projectedMicroUsd: 0, observedMicroUsd: 0, observedAvailable: false, driftMicroUsd: 0 },
-    compaction: { count: 0, lastPreTokens: 0, lastPostTokens: 0 },
+    compaction: { count: 0, lastPreTokens: 0, lastPostTokens: 0, baselineCommittedTurns: 0, baselineProtocolRetries: 0, baselineToolCalls: 0, baselinePlanRewrites: 0, baselineStopRejections: 0 },
     notificationKeys: [],
     lastNotification: null,
     counters: {

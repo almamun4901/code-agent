@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { MemoryCheckpointStore, runAgentLoop } from "../src/loop";
-import { createOpenRouterModel } from "../src/model/openrouter";
+import { createOpenRouterModel, createOpenRouterRuntime } from "../src/model/openrouter";
 
 const liveEnabled =
   process.env.RUN_LIVE_OPENROUTER_TEST === "1" &&
@@ -24,6 +24,32 @@ liveTest(
     expect(result.plan.every((task) => task.status === "completed")).toBe(true);
     expect(result.inputTokens).toBeGreaterThan(0);
     expect(result.outputTokens).toBeGreaterThan(0);
+  },
+  120_000,
+);
+
+liveTest(
+  "OpenRouter reports conservative preflight, routed identity, and provider cost",
+  async () => {
+    const runtime = createOpenRouterRuntime();
+    const request = {
+      system: "Answer with only OK.",
+      messages: [{ role: "user" as const, content: "Confirm." }],
+      tools: [],
+      maxTokens: 32,
+      mode: "summary" as const,
+    };
+
+    const estimate = await runtime.countRequestTokens(request);
+    const turn = await runtime.call(request);
+
+    expect(estimate.source).toBe("conservative_local");
+    expect(estimate.tokens).toBeGreaterThan(0);
+    expect(turn.actualIdentity?.provider).toBe("openrouter");
+    expect(turn.actualIdentity?.model).toBe("anthropic/claude-haiku-4.5");
+    expect(turn.usage.inputTokens).toBeGreaterThan(0);
+    expect(turn.usage.outputTokens).toBeGreaterThan(0);
+    expect(turn.providerCostMicroUsd).toBeGreaterThan(0);
   },
   120_000,
 );

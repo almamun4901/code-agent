@@ -7,6 +7,7 @@ import {
   type CallModel,
   type ConversationMessage,
   type ModelRequest,
+  type ModelRuntime,
   type ModelStopReason,
   type ModelToolDefinition,
 } from "./contracts";
@@ -45,6 +46,7 @@ const generationErrorSchema = z
 
 const completionSchema = z
   .object({
+    model: z.string().min(1).optional(),
     choices: z
       .array(
         z
@@ -67,6 +69,7 @@ const completionSchema = z
       .object({
         prompt_tokens: z.number().int().nonnegative(),
         completion_tokens: z.number().int().nonnegative(),
+        cost: z.number().nonnegative().optional(),
       })
       .passthrough(),
   })
@@ -164,7 +167,7 @@ export function createOpenRouterModel(
           "OpenRouter returned an invalid completion response.",
         );
       }
-      return normalizeCompletion(parsed.data);
+      return normalizeCompletion(parsed.data, model);
     } catch (error) {
       if (callOptions.signal?.aborted) {
         throw new ModelRequestCancelledError();
@@ -187,6 +190,36 @@ export function createOpenRouterModel(
     } finally {
       clearTimeout(timer);
     }
+  };
+}
+
+export function createOpenRouterRuntime(
+  options: OpenRouterModelOptions = {},
+): ModelRuntime {
+  const model = options.model?.trim() || process.env.OPENROUTER_MODEL?.trim() || DEFAULT_MODEL;
+  const call = createOpenRouterModel({ ...options, model });
+  let last: { fingerprint: string; messagesJson: string; nativeTokens: number } | undefined;
+  return {
+    identity: { provider: "openrouter", model },
+    async countRequestTokens(request) {
+      const { encode } = await import("gpt-tokenizer/encoding/o200k_base");
+      const fingerprint = JSON.stringify({ system: request.system, tools: request.tools, model });
+      const messagesJson = JSON.stringify(request.messages);
+      if (last && last.fingerprint === fingerprint && messagesJson.startsWith(last.messagesJson.slice(0, -1))) {
+        const appended = messagesJson.slice(Math.max(0, last.messagesJson.length - 1));
+        return { tokens: last.nativeTokens + Math.ceil(encode(appended).length * 2) + 1_024, source: "conservative_local", fingerprint };
+      }
+      return { tokens: Math.ceil(encode(JSON.stringify(request)).length * 2) + 2_048, source: "conservative_local", fingerprint };
+    },
+    async call(request, callOptions) {
+      const turn = await call(request, callOptions);
+      last = {
+        fingerprint: JSON.stringify({ system: request.system, tools: request.tools, model }),
+        messagesJson: JSON.stringify(request.messages),
+        nativeTokens: turn.usage.inputTokens,
+      };
+      return turn;
+    },
   };
 }
 
@@ -278,6 +311,7 @@ function toOpenRouterMessages(message: ConversationMessage): unknown[] {
 
 function normalizeCompletion(
   completion: z.infer<typeof completionSchema>,
+  requestedModel: string,
 ) {
   const choice =
     completion.choices.find((candidate) => candidate.index === 0) ??
@@ -336,6 +370,13 @@ function normalizeCompletion(
       inputTokens: completion.usage.prompt_tokens,
       outputTokens: completion.usage.completion_tokens,
     },
+    actualIdentity: {
+      provider: "openrouter" as const,
+      model: completion.model ?? requestedModel,
+    },
+    ...(completion.usage.cost === undefined
+      ? {}
+      : { providerCostMicroUsd: Math.ceil(completion.usage.cost * 1_000_000) }),
   };
 }
 

@@ -571,7 +571,7 @@ describe("host-side production runner", () => {
       load: () => backing.load(),
       async save(state) {
         saveCount += 1;
-        if (saveCount === 3) {
+        if (state.plan[0]?.description === "Inspect safely" && state.pendingTurn === null) {
           commitStarted();
           await commitRelease;
         }
@@ -887,7 +887,7 @@ describe("production checkpoint", () => {
     const store = new FileProductionCheckpointStore(repo.worktreePath);
     await store.save(initialState(prepared));
     expect(await store.load()).toMatchObject({
-      version: 2,
+      version: 3,
       task: "Persist",
     });
     await writeFile(store.statePath, '{"version":1}\n');
@@ -1005,15 +1005,41 @@ function initialState(
   },
 ): ProductionAgentState {
   return {
-    version: 2,
+    version: 3,
     ...prepared,
+    promptStatus: "accepted",
+    appendedPromptContext: "",
     lifecycle: "running",
     plan: [],
     transcript: [{ role: "user", content: "test" }],
     lastToolSucceeded: null,
     pendingTurn: null,
+    pendingModelCall: null,
+    limits: {
+      maxModelCalls: 50,
+      compactAtTokens: 150_000,
+      maxContextTokens: 200_000,
+      maxProjectedCostMicroUsd: 5_000_000,
+      compactAtCheckpointBytes: 1_572_864,
+      maxCheckpointBytes: 2 * 1024 * 1024,
+    },
+    pricing: {
+      catalogVersion: 1,
+      identity: { provider: "injected", model: "claude-haiku-4-5" },
+      inputRateMicroUsdPerMillion: 1_000_000,
+      outputRateMicroUsdPerMillion: 5_000_000,
+    },
+    context: { lastEstimateTokens: 0, estimateSource: null, requestFingerprint: null },
+    cost: { projectedMicroUsd: 0, observedMicroUsd: 0, observedAvailable: false, driftMicroUsd: 0 },
+    compaction: { count: 0, lastPreTokens: 0, lastPostTokens: 0, baselineCommittedTurns: 0, baselineProtocolRetries: 0, baselineToolCalls: 0, baselinePlanRewrites: 0, baselineStopRejections: 0 },
+    notificationKeys: [],
+    lastNotification: null,
     counters: {
       modelTurns: 0,
+      modelCalls: 0,
+      agentCalls: 0,
+      compactionCalls: 0,
+      stopRejections: 0,
       committedTurns: 0,
       protocolRetries: 0,
       toolCalls: 0,
@@ -1023,6 +1049,7 @@ function initialState(
     },
     consecutiveInvalidAttempts: 0,
     terminalError: null,
+    terminalCode: null,
     lastToolResult: null,
   };
 }

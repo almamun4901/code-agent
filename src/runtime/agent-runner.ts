@@ -1,8 +1,9 @@
 import { realpath, stat } from "node:fs/promises";
 import path from "node:path";
-import type { CallModel } from "../model/contracts";
-import { createAnthropicModel } from "../model/anthropic";
-import { createOpenRouterModel } from "../model/openrouter";
+import type { CallModel, ModelRuntime } from "../model/contracts";
+import { createAnthropicRuntime } from "../model/anthropic";
+import { createOpenRouterRuntime } from "../model/openrouter";
+import { createInjectedModelRuntime } from "../model/runtime";
 import {
   createE2bTaskSession,
   recoverE2bTaskSession,
@@ -18,8 +19,11 @@ import {
 } from "./checkpoint";
 import {
   runProductionLoop,
+  prepareProductionLifecycle,
+  commitReconciledProductionMutation,
   type ProductionLoopResult,
 } from "./production-loop";
+import { LifecycleHooks } from "./lifecycle";
 import {
   createAgentEventPublisher,
   sanitizeTerminalText,
@@ -48,6 +52,8 @@ export type HeadlessAgentRunOptions = {
   eventSink?: AgentEventSink;
   modelProvider?: AgentModelProvider;
   callModel?: CallModel;
+  modelRuntime?: ModelRuntime;
+  hooks?: LifecycleHooks;
   checkpointStore?: ProductionCheckpointStore;
   sessionRecoveryStore?: E2bSessionRecoveryStore;
   openSession?: (context: {
@@ -152,6 +158,7 @@ export async function runHeadlessAgent(
 ): Promise<ProductionLoopResult> {
   const events = createAgentEventPublisher(options.eventSink);
   let started = false;
+  let hooksStarted = false;
   let shutdown = false;
   const beginShutdown = (reason: SessionEndContext["reason"]) => {
     if (shutdown) return;
@@ -161,8 +168,9 @@ export async function runHeadlessAgent(
   const execution = await executeAgentRun(
     options,
     events,
-    () => {
-      started = true;
+    (event) => {
+      if (event === "run_started") started = true;
+      if (event === "hooks_started") hooksStarted = true;
     },
     beginShutdown,
   );
@@ -173,6 +181,19 @@ export async function runHeadlessAgent(
       options.signal?.aborted ? "ui" : undefined,
     );
   beginShutdown(reason);
+  if (hooksStarted && options.hooks) {
+    try {
+      await options.hooks.runSessionEnd({
+        reason,
+        cleanup: execution.cleanupError ? "failed" : "succeeded",
+        ...((execution.runError || execution.cleanupError) ? { error: safeError(execution.runError ?? execution.cleanupError, [options.task, options.repoPath]) } : {}),
+      });
+    } catch (error) {
+      execution.cleanupError = execution.cleanupError
+        ? new AggregateError([execution.cleanupError, error], "Cleanup and SessionEnd failed.")
+        : error;
+    }
+  }
   if (started) {
     events.emit({
       type: "run_finished",
@@ -209,6 +230,7 @@ export function startAgentRun(
   const events = createAgentEventPublisher(options.eventSink);
   let stopReason: "sigint" | "ui" | "runtime" | undefined;
   let runStarted = false;
+  let hooksStarted = false;
   let shutdownReason:
     | SessionEndContext["reason"]
     | undefined;
@@ -251,6 +273,7 @@ export function startAgentRun(
           });
         }
       }
+      if (event === "hooks_started") hooksStarted = true;
     },
     beginShutdown,
   );
@@ -288,6 +311,15 @@ export function startAgentRun(
           options.task,
           options.repoPath,
         ]);
+      }
+    }
+    if (hooksStarted && options.hooks) {
+      try {
+        await options.hooks.runSessionEnd(context);
+      } catch (error) {
+        cleanup = "failed";
+        context.cleanup = "failed";
+        context.error = safeError(error, [options.task, options.repoPath]);
       }
     }
 
@@ -340,7 +372,7 @@ type ExecutionResult = {
 async function executeAgentRun(
   options: HeadlessAgentRunOptions,
   events: AgentEventPublisher,
-  lifecycleEvent: (event: "run_started") => void,
+  lifecycleEvent: (event: "run_started" | "hooks_started") => void,
   beginShutdown: (
     reason: SessionEndContext["reason"],
   ) => void = () => {},
@@ -365,8 +397,9 @@ async function executeAgentRun(
   let result: ProductionLoopResult | undefined;
   let runError: unknown;
   let cleanupError: unknown;
+  let checkpointStore: ProductionCheckpointStore | undefined;
   try {
-    const checkpointStore =
+    checkpointStore =
       options.checkpointStore ??
       new FileProductionCheckpointStore(prepared.canonicalRepoPath);
     const existing = await checkpointStore.load();
@@ -380,14 +413,29 @@ async function executeAgentRun(
         "Existing checkpoint belongs to another repository or task.",
       );
     }
-    if (existing?.lifecycle === "completed") {
+    const templateId =
+      options.templateId ?? process.env.E2B_TEMPLATE_ID?.trim() ?? "";
+    if ((!existing || existing.lifecycle === "running") && !templateId) {
+      throw new AgentRunConfigurationError(
+        "E2B_TEMPLATE_ID is required to start a production run.",
+      );
+    }
+    const modelRuntime = options.modelRuntime ?? (options.callModel
+      ? createInjectedModelRuntime(options.callModel)
+      : createConfiguredRuntime(parseModelProvider(options.modelProvider ?? process.env.AGENT_MODEL_PROVIDER)));
+    await prepareProductionLifecycle({
+      ...prepared,
+      checkpointStore,
+      modelRuntime,
+      hooks: options.hooks,
+      onSessionStart: () => lifecycleEvent("hooks_started"),
+      ...(options.maxModelTurns === undefined ? {} : { budgetLimits: { maxModelCalls: options.maxModelTurns } }),
+    });
+    const preparedState = await checkpointStore.load();
+    if (preparedState && preparedState.lifecycle !== "running") {
       result = await runProductionLoop({
         ...prepared,
-        callModel:
-          options.callModel ??
-          (async () => {
-            throw new Error("Completed checkpoints must not call the model.");
-          }),
+        modelRuntime,
         session: {
           async call() {
             throw new Error("Completed checkpoints must not call tools.");
@@ -397,25 +445,12 @@ async function executeAgentRun(
         maxModelTurns: options.maxModelTurns,
         signal: options.signal,
         events,
+        hooks: options.hooks,
       });
       beginShutdown("completed");
       return { result };
     }
 
-    const templateId =
-      options.templateId ?? process.env.E2B_TEMPLATE_ID?.trim() ?? "";
-    if (!templateId) {
-      throw new AgentRunConfigurationError(
-        "E2B_TEMPLATE_ID is required to start a production run.",
-      );
-    }
-    const callModel =
-      options.callModel ??
-      createConfiguredModel(
-        parseModelProvider(
-          options.modelProvider ?? process.env.AGENT_MODEL_PROVIDER,
-        ),
-      );
     const recoveryStore =
       options.sessionRecoveryStore ??
       new FileE2bSessionRecoveryStore(
@@ -437,12 +472,13 @@ async function executeAgentRun(
 
     result = await runProductionLoop({
       ...prepared,
-      callModel,
+      modelRuntime,
       session,
       checkpointStore,
       maxModelTurns: options.maxModelTurns,
       signal: options.signal,
       events,
+      hooks: options.hooks,
     });
   } catch (error) {
     runError = error;
@@ -454,7 +490,15 @@ async function executeAgentRun(
   if (session) {
     const cleanupErrors: unknown[] = [];
     try {
-      await session.reconcileActiveMutation();
+      const mutation = await session.reconcileActiveMutation();
+      if (mutation && checkpointStore) {
+        await commitReconciledProductionMutation({
+          checkpointStore,
+          mutation,
+          hooks: options.hooks,
+          events,
+        });
+      }
     } catch (error) {
       cleanupErrors.push(error);
     }
@@ -589,12 +633,12 @@ function parseModelProvider(
   return normalized;
 }
 
-function createConfiguredModel(
+function createConfiguredRuntime(
   provider: AgentModelProvider,
-): CallModel {
+): ModelRuntime {
   return provider === "anthropic"
-    ? createAnthropicModel()
-    : createOpenRouterModel();
+    ? createAnthropicRuntime()
+    : createOpenRouterRuntime();
 }
 
 async function openDefaultSession(

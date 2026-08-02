@@ -27,7 +27,7 @@ describe("terminal reducer", () => {
           { id: "one", description: "Inspect", status: "in_progress" },
           { id: "two", description: "Verify", status: "pending" },
         ],
-        usage: { modelTurns: 1, inputTokens: 12, outputTokens: 4 },
+        usage: { ...initialTuiState.usage, modelTurns: 1, modelCalls: 1, inputTokens: 12, outputTokens: 4 },
       }),
     );
     state = reduceAgentEvent(
@@ -101,8 +101,8 @@ describe("responsive Ink application", () => {
       expect(frame).toContain("Tool activity");
       expect(frame).toContain("Status & budget");
       expect(frame).toContain("Initializing…");
-      expect(frame).toContain("Dollar cost available");
-      expect(frame).toContain("Step 8");
+      expect(frame).toContain("Model calls 0 / 50");
+      expect(frame).toContain("Projected $0.00 / $5.00");
       expect(frame).not.toContain("o200k_base");
       expect(
         Math.max(...frame.split("\n").map((line) => [...line].length)),
@@ -146,7 +146,7 @@ describe("responsive Ink application", () => {
           description: "Inspect repository",
           status: "in_progress",
         }],
-        usage: { modelTurns: 2, inputTokens: 100, outputTokens: 25 },
+        usage: { ...initialTuiState.usage, modelTurns: 2, modelCalls: 2, inputTokens: 100, outputTokens: 25 },
       }),
     );
     state = reduceAgentEvent(
@@ -183,8 +183,7 @@ describe("responsive Ink application", () => {
 
     expect(frame).toContain("Inspect repository");
     expect(frame).toContain("git · status · denied · 1.3s");
-    expect(frame).toContain("Turns 2 · Input 100 · Output");
-    expect(frame).toContain("25");
+    expect(frame).toContain("Model calls 2 / 50");
     expect(frame).toContain("DENIED: Policy blocked");
   });
 });

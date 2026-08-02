@@ -30,6 +30,7 @@ export type TuiState = {
   usage: AgentUsage;
   cleanup?: "succeeded" | "failed";
   error?: { code: string; message: string };
+  notification?: { code: string; message: string };
 };
 
 export const initialTuiState: TuiState = {
@@ -38,8 +39,19 @@ export const initialTuiState: TuiState = {
   tools: [],
   usage: {
     modelTurns: 0,
+    modelCalls: 0,
     inputTokens: 0,
     outputTokens: 0,
+    contextTokens: 0,
+    contextSource: null,
+    maxModelCalls: 50,
+    maxContextTokens: 200_000,
+    projectedCostMicroUsd: 0,
+    observedCostMicroUsd: 0,
+    observedCostAvailable: false,
+    maxProjectedCostMicroUsd: 5_000_000,
+    compactions: 0,
+    compactAtTokens: 150_000,
   },
 };
 
@@ -93,6 +105,17 @@ export function reduceAgentEvent(
       };
     case "usage_updated":
       return { ...state, usage: event.usage };
+    case "notification":
+      return {
+        ...state,
+        notification: {
+          code: event.notification.code,
+          message: event.notification.message,
+        },
+        error: event.notification.kind === "warning"
+          ? { code: event.notification.code, message: event.notification.message }
+          : state.error,
+      };
     case "shutdown_started":
       return { ...state, status: "stopping" };
     case "run_finished":

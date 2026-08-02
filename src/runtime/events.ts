@@ -9,8 +9,19 @@ const MAX_SUMMARY_BYTES = 2 * 1024;
 
 export type AgentUsage = {
   modelTurns: number;
+  modelCalls: number;
   inputTokens: number;
   outputTokens: number;
+  contextTokens: number;
+  contextSource: "provider" | "conservative_local" | null;
+  maxModelCalls: number;
+  maxContextTokens: number;
+  projectedCostMicroUsd: number;
+  observedCostMicroUsd: number;
+  observedCostAvailable: boolean;
+  maxProjectedCostMicroUsd: number;
+  compactions: number;
+  compactAtTokens: number;
 };
 
 export type ToolOutcome =
@@ -54,6 +65,15 @@ export type AgentEvent =
   | (AgentEventBase & {
       type: "usage_updated";
       usage: AgentUsage;
+    })
+  | (AgentEventBase & {
+      type: "notification";
+      notification: {
+        kind: "budget" | "compaction" | "lifecycle" | "warning";
+        code: string;
+        title: string;
+        message: string;
+      };
     })
   | (AgentEventBase & {
       type: "shutdown_started";
@@ -106,13 +126,30 @@ export function createAgentEventPublisher(
 
 export function usageFromCounters(counters: {
   modelTurns: number;
+  modelCalls?: number;
   inputTokens: number;
   outputTokens: number;
+}, state?: {
+  context: { lastEstimateTokens: number; estimateSource: "provider" | "conservative_local" | null };
+  limits: { maxModelCalls: number; maxContextTokens: number; maxProjectedCostMicroUsd: number; compactAtTokens: number };
+  cost: { projectedMicroUsd: number; observedMicroUsd: number; observedAvailable: boolean };
+  compaction: { count: number };
 }): AgentUsage {
   return {
     modelTurns: counters.modelTurns,
+    modelCalls: counters.modelCalls ?? counters.modelTurns,
     inputTokens: counters.inputTokens,
     outputTokens: counters.outputTokens,
+    contextTokens: state?.context.lastEstimateTokens ?? 0,
+    contextSource: state?.context.estimateSource ?? null,
+    maxModelCalls: state?.limits.maxModelCalls ?? 50,
+    maxContextTokens: state?.limits.maxContextTokens ?? 200_000,
+    projectedCostMicroUsd: state?.cost.projectedMicroUsd ?? 0,
+    observedCostMicroUsd: state?.cost.observedMicroUsd ?? 0,
+    observedCostAvailable: state?.cost.observedAvailable ?? false,
+    maxProjectedCostMicroUsd: state?.limits.maxProjectedCostMicroUsd ?? 5_000_000,
+    compactions: state?.compaction.count ?? 0,
+    compactAtTokens: state?.limits.compactAtTokens ?? 150_000,
   };
 }
 

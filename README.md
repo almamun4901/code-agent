@@ -8,7 +8,8 @@ creation.
 
 ## Current status
 
-Steps 0–6 are complete. The deterministic fake loop, live Claude loop with fake
+Steps 0–7 are complete, and Step 8 lifecycle/budget implementation is under
+acceptance review. The deterministic fake loop, live Claude loop with fake
 tools, six real local tools, crash-safe plan persistence, MCP stdio transport,
 isolated E2B execution, and the PreToolUse safety boundary have passed their
 acceptance gates. Mutation recovery is also complete: mutating calls are
@@ -59,7 +60,12 @@ The code currently proves:
 - complete success and error results capped at 4,000 offline
   `o200k_base` tokens.
 - a production `model -> plan -> E2B MCP tool -> checkpoint` runner with
-  provider-native sequential plan/action turns and actual usage accounting.
+  provider-native sequential plan/action turns and actual usage accounting;
+- all eight lifecycle hook boundaries with capability-specific authority,
+  bounded execution, and observer isolation;
+- checkpoint-v3 paid-call reservations, dual projected/observed cost ledgers,
+  50-call / 200k-context / $5.00 ceilings, and transactional compaction at
+  150k tokens.
 
 ## Current architecture
 
@@ -120,7 +126,9 @@ network-disabled E2B task worktree
 src/runtime/agent-runner.ts
     +---- canonical repository + task identity
     +---- pending turn and stable mutation operation ID
-    +---- OpenRouter model + recovered E2B session
+    +---- provider-neutral model runtime + recovered E2B session
+    +---- lifecycle hooks + durable budget preflight
+    +---- transactional context compaction
     +---- reconciliation before sandbox cleanup
 ```
 
@@ -131,8 +139,9 @@ typed tools run as `agent`, while arbitrary shell commands run as `runner`
 through the fixed wrapper. Its host lease records the exact sandbox and active
 mutation; recovery verifies the sandbox journal before reconnecting or
 refusing replay. The production runner now joins that session to the routed
-model and durable version-2 checkpoint. Later roadmap steps add lifecycle
-hooks, telemetry, and the Ink terminal UI.
+model and durable version-3 checkpoint. The Ink terminal UI renders committed
+plan, tool, lifecycle notice, context, call, compaction, and dual-cost state.
+Later roadmap steps add telemetry and evaluation/PR publication.
 
 ## Setup
 
@@ -193,6 +202,9 @@ bun run test:e2b:safety
 
 # Focused offline production-runner suite
 bun run test:runtime
+
+# Focused lifecycle and budget suites
+bun test tests/lifecycle-hooks.test.ts tests/runtime-budgets.test.ts
 
 # Explicit selected-provider -> live E2B MCP production-runner gate
 bun run test:runtime:integration
@@ -258,6 +270,8 @@ The authoritative agent instructions and exact sequence are in
   E2B runtime, worktree provisioning, lifecycle ownership, and live gates.
 - [`docs/plans/phase-6-pretooluse-safety-hook.md`](docs/plans/phase-6-pretooluse-safety-hook.md):
   threat model, structural confinement, red-team matrix, and acceptance gates.
+- [`docs/plans/lifecycle-budgets.md`](docs/plans/lifecycle-budgets.md):
+  Step 8 hook authority, budget/accounting invariants, recovery, and tests.
 - [`docs/plans/mutation-recovery.md`](docs/plans/mutation-recovery.md):
   operation journaling, same-sandbox recovery, cancellation, and acceptance
   evidence.

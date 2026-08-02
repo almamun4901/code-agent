@@ -56,6 +56,13 @@ describe("lifecycle hooks", () => {
     expect(() => capped.register("PostToolUse", () => {})).toThrow(LifecycleHookError);
   });
 
+  test("reports observer timeouts without failing the phase", async () => {
+    const hooks = new LifecycleHooks({ timeoutMs: 5 }).register("Notification", () => new Promise(() => {}));
+    await expect(hooks.runObservers("Notification", { kind: "warning", code: "TEST", title: "Test", message: "message" })).resolves.toEqual([
+      { hook: "Notification", code: "HOOK_TIMEOUT", message: "Notification hook phase timed out." },
+    ]);
+  });
+
   test("passes recursively frozen snapshots", async () => {
     const hooks = new LifecycleHooks().register("SessionStart", (context) => {
       expect(Object.isFrozen(context)).toBe(true);

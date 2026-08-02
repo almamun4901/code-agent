@@ -8,8 +8,7 @@ creation.
 
 ## Current status
 
-Steps 0–7 are complete, and Step 8 lifecycle/budget implementation is under
-acceptance review. The deterministic fake loop, live Claude loop with fake
+Steps 0–8 are complete. The deterministic fake loop, live Claude loop with fake
 tools, six real local tools, crash-safe plan persistence, MCP stdio transport,
 isolated E2B execution, and the PreToolUse safety boundary have passed their
 acceptance gates. Mutation recovery is also complete: mutating calls are
@@ -20,6 +19,15 @@ The routed OpenRouter provider and host-side production runner now connect the
 model to those real tools. The runner validates repository/task identity
 before external activity, checkpoints validated tool intent before execution,
 resumes the same E2B mutation operation, and reconciles before cleanup.
+
+The core runtime is not yet a complete end-user delivery workflow. Live
+dogfooding proved that a successful sandbox run is currently cleaned up without
+importing its files into the local repository, implementation starts before a
+human can approve product/design choices, and plan completion can include
+claims stronger than the captured verification evidence. Roadmap gates 8A–8C
+now block telemetry and evaluation: safe local Git result delivery, durable
+plan approval before mutations, and trusted completion evidence with an
+inspectable audit surface. GitHub PR delivery remains Step 10.
 
 The code currently proves:
 
@@ -66,6 +74,11 @@ The code currently proves:
 - checkpoint-v3 paid-call reservations, dual projected/observed cost ledgers,
   50-call / 200k-context / $5.00 ceilings, and transactional compaction at
   150k tokens.
+
+Until gate 8A lands, `agent run` should be treated as a sandbox execution and
+recovery demonstration: it does not return a successful sandbox worktree to a
+local-only repository. Do not spend model budget on work whose files must be
+retained unless an external delivery path has been arranged.
 
 ## Current architecture
 
@@ -272,6 +285,9 @@ The authoritative agent instructions and exact sequence are in
   threat model, structural confinement, red-team matrix, and acceptance gates.
 - [`docs/plans/lifecycle-budgets.md`](docs/plans/lifecycle-budgets.md):
   Step 8 hook authority, budget/accounting invariants, recovery, and tests.
+- [`docs/plans/product-delivery-gates.md`](docs/plans/product-delivery-gates.md):
+  safe local result delivery, plan approval, completion evidence, and the
+  required ordering before telemetry and evaluation.
 - [`docs/plans/mutation-recovery.md`](docs/plans/mutation-recovery.md):
   operation journaling, same-sandbox recovery, cancellation, and acceptance
   evidence.

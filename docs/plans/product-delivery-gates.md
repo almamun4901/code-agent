@@ -1,0 +1,73 @@
+# Product delivery gates
+
+These gates were added after the first live greenfield dogfood run. They sit
+between lifecycle budgets and telemetry because the agent is not practically
+usable until completed work is returned, approved intent governs mutations,
+and completion is backed by inspectable evidence.
+
+## Gate 8A — Result delivery
+
+The sandbox remains the only model-controlled filesystem. Before cleanup, the
+trusted host must receive a bounded Git artifact rooted at the exact bundled
+commit, validate its object graph and changed paths, and import it into a new
+local branch. It must never switch, reset, or modify the user's current branch
+or a dirty worktree.
+
+The delivery state is transactional:
+
+```text
+sandbox commit
+  -> export staged
+  -> host validates base and bounds
+  -> local branch imported
+  -> receipt checkpointed
+  -> sandbox cleanup allowed
+```
+
+Recovery may repeat validation and an idempotent import, but may not create a
+second branch containing different bytes. Failed export keeps an actionable
+recovery record. The gate also fixes shared-group permissions so a file created
+by `run_shell` can subsequently pass typed edit preview/apply under `agent`.
+
+Acceptance evidence includes shell-create → typed-edit parity, dirty-host
+refusal, malicious bundle/path rejection, death at every delivery transition,
+idempotent resume, and a completed local-only calculator appearing on a new
+local branch after E2B cleanup.
+
+## Gate 8B — Plan approval
+
+Interactive runs begin in read-only discovery. The proposed artifact must make
+product choices visible—not merely list implementation verbs—including visual
+direction, technology, feature scope, acceptance checks, and material
+assumptions.
+
+The runtime then checkpoints `awaiting_approval` and offers approve, revise,
+or cancel. Revision feedback becomes canonical task context and produces a new
+proposal. Mutation-capable tools are absent or denied until approval is
+durably committed. Resuming an awaiting run displays the same proposal without
+another paid call. Material changes to design, dependencies, or acceptance
+criteria require reapproval; ordinary progress updates do not.
+
+Non-interactive evaluation must opt into auto-approval explicitly. It cannot
+be the default for a human TTY session.
+
+## Gate 8C — Completion evidence and inspection
+
+Checkpoint v3 remains execution truth. Add a host-readable inspection command
+and bounded, mode-0600 audit projection with sequence IDs, operation IDs,
+redacted arguments, exact error codes, terminal results, durations, and state
+digests. Do not claim access to hidden model reasoning and do not persist
+unbounded secrets or source payloads.
+
+Completion requires evidence correlated to the approved plan:
+
+- a delivered Git commit and summarized diff;
+- terminal results for required checks, including command and exit code;
+- no unresolved mutation or model reservation;
+- explicit evidence types for special claims, such as real browser viewport
+  checks for requested responsive frontend verification.
+
+Plan checkmarks remain useful navigation, but they cannot independently
+authorize completion. The TUI should expose drill-down summaries; the inspect
+command provides durable detail after terminal exit. Step 9 then exports the
+same evidence asynchronously to OpenTelemetry and Langfuse.

@@ -112,12 +112,24 @@ function BudgetPane({ state }: { state: TuiState }) {
         {state.cleanup ? ` · cleanup ${state.cleanup}` : ""}
       </Text>
       <Text>
-        Turns {state.usage.modelTurns} · Input{" "}
-        {state.usage.inputTokens.toLocaleString()} · Output{" "}
-        {state.usage.outputTokens.toLocaleString()}
+        Model calls {state.usage.modelCalls} / {state.usage.maxModelCalls}
       </Text>
-      <Text dimColor>Dollar cost available in Step 8</Text>
-      <Text dimColor>Enforced ceilings available in Step 8</Text>
+      <Text>
+        Context {state.usage.contextTokens.toLocaleString()} / {state.usage.maxContextTokens.toLocaleString()}
+        {state.usage.contextSource === "conservative_local" ? " (estimated)" : ""}
+      </Text>
+      <Text>
+        Projected {formatMoney(state.usage.projectedCostMicroUsd)} / {formatMoney(state.usage.maxProjectedCostMicroUsd)}
+      </Text>
+      {state.usage.observedCostAvailable
+        ? <Text>Observed {formatMoney(state.usage.observedCostMicroUsd)}</Text>
+        : null}
+      <Text>
+        Compactions {state.usage.compactions} · next at {state.usage.compactAtTokens.toLocaleString()}
+      </Text>
+      {state.notification
+        ? <Text color="yellow">{state.notification.code}: {sanitizeTerminalText(state.notification.message)}</Text>
+        : null}
       {state.error
         ? (
             <Text color="red">
@@ -128,6 +140,10 @@ function BudgetPane({ state }: { state: TuiState }) {
         : null}
     </Pane>
   );
+}
+
+function formatMoney(microUsd: number): string {
+  return `$${(microUsd / 1_000_000).toFixed(2)}`;
 }
 
 function Pane({

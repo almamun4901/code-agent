@@ -62,6 +62,7 @@ describe("OpenRouter model adapter", () => {
         requestedInit = init;
         return jsonResponse({
           id: "generation-id",
+          model: "test/routed-model",
           choices: [
             {
               index: 0,
@@ -86,12 +87,18 @@ describe("OpenRouter model adapter", () => {
             prompt_tokens: 17,
             completion_tokens: 9,
             total_tokens: 26,
+            cost: 0.0001234,
           },
         });
       },
     });
 
     expect(await callModel(makeRequest())).toEqual({
+      actualIdentity: {
+        provider: "openrouter",
+        model: "test/routed-model",
+      },
+      providerCostMicroUsd: 124,
       content: [
         { type: "text", text: "Working" },
         {

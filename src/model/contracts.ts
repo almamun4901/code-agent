@@ -41,6 +41,18 @@ export type ModelRequest = {
   messages: ConversationMessage[];
   tools: ModelToolDefinition[];
   maxTokens: number;
+  mode?: "agent" | "summary";
+};
+
+export type ModelIdentity = {
+  provider: "anthropic" | "openrouter" | "injected";
+  model: string;
+};
+
+export type TokenEstimate = {
+  tokens: number;
+  source: "provider" | "conservative_local";
+  fingerprint?: string;
 };
 
 export type ModelStopReason =
@@ -60,6 +72,8 @@ export type ModelTurn = {
     inputTokens: number;
     outputTokens: number;
   };
+  actualIdentity?: ModelIdentity;
+  providerCostMicroUsd?: number;
 };
 
 export type CallModelOptions = {
@@ -70,6 +84,15 @@ export type CallModel = (
   request: ModelRequest,
   options?: CallModelOptions,
 ) => Promise<ModelTurn>;
+
+export type ModelRuntime = {
+  identity: ModelIdentity;
+  countRequestTokens(
+    request: ModelRequest,
+    signal?: AbortSignal,
+  ): Promise<TokenEstimate>;
+  call: CallModel;
+};
 
 export class ModelConfigurationError extends Error {
   constructor(message: string) {

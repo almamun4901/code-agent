@@ -172,15 +172,27 @@ export class LifecycleHooks {
     context: HostHookContextMap[K],
   ): Promise<HookWarning[]> {
     const warnings: HookWarning[] = [];
-    await this.#runPhase(name, context, async (hook, signal, snapshot) => {
-      try {
-        await hook(snapshot as never, signal);
-      } catch (error) {
-        if (warnings.length < MAX_HOOKS_PER_NAME) {
-          warnings.push(toWarning(name, error));
+    const hooks = this.#hooks.get(name) ?? [];
+    const snapshot = deepFreeze(structuredClone(context));
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort("HOOK_TIMEOUT"), this.#timeoutMs);
+    try {
+      for (const hook of hooks) {
+        if (warnings.length >= MAX_HOOKS_PER_NAME) break;
+        try {
+          await Promise.race([
+            hook(snapshot as never, controller.signal),
+            abortPromise(controller.signal),
+          ]);
+        } catch (error) {
+          warnings.push(controller.signal.aborted
+            ? { hook: name, code: "HOOK_TIMEOUT", message: `${name} hook phase timed out.` }
+            : toWarning(name, error));
         }
       }
-    }, false);
+    } finally {
+      clearTimeout(timeout);
+    }
     return warnings;
   }
 
@@ -194,7 +206,6 @@ export class LifecycleHooks {
     name: K,
     context: HostHookContextMap[K],
     invoke: (hook: HostHook<HostHookName>, signal: AbortSignal, snapshot: Readonly<HostHookContextMap[K]>) => Promise<void>,
-    failClosed = true,
   ): Promise<void> {
     const hooks = this.#hooks.get(name) ?? [];
     if (hooks.length === 0) return;
@@ -209,7 +220,6 @@ export class LifecycleHooks {
             abortPromise(controller.signal),
           ]);
         } catch (error) {
-          if (!failClosed) continue;
           if (controller.signal.aborted) {
             throw new LifecycleHookError(name, "HOOK_TIMEOUT", `${name} hook phase timed out.`);
           }

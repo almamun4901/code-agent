@@ -28,8 +28,10 @@ export function formatStaticEvent(event: AgentEvent): string[] {
       ];
     case "usage_updated":
       return [
-        `Usage: ${event.usage.modelTurns} turns, ${event.usage.inputTokens} input tokens, ${event.usage.outputTokens} output tokens`,
+        `Usage: ${event.usage.modelCalls}/${event.usage.maxModelCalls} model calls, ${event.usage.contextTokens}/${event.usage.maxContextTokens} context tokens${event.usage.contextSource === "conservative_local" ? " (estimated)" : ""}, $${(event.usage.projectedCostMicroUsd / 1_000_000).toFixed(2)}/$${(event.usage.maxProjectedCostMicroUsd / 1_000_000).toFixed(2)} projected, ${event.usage.compactions} compactions`,
       ];
+    case "notification":
+      return [`Notice ${event.notification.code}: ${singleLine(event.notification.message)}`];
     case "shutdown_started":
       return [`Shutdown started: ${event.reason}`];
     case "run_finished":

@@ -10,13 +10,15 @@ import {
 import { constants } from "node:fs";
 import { join, resolve } from "node:path";
 import {
+  DEFAULT_BUDGET_LIMITS,
+  LegacyProductionAgentStateSchema,
   ProductionAgentStateSchema,
   type ProductionAgentState,
 } from "./schema";
 
 const STATE_FILE = "state.json";
 const TEMP_PREFIX = ".state.json.tmp-";
-const MAX_STATE_BYTES = 2 * 1024 * 1024;
+export const MAX_STATE_BYTES = 2 * 1024 * 1024;
 
 export type ProductionCheckpointStore = {
   load(): Promise<ProductionAgentState | null>;
@@ -70,7 +72,7 @@ export class FileProductionCheckpointStore
     }
 
     try {
-      return ProductionAgentStateSchema.parse(JSON.parse(serialized));
+      return decodeProductionCheckpoint(JSON.parse(serialized));
     } catch (error) {
       throw new ProductionCheckpointError(
         `Checkpoint "${this.statePath}" is corrupt or incompatible with the production runner.`,
@@ -80,7 +82,7 @@ export class FileProductionCheckpointStore
   }
 
   async save(state: ProductionAgentState): Promise<void> {
-    const validated = ProductionAgentStateSchema.parse(state);
+    const validated = boundedCheckpoint(ProductionAgentStateSchema.parse(state));
     const serialized = `${JSON.stringify(validated, null, 2)}\n`;
     if (new TextEncoder().encode(serialized).byteLength > MAX_STATE_BYTES) {
       throw new ProductionCheckpointError(
@@ -195,8 +197,85 @@ export class MemoryProductionCheckpointStore
   }
 
   async save(state: ProductionAgentState): Promise<void> {
-    this.#state = ProductionAgentStateSchema.parse(structuredClone(state));
+    this.#state = boundedCheckpoint(
+      ProductionAgentStateSchema.parse(structuredClone(state)),
+    );
   }
+}
+
+export function productionCheckpointBytes(state: ProductionAgentState): number {
+  return new TextEncoder().encode(`${JSON.stringify(state, null, 2)}\n`).byteLength;
+}
+
+function boundedCheckpoint(state: ProductionAgentState): ProductionAgentState {
+  if (productionCheckpointBytes(state) <= state.limits.maxCheckpointBytes) return state;
+  const first = state.transcript[0];
+  const canonical = first?.role === "user" && typeof first.content === "string"
+    ? first
+    : { role: "user" as const, content: `Complete the following repository task:\n${state.task}` };
+  const fallback: ProductionAgentState = {
+    ...state,
+    promptStatus: "accepted",
+    lifecycle: "failed",
+    transcript: [canonical, { role: "user", content: "Checkpoint transcript omitted after exceeding the durable 2 MiB budget." }],
+    pendingTurn: null,
+    pendingModelCall: null,
+    terminalCode: "CHECKPOINT_BUDGET_EXCEEDED",
+    terminalError: "Checkpoint exceeded the durable 2 MiB budget; replayable staged payloads were removed.",
+    lastNotification: {
+      code: "CHECKPOINT_BUDGET_EXCEEDED",
+      message: "Checkpoint transcript was omitted after exceeding its durable byte budget.",
+    },
+  };
+  const validated = ProductionAgentStateSchema.parse(fallback);
+  if (productionCheckpointBytes(validated) > state.limits.maxCheckpointBytes) {
+    throw new ProductionCheckpointError("Bounded terminal checkpoint still exceeds its configured byte limit.");
+  }
+  return validated;
+}
+
+export function decodeProductionCheckpoint(value: unknown): ProductionAgentState {
+  const current = ProductionAgentStateSchema.safeParse(value);
+  if (current.success) return current.data;
+  const legacy = LegacyProductionAgentStateSchema.safeParse(value);
+  if (!legacy.success) throw current.error;
+  if (
+    legacy.data.counters.modelTurns !== 0 ||
+    legacy.data.plan.length !== 0 ||
+    legacy.data.pendingTurn !== null ||
+    legacy.data.lifecycle !== "running"
+  ) {
+    throw new ProductionCheckpointError(
+      "Checkpoint v2 contains model history whose pricing cannot be reconstructed; start a fresh task or migrate it explicitly.",
+    );
+  }
+  return ProductionAgentStateSchema.parse({
+    ...legacy.data,
+    version: 3,
+    promptStatus: "accepted",
+    appendedPromptContext: "",
+    pendingModelCall: null,
+    limits: { ...DEFAULT_BUDGET_LIMITS },
+    pricing: {
+      catalogVersion: 1,
+      identity: { provider: "anthropic", model: "claude-haiku-4-5" },
+      inputRateMicroUsdPerMillion: 1_000_000,
+      outputRateMicroUsdPerMillion: 5_000_000,
+    },
+    context: { lastEstimateTokens: 0, estimateSource: null, requestFingerprint: null },
+    cost: { projectedMicroUsd: 0, observedMicroUsd: 0, observedAvailable: false, driftMicroUsd: 0 },
+    compaction: { count: 0, lastPreTokens: 0, lastPostTokens: 0 },
+    notificationKeys: [],
+    lastNotification: null,
+    counters: {
+      ...legacy.data.counters,
+      modelCalls: 0,
+      agentCalls: 0,
+      compactionCalls: 0,
+      stopRejections: 0,
+    },
+    terminalCode: null,
+  });
 }
 
 function isMissingError(error: unknown): boolean {

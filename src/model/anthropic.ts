@@ -14,6 +14,7 @@ import {
   type CallModel,
   type ConversationMessage,
   type ModelRequest,
+  type ModelRuntime,
   type ModelToolDefinition,
   type UserBlock,
 } from "./contracts";
@@ -43,6 +44,10 @@ type MessagesClient = {
       params: MessageCreateParamsNonStreaming,
       options?: { signal?: AbortSignal },
     ): Promise<Message>;
+    countTokens?(
+      params: Omit<MessageCreateParamsNonStreaming, "max_tokens">,
+      options?: { signal?: AbortSignal },
+    ): Promise<{ input_tokens: number }>;
   };
 };
 
@@ -85,7 +90,7 @@ export function createAnthropicModel(
     options.client ??
     new Anthropic({
       apiKey,
-      maxRetries: 2,
+      maxRetries: 0,
       timeout: timeoutMs,
     });
   const model =
@@ -101,11 +106,15 @@ export function createAnthropicModel(
           max_tokens: request.maxTokens,
           system: request.system,
           messages: request.messages.map(toAnthropicMessage),
-          tools: request.tools.map(toAnthropicTool),
-          tool_choice: {
-            type: "auto",
-            disable_parallel_tool_use: false,
-          },
+          ...(request.tools.length > 0
+            ? {
+                tools: request.tools.map(toAnthropicTool),
+                tool_choice: {
+                  type: "auto" as const,
+                  disable_parallel_tool_use: false,
+                },
+              }
+            : {}),
         },
         callOptions.signal ? { signal: callOptions.signal } : undefined,
       );
@@ -162,6 +171,41 @@ export function createAnthropicModel(
 
       throw new ModelProviderError("Anthropic request failed unexpectedly.");
     }
+  };
+}
+
+export function createAnthropicRuntime(
+  options: AnthropicModelOptions = {},
+): ModelRuntime {
+  const model = options.model?.trim() || process.env.ANTHROPIC_MODEL?.trim() || DEFAULT_MODEL;
+  const call = createAnthropicModel({ ...options, model });
+  const apiKey = options.apiKey ?? process.env.ANTHROPIC_API_KEY;
+  const client: MessagesClient = options.client ?? new Anthropic({
+    apiKey,
+    maxRetries: 0,
+    timeout: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+  });
+  return {
+    identity: { provider: "anthropic", model },
+    async countRequestTokens(request, signal) {
+      if (!client.messages.countTokens) {
+        throw new ModelProviderError("Anthropic token counting is unavailable.");
+      }
+      const response = await client.messages.countTokens({
+        model,
+        system: request.system,
+        messages: request.messages.map(toAnthropicMessage),
+        ...(request.tools.length > 0 ? { tools: request.tools.map(toAnthropicTool) } : {}),
+      }, signal ? { signal } : undefined);
+      return { tokens: response.input_tokens, source: "provider" };
+    },
+    async call(request, callOptions) {
+      const turn = await call(request, callOptions);
+      return {
+        ...turn,
+        actualIdentity: { provider: "anthropic", model },
+      };
+    },
   };
 }
 

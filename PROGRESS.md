@@ -10,16 +10,16 @@
 ## Current state (updated: 2026-08-02)
 
 **Overall:** Steps 0–8, mutation recovery, the routed provider boundary, and
-the host-side production runner are complete and merged. `agent run <repo>
-"<task>"` now runs through bounded lifecycle hooks, crash-safe paid-call
-reservations, provider-native or conservative token accounting, fixed cost
-ceilings, transactional context compaction, and checkpoint v3 recovery. Ink
-and static non-TTY views expose committed call, context, cost, and compaction
-state. Type checking, 242 offline tests, 15 focused MCP tests, 34 focused
-sandbox tests, 5 focused safety tests, and all smoke checks pass on merged
-`main`. Ten credential/resource-gated integration tests are opt-in; the
-Anthropic, OpenRouter, and E2B credentials required to run them were not
-available in this session.
+the host-side production runner are complete and merged. A live greenfield
+calculator run exercised the complete Anthropic → E2B → MCP loop: 34 model
+calls and 26 terminal tool attempts produced 20 passing Bun tests within the
+configured budgets. The run also proved the core is not yet a usable delivery
+product: E2B cleanup discarded the completed worktree, the user had no plan
+approval pause before mutations, and completion mixed externally observed
+results with model-authored claims. A split-identity permission defect caused
+typed edit apply to fail on a shell-created file; the model recovered through
+another shell mutation. Gates 8A–8C now block Steps 9–10: safe local result
+delivery, human plan approval, and trusted completion/audit evidence.
 
 **Step-by-step:**
 
@@ -34,6 +34,9 @@ available in this session.
 | 6 — PreToolUse safety hook | complete | Exact-root binding, two identities, symlink-safe files, offline shell, reduced Git, and red-team/live gates pass |
 | 7 — TUI (Ink) | complete | Responsive Ink/static views, packaged CLI, honest committed-plan events, safe cancellation, PTY gates, and live E2B cleanup verified on merged `main` |
 | 8 — Remaining hooks + budget | complete | Eight bounded hooks, checkpoint-v3 dual ledgers, paid-call reservations, transactional compaction, recovery gates, and budget UI pass on merged `main` |
+| 8A — Result delivery | not started | Export and validate the sandbox Git result into a new local branch before cleanup; fix shared artifact ownership |
+| 8B — Plan approval | not started | Pause after read-only discovery for durable approve/revise/cancel before any mutation |
+| 8C — Completion evidence | not started | Require correlated diff/check/commit evidence and provide durable host inspection |
 | 9 — Telemetry | not started | — |
 | 10 — Eval + PR posting | not started | — |
 
@@ -124,11 +127,23 @@ available in this session.
   provider ledger. Every transport is reserved durably, and compaction is a
   transactional model call whose summary is installed only after validation
   and persistence. See ADR 0019.
+- Product delivery precedes telemetry: a successful result must reach a safe
+  local branch, human-approved intent must precede mutations, and completion
+  must reference durable external evidence. OTel/Langfuse remains a redacted
+  asynchronous projection, not the source of execution truth. See ADR 0020.
 
 ---
 
 ## Open questions / blockers
 
+- [ ] Deliver a successful E2B Git result into a new local branch before
+  sandbox cleanup; the first calculator dogfood worktree was discarded.
+- [ ] Add a durable plan approve/revise/cancel pause after read-only discovery
+  and deny mutation tools until approval.
+- [ ] Make shell-created task files group-writable so typed `edit_file` can
+  apply its preview under the separate `agent` identity.
+- [ ] Require completion receipts for delivered diff/commit and command exit
+  codes; add real viewport evidence for frontend responsiveness claims.
 - [ ] Confirm SWE-bench Pro Python subset is actually pullable and that a
   single task's environment reproduces cleanly — not yet dry-run.
 - [x] Confirm E2B runtime contents: the default image has Node and Git but
@@ -912,6 +927,40 @@ available in this session.
 - Next session should start with: Pull updated `main`, create a fresh branch
   for Step 9, decide the Langfuse deployment boundary, and design telemetry as
   an asynchronous observer over committed checkpoint-v3 state.
+
+### 2026-08-02 — Live calculator dogfood and product-delivery reset
+
+- What was done: Configured a real Anthropic/E2B run against a new local
+  calculator repository. After one transient count failure and one deliberately
+  terminal ambiguous paid-call reservation, a fresh dependency-free run
+  completed with 34 model calls, 26 tool attempts, a 23,372-token latest
+  context estimate, about $0.52 projected cost, and a terminal `bun test`
+  result of 20 passing tests. The durable checkpoint retained the exact tool
+  transcript after cleanup and allowed the failed edit sequence to be audited.
+- What broke / had to be reworked: `.agent/state.json` initially dirtied the
+  target repository unless `.agent/` was ignored. More importantly, successful
+  E2B cleanup discarded every generated calculator file because no result
+  delivery channel exists. The model also implemented immediately without a
+  human plan-approval pause. A late typed edit preview succeeded but apply
+  failed with `EACCES`: `run_shell` had created `index.html` as `runner:task`
+  mode 0644, while `edit_file` applied as `agent`. A fallback `sed` mutation
+  succeeded and the tests passed, but it bypassed typed edit versioning. Visual
+  breakpoint, WCAG, and performance claims were not independently measured.
+- Decisions made this session: Insert result delivery, plan approval, and
+  completion-evidence gates before telemetry. Preserve E2B as the only
+  model-controlled filesystem; import a validated Git artifact through the
+  trusted host rather than granting host writes. Keep checkpoint/audit evidence
+  canonical and treat Step 9 telemetry as a redacted asynchronous projection.
+  See ADR 0020 and `docs/plans/product-delivery-gates.md`.
+- Current status of the step in progress: Step 8 remains complete, but the
+  application is explicitly not end-user ready. Gates 8A–8C are now mandatory
+  prerequisites for Steps 9–10. The calculator run proved execution, recovery,
+  budgets, and durable transcript capture; it did not deliver a usable local
+  artifact.
+- Next session should start with: Plan and implement Gate 8A on a fresh branch:
+  shared task-artifact permissions plus transactional, validated E2B Git export
+  into a new local branch before cleanup. Re-run the calculator dogfood and
+  require the files to remain locally available after E2B is gone.
 
 ---
 

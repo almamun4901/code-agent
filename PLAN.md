@@ -97,7 +97,7 @@ debuggable*, deferring the two hardest external dependencies (sandbox, MCP
 transport) until the logic they wrap is already trustworthy.
 
 ```text
-0 → 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10
+0 → 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 8A → 8B → 8C → 9 → 10
         └──────────────┘
         (2 and 3 can interleave)
 ```
@@ -114,14 +114,18 @@ transport) until the logic they wrap is already trustworthy.
 | 6   | PreToolUse safety hook    | 5          | The destructive-command guard actually holds under attack             | `rm -rf` outside worktree blocked; symlink-escape attempt blocked; `..`-traversal blocked; each has a written red-team test case                                                                                                               | 10–14      |
 | 7   | TUI (Ink)                 | 3, 4, 5    | The harness is a pure view over already-stable state                  | Split view (plan / tool stream / budget) renders live; cold start < 2s; Ctrl-C fires `SessionEnd` and exits cleanly mid-tool                                                                                                                   | 4          |
 | 8   | Remaining hooks + budget  | 6          | All lifecycle extension points and cost ceilings are enforced         | All 8 hook types wired (`PreToolUse`, `PostToolUse`, `SessionStart`, `SessionEnd`, `UserPromptSubmit`, `Notification`, `Stop`, `PreCompact`); 3 ceilings enforced (50 turns, 200k context, $5/task); `PreCompact` fires and summarizes at 150k | 6          |
-| 9   | Telemetry                 | 8          | Observability is complete, not sampled                                | OTel spans on every model call, tool call, and hook invocation with `gen_ai.*` attributes; exported to self-hosted Langfuse; 100% tool-call span coverage verified by counting                                                                 | 3          |
+| 8A  | Result delivery           | 8          | Completed sandbox work reaches the user without weakening isolation   | A successful run exports a bounded, validated Git result before E2B cleanup and imports it into a new local branch without touching the user's branch or dirty worktree; cleanup waits for a durable host receipt; shell- and typed-tool-created files remain mutually writable | 6–10       |
+| 8B  | Plan approval             | 8A         | The user can correct design and scope before paying for implementation | Read-only discovery produces a proposed design, acceptance criteria, and execution plan; the runtime durably pauses for approve/revise/cancel; mutation tools are unavailable before approval; material replans require approval; an explicit auto-approve mode supports non-interactive evals | 8–14       |
+| 8C  | Completion evidence       | 8B         | Completion is based on durable external evidence, not plan checkmarks | A host-readable inspect/audit view exposes bounded tool arguments, exact error codes, results, and state correlation; completion requires verified repository diff, required command exit codes, and an exported commit receipt; frontend claims require real viewport checks when requested | 6–10       |
+| 9   | Telemetry                 | 8C         | Observability is complete, not sampled                                | OTel spans on every model call, tool call, and hook invocation with `gen_ai.*` attributes; exported to self-hosted Langfuse; 100% tool-call span coverage verified by counting; telemetry remains an asynchronous redacted projection of checkpoint/audit truth | 3          |
 | 10  | Eval + PR posting         | all        | The whole system produces the deliverable                             | 30-task SWE-bench Pro Python run vs mini-swe-agent; `eval/results.jsonl` written; successful task opens a real PR via GitHub App with plan + diff summary in the body                                                                          | 6          |
 
 
-Total: ~53–57h against a 35h budget — this is intentional headroom, not a
+Total: ~73–91h against a 35h budget — this is intentional headroom, not a
 target to hit exactly. Steps 2 and 6 are the likeliest to overrun (tool edge
-cases, red-team iteration); steps 0, 3, and 9 are likeliest to go faster than
-estimated. Re-budget after step 2, once you have real signal on your pace.
+cases, red-team iteration); the post-Step-8 productization gates were added
+after live dogfooding proved that safe execution alone does not deliver a
+usable result. Re-budget before 8A and again before the Step 10 eval run.
 
 ---
 
@@ -162,6 +166,10 @@ order above.
 | PreToolUse guard has a bypass (symlinks, absolute paths, env tricks) | Step 6         | Red-team test cases written alongside the hook, not after; this is 20% of the rubric — budget real time here        |
 | Context/plan drift over long sessions                                | Step 8         | `PreCompact` is a hook, not an afterthought — test it explicitly at the 150k boundary with a synthetic long session |
 | Crash recovery replays an interrupted mutating tool                  | Steps 5–6      | Before the first live-model real-tool run, add idempotency keys, write-ahead journaling, or operation-specific reconciliation; ADR 0009 makes this a blocking revisit |
+| E2B cleanup destroys a successfully built result                     | Step 8A        | Export and validate the exact Git result on the host, persist an import receipt, then permit sandbox cleanup        |
+| User sees design choices only after implementation starts            | Step 8B        | Pause durably after read-only discovery; deny all mutations until the user approves the proposed design and plan    |
+| Model checkmarks substitute for verified completion                  | Step 8C        | Require correlated terminal command/diff/commit evidence and expose it through a durable local inspection surface  |
+| `runner` creates files that typed tools cannot subsequently edit      | Step 8A        | Enforce shared-group writable repository artifacts and test shell-create → typed-preview/apply parity               |
 
 
 ---
@@ -201,5 +209,8 @@ order above.
 | 6 — PreToolUse safety hook    | complete                                              |
 | 7 — TUI (Ink)                 | complete                                              |
 | 8 — Remaining hooks + budget  | complete                                              |
+| 8A — Result delivery          | not started                                           |
+| 8B — Plan approval            | not started                                           |
+| 8C — Completion evidence      | not started                                           |
 | 9 — Telemetry                 | not started                                           |
 | 10 — Eval + PR posting        | not started                                           |

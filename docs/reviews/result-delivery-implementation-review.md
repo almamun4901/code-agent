@@ -63,5 +63,10 @@ No unresolved critical or informational findings remain after these fixes.
 - Live E2B delivery creates `result/eeeeeeeeeeee`, preserves the active local
   branch and HEAD, exposes the delivered file through Git after cleanup, and
   leaves no running sandbox.
+- The final Anthropic calculator dogfood completed in 15 model calls at about
+  $0.08 projected cost. It exercised real shell-create to typed preview/apply,
+  delivered `calculator.ts` and 26 passing Bun tests to
+  `result/ac0e8d8fdea8`, left the seed repository on its unchanged `main`, and
+  left zero E2B sandboxes running.
 - Runtime template built successfully as
   `terminal-coding-agent-tools:result-delivery-v1`.

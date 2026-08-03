@@ -22,6 +22,7 @@ import type { E2bTaskSession } from "../sandbox/e2b-session";
 import type { MutationRecord } from "../tools/mutation-journal";
 import { toolResultWireSchema } from "../mcp/schemas";
 import type { ModelToolRequest } from "../tools/contracts";
+import { isMutatingToolCall } from "../tools/contracts";
 import { validateToolCall } from "../tools/validate-call";
 import type { ProductionCheckpointStore } from "./checkpoint";
 import {
@@ -46,7 +47,14 @@ import {
   type LifecycleBudgetSnapshot,
 } from "./lifecycle";
 import type { ResultDeliveryReceipt } from "../sandbox/result-delivery";
-import { createLegacyExecutionApprovalState } from "./approval";
+import {
+  PlanProposalSchema,
+  createInitialApprovalState,
+  createLegacyExecutionApprovalState,
+  proposalDigest,
+  type ApprovalMode,
+  type ApprovalState,
+} from "./approval";
 
 const MAX_PLAN_TASKS = 20;
 
@@ -77,6 +85,7 @@ export type ProductionLoopOptions = {
   now?: () => number;
   hooks?: LifecycleHooks;
   budgetLimits?: Partial<BudgetLimits>;
+  approvalMode?: ApprovalMode;
 };
 
 export class ProductionTurnProtocolError extends Error {
@@ -92,6 +101,14 @@ export class ProductionLoopLimitError extends Error {
     super(message);
     this.name = "ProductionLoopLimitError";
     this.code = code;
+  }
+}
+
+export class PlanApprovalRequiredError extends Error {
+  readonly code = "PLAN_APPROVAL_REQUIRED";
+  constructor(readonly proposalDigest: string) {
+    super("A durable plan proposal is awaiting approval.");
+    this.name = "PlanApprovalRequiredError";
   }
 }
 
@@ -186,6 +203,49 @@ const TOOL_DEFINITIONS: ModelToolDefinition[] = [
   }, ["subcommand"]),
 ];
 
+const DISCOVERY_SYSTEM_PROMPT = [
+  "You are a coding agent performing read-only repository discovery.",
+  "Do not propose mutations until you understand the repository and task.",
+  "Each response must call exactly one available tool.",
+  "Use repository-relative paths. Git is limited to status and diff.",
+  "When discovery is sufficient, call propose_plan with the complete design,",
+  "scope, acceptance checks, assumptions, and ordered execution plan.",
+].join("\n");
+
+const DISCOVERY_TOOL_DEFINITIONS: ModelToolDefinition[] = [
+  toolDefinition("read_file", "Read a repository-relative UTF-8 file.", {
+    path: { type: "string" }, startLine: { type: "integer" }, endLine: { type: "integer" },
+  }, ["path"]),
+  toolDefinition("ripgrep", "Search repository text.", {
+    pattern: { type: "string" }, path: { type: "string" }, glob: { type: "string" }, caseSensitive: { type: "boolean" }, fixedString: { type: "boolean" },
+  }, ["pattern"]),
+  toolDefinition("tree_sitter_symbols", "List symbols in a source file.", { path: { type: "string" } }, ["path"]),
+  toolDefinition("git", "Inspect Git status or diff without mutation.", {
+    subcommand: { type: "string", enum: ["status", "diff"] }, staged: { type: "boolean" }, path: { type: "string" },
+  }, ["subcommand"]),
+  {
+    name: "propose_plan",
+    description: "Submit the complete implementation proposal for human approval.",
+    strict: true,
+    inputSchema: {
+      type: "object",
+      properties: {
+        approach: { type: "string" },
+        visualDirection: { type: "string" },
+        technologyChoices: { type: "array", items: { type: "object", properties: { name: { type: "string" }, rationale: { type: "string" } }, required: ["name", "rationale"], additionalProperties: false } },
+        includedScope: { type: "array", items: { type: "string" } },
+        excludedScope: { type: "array", items: { type: "string" } },
+        acceptanceCriteria: { type: "array", items: { type: "object", properties: { id: { type: "string" }, criterion: { type: "string" }, verification: { type: "string" } }, required: ["id", "criterion", "verification"], additionalProperties: false } },
+        assumptions: { type: "array", items: { type: "string" } },
+        unresolvedQuestions: { type: "array", items: { type: "string" } },
+        executionPlan: { type: "array", items: { type: "object", properties: { id: { type: "string" }, description: { type: "string" } }, required: ["id", "description"], additionalProperties: false } },
+      },
+      required: ["approach", "visualDirection", "technologyChoices", "includedScope", "excludedScope", "acceptanceCriteria", "assumptions", "unresolvedQuestions", "executionPlan"],
+      additionalProperties: false,
+    },
+  },
+];
+
 export async function runProductionLoop(
   options: ProductionLoopOptions,
 ): Promise<ProductionLoopResult> {
@@ -204,6 +264,7 @@ export async function runProductionLoop(
   };
   const pricing = pricingFor(runtime.identity);
   let state = await initializeState(options, configuredLimits, pricing);
+  state = await configureApprovalMode(state, options);
   validateRecoveredState(state, options);
   options.events?.emit({
     type: "state_loaded",
@@ -217,11 +278,22 @@ export async function runProductionLoop(
       state.terminalError ?? "Checkpoint contains a failed run.",
     );
   }
+  if (state.lifecycle === "cancelled") {
+    throw new ProductionTurnProtocolError("Checkpoint contains a cancelled run.");
+  }
   if (state.lifecycle === "completed") return toResult(state);
   assertRuntimeMatchesPricing(state, runtime);
 
   while (state.lifecycle === "running") {
     throwIfAborted(options.signal);
+
+    if (state.approval.phase === "discovering") {
+      state = await runDiscoveryStep(state, runtime, options);
+      continue;
+    }
+    if (state.approval.phase === "awaiting_approval") {
+      throw new PlanApprovalRequiredError(state.approval.proposalDigest!);
+    }
 
     if (state.pendingTurn) {
       state = await commitPendingTurn(state, state.pendingTurn, options);
@@ -312,6 +384,7 @@ export async function prepareProductionLifecycle(options: {
   hooks?: LifecycleHooks;
   budgetLimits?: Partial<BudgetLimits>;
   onSessionStart?: () => void;
+  approvalMode?: ApprovalMode;
 }): Promise<ProductionAgentState> {
   const existing = await options.checkpointStore.load();
   const limits = { ...DEFAULT_BUDGET_LIMITS, ...(options.budgetLimits ?? {}) };
@@ -353,6 +426,12 @@ export async function prepareProductionLifecycle(options: {
         promptStatus: "accepted",
         appendedPromptContext: promptResult.appendedContext,
         transcript: [{ role: "user", content: initialPrompt(state.task, promptResult.appendedContext) }],
+        approval: state.approval.phase === "discovering" && state.approval.discoveryTranscript.length === 0
+          ? {
+              ...state.approval,
+              discoveryTranscript: [{ role: "user", content: discoveryPrompt(state.task, promptResult.appendedContext) }],
+            }
+          : state.approval,
       };
       await options.checkpointStore.save(state);
     } catch (error) {
@@ -400,13 +479,15 @@ export async function commitReconciledProductionMutation(options: {
 }
 
 function createBootstrapState(
-  options: { canonicalRepoPath: string; task: string; runIdentity: string },
+  options: { canonicalRepoPath: string; task: string; runIdentity: string; approvalMode?: ApprovalMode },
   limits: ProductionAgentState["limits"],
   pricing: ProductionAgentState["pricing"],
 ): ProductionAgentState {
   return {
     version: 3,
-    approval: createLegacyExecutionApprovalState(),
+    approval: options.approvalMode
+      ? createInitialApprovalState(options.approvalMode)
+      : createLegacyExecutionApprovalState(),
     runIdentity: options.runIdentity,
     canonicalRepoPath: options.canonicalRepoPath,
     task: options.task,
@@ -431,6 +512,229 @@ function createBootstrapState(
     terminalError: null,
     lastToolResult: null,
   };
+}
+
+async function configureApprovalMode(
+  state: ProductionAgentState,
+  options: ProductionLoopOptions,
+): Promise<ProductionAgentState> {
+  if (!options.approvalMode) return state;
+  if (state.approval.mode && state.approval.mode !== options.approvalMode) {
+    throw new ProductionTurnProtocolError(
+      `Checkpoint approval mode ${state.approval.mode} does not match requested mode ${options.approvalMode}.`,
+    );
+  }
+  if (state.approval.mode === options.approvalMode) return state;
+  if (state.approval.legacyTerminal || state.counters.modelCalls > 0 || state.plan.length > 0) {
+    throw new ProductionTurnProtocolError(
+      "Existing execution state cannot be converted into a plan-approval run.",
+    );
+  }
+  const next = {
+    ...state,
+    approval: {
+      ...createInitialApprovalState(options.approvalMode),
+      discoveryTranscript: [
+        { role: "user" as const, content: discoveryPrompt(state.task, state.appendedPromptContext) },
+      ],
+    },
+  };
+  await options.checkpointStore.save(next);
+  return next;
+}
+
+async function runDiscoveryStep(
+  state: ProductionAgentState,
+  runtime: ModelRuntime,
+  options: ProductionLoopOptions,
+): Promise<ProductionAgentState> {
+  if (state.approval.pendingDiscoveryTurn) {
+    return commitPendingDiscoveryTurn(state, state.approval.pendingDiscoveryTurn, options);
+  }
+  state = await recoverAmbiguousCall(state, options);
+  const paid = state.pendingModelCall?.response
+    ? { state, turn: responseToTurn(state.pendingModelCall.response) }
+    : await reserveAndCall(state, createDiscoveryRequest(state), "agent", runtime, options);
+  state = paid.state;
+  let pending: NonNullable<ApprovalState["pendingDiscoveryTurn"]>;
+  try {
+    pending = validateDiscoveryTurn(paid.turn.content, paid.turn.stopReason);
+  } catch (error) {
+    const protocolError = error instanceof ProductionTurnProtocolError
+      ? error
+      : new ProductionTurnProtocolError("Discovery turn validation failed.");
+    if (state.consecutiveInvalidAttempts >= 1) {
+      const failed = {
+        ...state,
+        lifecycle: "failed" as const,
+        terminalCode: "MODEL_PROTOCOL_FAILED",
+        terminalError: `Model violated the discovery protocol twice: ${protocolError.message}`,
+        pendingModelCall: null,
+      };
+      await options.checkpointStore.save(failed);
+      throw protocolError;
+    }
+    const correction = `The previous discovery response was rejected without executing tools: ${protocolError.message} Retry with exactly one read-only discovery tool or propose_plan.`;
+    const retry: ProductionAgentState = {
+      ...state,
+      pendingModelCall: null,
+      consecutiveInvalidAttempts: 1,
+      approval: {
+        ...state.approval,
+        discoveryProtocolRetries: state.approval.discoveryProtocolRetries + 1,
+        discoveryTranscript: [...state.approval.discoveryTranscript, { role: "user", content: correction }],
+      },
+      counters: {
+        ...state.counters,
+        protocolRetries: state.counters.protocolRetries + 1,
+      },
+    };
+    await options.checkpointStore.save(retry);
+    return retry;
+  }
+  const staged: ProductionAgentState = {
+    ...state,
+    pendingModelCall: null,
+    approval: { ...state.approval, pendingDiscoveryTurn: pending },
+  };
+  await options.checkpointStore.save(staged);
+  return staged;
+}
+
+function validateDiscoveryTurn(
+  content: AssistantBlock[],
+  stopReason: string | null,
+): NonNullable<ApprovalState["pendingDiscoveryTurn"]> {
+  if (stopReason !== "tool_use") {
+    throw new ProductionTurnProtocolError(`Expected discovery tool_use stop reason, received "${stopReason ?? "null"}".`);
+  }
+  const calls = content.filter((block): block is ToolUseBlock => block.type === "tool_use");
+  if (calls.length !== 1 || new Set(calls.map((call) => call.id)).size !== 1) {
+    throw new ProductionTurnProtocolError("Discovery must call exactly one tool with a unique ID.");
+  }
+  const [call] = calls;
+  if (!call) throw new ProductionTurnProtocolError("Discovery tool call is missing.");
+  if (call.name === "propose_plan") {
+    const parsed = PlanProposalSchema.safeParse(call.input);
+    if (!parsed.success) {
+      throw new ProductionTurnProtocolError("propose_plan must contain one complete valid proposal.");
+    }
+    return {
+      assistantContent: content,
+      proposalToolId: call.id,
+      proposal: parsed.data,
+      action: null,
+    };
+  }
+  if (!["read_file", "ripgrep", "tree_sitter_symbols", "git"].includes(call.name)) {
+    throw new ProductionTurnProtocolError(`Tool "${call.name}" is unavailable during read-only discovery.`);
+  }
+  let request: ModelToolRequest;
+  try {
+    request = validateToolCall({ name: call.name, input: call.input });
+  } catch (error) {
+    throw new ProductionTurnProtocolError(error instanceof Error ? error.message : "Invalid discovery tool call.");
+  }
+  if (isMutatingToolCall(request)) {
+    throw new ProductionTurnProtocolError(`Mutating tool "${request.name}" is unavailable before plan approval.`);
+  }
+  return {
+    assistantContent: content,
+    proposalToolId: null,
+    proposal: null,
+    action: { toolUseId: call.id, operationId: crypto.randomUUID(), request: request as NonNullable<ApprovalState["pendingDiscoveryTurn"]>["action"] extends infer A ? A extends { request: infer R } ? R : never : never },
+  };
+}
+
+async function commitPendingDiscoveryTurn(
+  state: ProductionAgentState,
+  pending: NonNullable<ApprovalState["pendingDiscoveryTurn"]>,
+  options: ProductionLoopOptions,
+): Promise<ProductionAgentState> {
+  const validated = validateDiscoveryTurn(pending.assistantContent, "tool_use");
+  if (
+    validated.proposalToolId !== pending.proposalToolId ||
+    JSON.stringify(validated.proposal) !== JSON.stringify(pending.proposal) ||
+    JSON.stringify(validated.action?.request ?? null) !== JSON.stringify(pending.action?.request ?? null) ||
+    validated.action?.toolUseId !== pending.action?.toolUseId
+  ) {
+    throw new ProductionTurnProtocolError("Checkpoint pending discovery turn does not match its assistant content.");
+  }
+  const results: ToolResultBlock[] = [];
+  let toolIncrement = 0;
+  if (pending.action) {
+    const request = validateToolCall(pending.action.request);
+    if (isMutatingToolCall(request)) {
+      throw new ProductionTurnProtocolError("Preapproval mutation was denied before sandbox dispatch.");
+    }
+    throwIfAborted(options.signal);
+    const now = options.now ?? (() => performance.now());
+    const startedAt = now();
+    options.events?.emit({ type: "tool_started", operationId: pending.action.operationId, toolName: request.name, summary: safeToolSummary(request) });
+    let result;
+    try {
+      result = await options.session.call(request, options.signal ? { signal: options.signal } : {});
+      options.events?.emit({ type: "tool_finished", operationId: pending.action.operationId, durationMs: Math.max(0, now() - startedAt), outcome: toolOutcome(result) });
+    } catch (error) {
+      options.events?.emit({ type: "tool_finished", operationId: pending.action.operationId, durationMs: Math.max(0, now() - startedAt), outcome: options.signal?.aborted || isAbortError(error) ? "cancelled" : "failed" });
+      throw error;
+    }
+    results.push({ type: "tool_result", toolUseId: pending.action.toolUseId, content: JSON.stringify(result), isError: !result.success });
+    toolIncrement = 1;
+  } else if (pending.proposal && pending.proposalToolId) {
+    results.push({ type: "tool_result", toolUseId: pending.proposalToolId, content: JSON.stringify({ accepted: true, awaitingApproval: true }) });
+  }
+  const proposal = pending.proposal;
+  const next: ProductionAgentState = {
+    ...state,
+    pendingModelCall: null,
+    consecutiveInvalidAttempts: 0,
+    approval: {
+      ...state.approval,
+      ...(proposal
+        ? {
+            phase: "awaiting_approval" as const,
+            currentProposal: proposal,
+            proposalDigest: proposalDigest(proposal),
+            revision: state.approval.revision + 1,
+          }
+        : {}),
+      pendingDiscoveryTurn: null,
+      discoveryTranscript: [
+        ...state.approval.discoveryTranscript,
+        { role: "assistant", content: pending.assistantContent },
+        { role: "user", content: results },
+      ],
+      discoveryCommittedTurns: state.approval.discoveryCommittedTurns + 1,
+      discoveryToolCalls: state.approval.discoveryToolCalls + toolIncrement,
+    },
+    counters: {
+      ...state.counters,
+      committedTurns: state.counters.committedTurns + 1,
+      toolCalls: state.counters.toolCalls + toolIncrement,
+    },
+  };
+  await options.checkpointStore.save(next);
+  return next;
+}
+
+function createDiscoveryRequest(state: ProductionAgentState): ModelRequest {
+  return {
+    system: DISCOVERY_SYSTEM_PROMPT,
+    messages: state.approval.discoveryTranscript,
+    tools: DISCOVERY_TOOL_DEFINITIONS,
+    maxTokens: 4_096,
+  };
+}
+
+function discoveryPrompt(task: string, appendedContext = ""): string {
+  return [
+    "Discover the repository and propose a plan for this task:",
+    task,
+    "",
+    "Use only read-only discovery tools. Submit propose_plan when ready.",
+    ...(appendedContext ? ["", "Lifecycle context:", appendedContext] : []),
+  ].join("\n");
 }
 
 async function reserveAndCall(
@@ -1200,7 +1504,12 @@ async function initializeState(
   if (existing) return existing;
   const state: ProductionAgentState = {
     version: 3,
-    approval: createLegacyExecutionApprovalState(),
+    approval: options.approvalMode
+      ? {
+          ...createInitialApprovalState(options.approvalMode),
+          discoveryTranscript: [{ role: "user", content: discoveryPrompt(options.task) }],
+        }
+      : createLegacyExecutionApprovalState(),
     runIdentity: options.runIdentity,
     canonicalRepoPath: options.canonicalRepoPath,
     task: options.task,
@@ -1265,7 +1574,7 @@ function validateRecoveredState(
   if (state.plan.length > 0) {
     validatePlanShape(state.plan);
   }
-  if (state.lifecycle !== "running" && state.pendingTurn) {
+  if (state.lifecycle !== "running" && (state.pendingTurn || state.approval.pendingDiscoveryTurn)) {
     throw new ProductionTurnProtocolError(
       "A terminal checkpoint cannot contain a pending turn.",
     );
@@ -1291,6 +1600,7 @@ function validateRecoveredState(
       "Checkpoint does not contain the canonical initial task prompt.",
     );
   }
+  validateRecoveredDiscovery(state);
   validateRecoveredTranscript(state);
   if (
     state.counters.modelTurns !== state.counters.modelCalls ||
@@ -1314,7 +1624,9 @@ function validateRecoveredState(
       "Checkpoint tool observation fields disagree.",
     );
   }
-  const finalMessage = state.transcript.at(-1);
+  const finalMessage = state.approval.phase === "discovering"
+    ? state.approval.discoveryTranscript.at(-1)
+    : state.transcript.at(-1);
   const endsWithCorrection =
     finalMessage?.role === "user" &&
     typeof finalMessage.content === "string" &&
@@ -1331,13 +1643,71 @@ function validateRecoveredState(
   }
 }
 
+function validateRecoveredDiscovery(state: ProductionAgentState): void {
+  if (state.approval.legacyTerminal) return;
+  const transcript = state.approval.discoveryTranscript;
+  const first = transcript[0];
+  if (
+    !first || first.role !== "user" ||
+    first.content !== discoveryPrompt(state.task, state.appendedPromptContext)
+  ) {
+    throw new ProductionTurnProtocolError("Checkpoint does not contain the canonical discovery prompt.");
+  }
+  let committedTurns = 0;
+  let protocolRetries = 0;
+  let toolCalls = 0;
+  for (let index = 1; index < transcript.length; index += 1) {
+    const message = transcript[index];
+    if (message?.role === "user" && typeof message.content === "string") {
+      if (!message.content.startsWith("The previous discovery response was rejected without executing tools:")) {
+        throw new ProductionTurnProtocolError("Discovery transcript contains unknown feedback.");
+      }
+      protocolRetries += 1;
+      continue;
+    }
+    if (!message || message.role !== "assistant") {
+      throw new ProductionTurnProtocolError("Discovery transcript contains an unpaired result.");
+    }
+    const pending = validateDiscoveryTurn(message.content, "tool_use");
+    const resultMessage = transcript[index + 1];
+    if (!resultMessage || resultMessage.role !== "user" || !Array.isArray(resultMessage.content) || resultMessage.content.length !== 1) {
+      throw new ProductionTurnProtocolError("Discovery turn lacks one correlated result.");
+    }
+    const result = resultMessage.content[0];
+    const toolUseId = pending.proposalToolId ?? pending.action?.toolUseId;
+    if (result?.type !== "tool_result" || result.toolUseId !== toolUseId) {
+      throw new ProductionTurnProtocolError("Discovery result does not correlate with its tool call.");
+    }
+    if (pending.action) toolCalls += 1;
+    committedTurns += 1;
+    index += 1;
+  }
+  if (
+    committedTurns !== state.approval.discoveryCommittedTurns ||
+    protocolRetries !== state.approval.discoveryProtocolRetries ||
+    toolCalls !== state.approval.discoveryToolCalls
+  ) {
+    throw new ProductionTurnProtocolError("Discovery transcript does not match its committed counters.");
+  }
+  if (state.approval.pendingDiscoveryTurn) {
+    const validated = validateDiscoveryTurn(state.approval.pendingDiscoveryTurn.assistantContent, "tool_use");
+    if (
+      validated.proposalToolId !== state.approval.pendingDiscoveryTurn.proposalToolId ||
+      JSON.stringify(validated.proposal) !== JSON.stringify(state.approval.pendingDiscoveryTurn.proposal) ||
+      JSON.stringify(validated.action?.request ?? null) !== JSON.stringify(state.approval.pendingDiscoveryTurn.action?.request ?? null)
+    ) {
+      throw new ProductionTurnProtocolError("Checkpoint pending discovery turn is inconsistent.");
+    }
+  }
+}
+
 function validateRecoveredTranscript(state: ProductionAgentState): void {
   let historicalPlan: TodoItem[] = [];
   let historicalToolSucceeded: boolean | null = null;
   let historicalToolResult: ProductionAgentState["lastToolResult"] = null;
-  let committedTurns = 0;
-  let protocolRetries = 0;
-  let toolCalls = 0;
+  let committedTurns = state.approval.discoveryCommittedTurns;
+  let protocolRetries = state.approval.discoveryProtocolRetries;
+  let toolCalls = state.approval.discoveryToolCalls;
   let planRewrites = 0;
   let stopRejections = 0;
 

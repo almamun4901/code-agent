@@ -177,7 +177,7 @@ export const ProductionAgentStateSchema = ProductionAgentStateBaseSchema.superRe
   if (state.promptStatus === "accepted" && state.transcript.length === 0) {
     context.addIssue({ code: "custom", message: "Accepted prompt checkpoint requires a transcript." });
   }
-  if (state.approval.phase === "awaiting_approval" && (state.pendingTurn || state.pendingModelCall)) {
+  if (state.approval.phase === "awaiting_approval" && (state.pendingTurn || state.pendingModelCall || state.approval.pendingDiscoveryTurn)) {
     context.addIssue({ code: "custom", message: "Awaiting approval cannot contain pending model or repository work." });
   }
   if ((state.approval.phase === "discovering" || state.approval.phase === "awaiting_approval") && state.pendingTurn?.action) {

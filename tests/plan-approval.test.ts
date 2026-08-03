@@ -9,6 +9,11 @@ import {
 } from "../src/runtime/approval";
 import { decodeProductionCheckpoint, ProductionCheckpointError } from "../src/runtime/checkpoint";
 import type { ProductionAgentState } from "../src/runtime/schema";
+import type { ModelRequest, ModelTurn } from "../src/model/contracts";
+import {
+  PlanApprovalRequiredError,
+  runProductionLoop,
+} from "../src/runtime/production-loop";
 
 describe("plan approval schema", () => {
   test("validates a bounded proposal and produces stable digests", () => {
@@ -59,6 +64,65 @@ describe("plan approval schema", () => {
   });
 });
 
+describe("read-only plan discovery", () => {
+  test("exposes only read tools, checkpoints a proposal, and resumes without spending", async () => {
+    const requests: ModelRequest[] = [];
+    const turns = [
+      discoveryTurn("read_file", { path: "README.md" }),
+      discoveryTurn("propose_plan", proposal()),
+    ];
+    let calls = 0;
+    const store = new (await import("../src/runtime/checkpoint")).MemoryProductionCheckpointStore();
+    const sessionCalls: string[] = [];
+    const options = {
+      canonicalRepoPath: "/tmp/approval-discovery",
+      task: "Add approval",
+      runIdentity: "b".repeat(64),
+      approvalMode: "interactive" as const,
+      checkpointStore: store,
+      callModel: async (request: ModelRequest) => {
+        requests.push(request);
+        const turn = turns[calls++];
+        if (!turn) throw new Error("Unexpected paid call.");
+        return turn;
+      },
+      session: {
+        async call(request: { name: string }) {
+          sessionCalls.push(request.name);
+          return { success: true, output: "read", truncated: false, originalTokenCount: 1, codec: "test" };
+        },
+      },
+    };
+    await expect(runProductionLoop(options)).rejects.toBeInstanceOf(PlanApprovalRequiredError);
+    expect(requests[0]?.tools.map((tool) => tool.name)).toEqual([
+      "read_file", "ripgrep", "tree_sitter_symbols", "git", "propose_plan",
+    ]);
+    expect(requests[0]?.tools.find((tool) => tool.name === "git")?.inputSchema.properties.subcommand).toEqual({ type: "string", enum: ["status", "diff"] });
+    expect(sessionCalls).toEqual(["read_file"]);
+    expect(await store.load()).toMatchObject({
+      approval: { phase: "awaiting_approval", revision: 1, discoveryCommittedTurns: 2, discoveryToolCalls: 1 },
+      counters: { modelCalls: 2, committedTurns: 2, toolCalls: 1 },
+    });
+    await expect(runProductionLoop(options)).rejects.toBeInstanceOf(PlanApprovalRequiredError);
+    expect(calls).toBe(2);
+  });
+
+  test("rejects mutation attempts before sandbox dispatch", async () => {
+    let sessionCalls = 0;
+    const mutating = discoveryTurn("run_shell", { cwd: ".", command: "touch denied" });
+    await expect(runProductionLoop({
+      canonicalRepoPath: "/tmp/approval-denial",
+      task: "Do not mutate",
+      runIdentity: "c".repeat(64),
+      approvalMode: "interactive",
+      checkpointStore: new (await import("../src/runtime/checkpoint")).MemoryProductionCheckpointStore(),
+      callModel: async () => mutating,
+      session: { async call() { sessionCalls += 1; throw new Error("must not dispatch"); } },
+    })).rejects.toThrow("unavailable during read-only discovery");
+    expect(sessionCalls).toBe(0);
+  });
+});
+
 function proposal() {
   return {
     approach: "Add a durable approval boundary.",
@@ -70,6 +134,14 @@ function proposal() {
     assumptions: ["Approval is local and single-user."],
     unresolvedQuestions: [],
     executionPlan: [{ id: "state", description: "Persist approval state." }],
+  };
+}
+
+function discoveryTurn(name: string, input: unknown): ModelTurn {
+  return {
+    content: [{ type: "tool_use", id: crypto.randomUUID(), name, input }],
+    stopReason: "tool_use",
+    usage: { inputTokens: 10, outputTokens: 5 },
   };
 }
 

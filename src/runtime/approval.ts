@@ -2,6 +2,15 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import { ConversationMessageSchema } from "../plan/schema";
 
+const discoveryToolRequestSchema = z.object({
+  name: z.enum(["read_file", "ripgrep", "tree_sitter_symbols", "git"]),
+  input: z.record(z.string(), z.unknown()),
+}).strict();
+const assistantBlockSchema = z.union([
+  z.object({ type: z.literal("text"), text: z.string() }).strict(),
+  z.object({ type: z.literal("tool_use"), id: z.string().min(1), name: z.string().min(1), input: z.unknown() }).strict(),
+]);
+
 const boundedText = (max: number) => z.string().trim().min(1).max(max);
 const scopedItemSchema = z.object({
   name: boundedText(256),
@@ -53,6 +62,16 @@ export const ApprovalStateSchema = z.object({
   discoveryCommittedTurns: z.number().int().nonnegative(),
   discoveryProtocolRetries: z.number().int().nonnegative(),
   discoveryToolCalls: z.number().int().nonnegative(),
+  pendingDiscoveryTurn: z.object({
+    assistantContent: z.array(assistantBlockSchema),
+    proposalToolId: z.string().min(1).nullable(),
+    proposal: PlanProposalSchema.nullable(),
+    action: z.object({
+      toolUseId: z.string().min(1),
+      operationId: z.string().uuid(),
+      request: discoveryToolRequestSchema,
+    }).strict().nullable(),
+  }).strict().nullable(),
   pendingReapproval: z.object({
     priorDigest: z.string().regex(/^[a-f0-9]{64}$/),
     reason: boundedText(2_048),
@@ -111,6 +130,7 @@ export function createInitialApprovalState(mode: ApprovalMode | null = null): Ap
     discoveryCommittedTurns: 0,
     discoveryProtocolRetries: 0,
     discoveryToolCalls: 0,
+    pendingDiscoveryTurn: null,
     pendingReapproval: null,
     legacyTerminal: false,
   };

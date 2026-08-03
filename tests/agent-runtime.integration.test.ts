@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { runHeadlessAgent } from "../src/runtime/agent-runner";
+import { MemoryProductionCheckpointStore } from "../src/runtime/checkpoint";
 import { createTemporaryRepository } from "./support/temp-repo";
 
 const liveEnabled =
@@ -17,10 +18,11 @@ liveTest(
       const result = await runHeadlessAgent({
         repoPath: repository.worktreePath,
         task:
-          "Inspect README.md using read_file. On the first response, create a single in_progress plan task and call read_file. Only mark it completed on the following response after the tool result. Do not modify files.",
-        maxModelTurns: 12,
+          "During discovery, inspect README.md once using read_file, then call propose_plan with one execution task. After automatic approval, inspect README.md once and complete the approved task on the following response. Do not modify files.",
+        maxModelTurns: 20,
         modelProvider: "anthropic",
         approvalMode: "auto",
+        checkpointStore: new MemoryProductionCheckpointStore(),
       });
 
       expect(result.status).toBe("completed");

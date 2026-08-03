@@ -14,6 +14,7 @@ import {
 } from "../src/runtime/checkpoint";
 import { runProductionLoop } from "../src/runtime/production-loop";
 import type { ProductionAgentState } from "../src/runtime/schema";
+import { createLegacyExecutionApprovalState } from "../src/runtime/approval";
 import type {
   ModelToolRequest,
   ToolResult,
@@ -36,7 +37,7 @@ describe("runtime observation events", () => {
     const prepared = await prepareAgentRun(repo.worktreePath, "Inspect safely");
     const observed: AgentEvent[] = [];
     const events = createAgentEventPublisher((event) => observed.push(event));
-    const store = new MemoryProductionCheckpointStore();
+    const store = preapprovedStore(prepared);
     const turns = [
       modelTurn(
         [["inspect", "Inspect the file", "in_progress"]],
@@ -88,7 +89,7 @@ describe("runtime observation events", () => {
     repositories.push(repo);
     const prepared = await prepareAgentRun(repo.worktreePath, "Inspect safely");
     const observed: AgentEvent[] = [];
-    const backing = new MemoryProductionCheckpointStore();
+    const backing = preapprovedStore(prepared);
     let saves = 0;
     const store: ProductionCheckpointStore = {
       load: () => backing.load(),
@@ -207,7 +208,7 @@ describe("runtime observation events", () => {
 
     await runProductionLoop({
       ...prepared,
-      checkpointStore: new MemoryProductionCheckpointStore(),
+      checkpointStore: preapprovedStore(prepared),
       events: createAgentEventPublisher((event) => observed.push(event)),
       callModel: sequence([
         modelTurn(
@@ -260,7 +261,7 @@ describe("runtime observation events", () => {
 
     await expect(runProductionLoop({
       ...prepared,
-      checkpointStore: new MemoryProductionCheckpointStore(),
+      checkpointStore: preapprovedStore(prepared),
       events: createAgentEventPublisher((event) => observed.push(event)),
       callModel: async () =>
         modelTurn(
@@ -340,4 +341,33 @@ function modelTurn(
     stopReason: "tool_use",
     usage: { inputTokens: 10, outputTokens: 5 },
   };
+}
+
+function preapprovedStore(prepared: { canonicalRepoPath: string; task: string; runIdentity: string }): MemoryProductionCheckpointStore {
+  const state: ProductionAgentState = {
+    version: 3,
+    ...prepared,
+    approval: createLegacyExecutionApprovalState(),
+    promptStatus: "accepted",
+    appendedPromptContext: "",
+    lifecycle: "running",
+    plan: [],
+    transcript: [{ role: "user", content: `Complete the following repository task:\n${prepared.task}\n\nFirst create a concrete plan, then perform one safe action per turn.` }],
+    lastToolSucceeded: null,
+    pendingTurn: null,
+    pendingModelCall: null,
+    limits: { maxModelCalls: 50, compactAtTokens: 150_000, maxContextTokens: 200_000, maxProjectedCostMicroUsd: 5_000_000, compactAtCheckpointBytes: 1_572_864, maxCheckpointBytes: 2_097_152 },
+    pricing: { catalogVersion: 1, identity: { provider: "injected", model: "claude-haiku-4-5" }, inputRateMicroUsdPerMillion: 1_000_000, outputRateMicroUsdPerMillion: 5_000_000 },
+    context: { lastEstimateTokens: 0, estimateSource: null, requestFingerprint: null },
+    cost: { projectedMicroUsd: 0, observedMicroUsd: 0, observedAvailable: false, driftMicroUsd: 0 },
+    compaction: { count: 0, lastPreTokens: 0, lastPostTokens: 0, baselineCommittedTurns: 0, baselineProtocolRetries: 0, baselineToolCalls: 0, baselinePlanRewrites: 0, baselineStopRejections: 0 },
+    notificationKeys: [],
+    lastNotification: null,
+    counters: { modelTurns: 0, modelCalls: 0, agentCalls: 0, compactionCalls: 0, stopRejections: 0, committedTurns: 0, protocolRetries: 0, toolCalls: 0, planRewrites: 0, inputTokens: 0, outputTokens: 0 },
+    consecutiveInvalidAttempts: 0,
+    terminalCode: null,
+    terminalError: null,
+    lastToolResult: null,
+  };
+  return new MemoryProductionCheckpointStore(state);
 }

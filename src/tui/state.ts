@@ -4,6 +4,7 @@ import type {
   AgentUsage,
   ToolOutcome,
 } from "../runtime/events";
+import type { ApprovalMode, PlanProposal } from "../runtime/approval";
 
 export const MAX_TOOL_EVENTS = 200;
 export const MAX_TOOL_EVENT_BYTES = 256 * 1024;
@@ -21,6 +22,7 @@ export type TuiState = {
   status:
     | "initializing"
     | "running"
+    | "awaiting_approval"
     | "stopping"
     | "completed"
     | "cancelled"
@@ -31,6 +33,13 @@ export type TuiState = {
   cleanup?: "succeeded" | "failed";
   error?: { code: string; message: string };
   notification?: { code: string; message: string };
+  approval?: {
+    proposal: PlanProposal;
+    proposalDigest: string;
+    revision: number;
+    mode: ApprovalMode;
+    reapprovalReason?: string;
+  };
 };
 
 export const initialTuiState: TuiState = {
@@ -73,6 +82,24 @@ export function reduceAgentEvent(
       };
     case "plan_committed":
       return { ...state, plan: structuredClone(event.plan) };
+    case "approval_requested":
+      return {
+        ...state,
+        status: "awaiting_approval",
+        approval: structuredClone({
+          proposal: event.proposal,
+          proposalDigest: event.proposalDigest,
+          revision: event.revision,
+          mode: event.mode,
+          ...(event.reapprovalReason ? { reapprovalReason: event.reapprovalReason } : {}),
+        }),
+      };
+    case "approval_resolved":
+      return {
+        ...state,
+        status: event.decision === "cancel" ? "stopping" : "running",
+        approval: undefined,
+      };
     case "tool_started":
       return {
         ...state,

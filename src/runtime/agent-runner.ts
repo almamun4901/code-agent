@@ -30,7 +30,9 @@ import {
   type ProductionLoopResult,
 } from "./production-loop";
 import type {
+  ApprovalDecision,
   ApprovalMode,
+  ApprovalRequest,
   RequestPlanApproval,
 } from "./approval";
 import { LifecycleHooks } from "./lifecycle";
@@ -93,6 +95,7 @@ export type AgentRunResult = SessionEndContext & {
 export type AgentRunController = {
   result: Promise<AgentRunResult>;
   stop(reason: "sigint" | "ui" | "runtime"): Promise<AgentRunResult>;
+  submitApproval(proposalDigest: string, decision: ApprovalDecision): boolean;
 };
 
 export type ControlledAgentRunOptions = HeadlessAgentRunOptions & {
@@ -241,6 +244,7 @@ export function startAgentRun(
   options: ControlledAgentRunOptions,
 ): AgentRunController {
   const abortController = new AbortController();
+  const approvalBroker = createApprovalBroker();
   const events = createAgentEventPublisher(options.eventSink);
   let stopReason: "sigint" | "ui" | "runtime" | undefined;
   let runStarted = false;
@@ -275,6 +279,11 @@ export function startAgentRun(
       ...options,
       signal: abortController.signal,
       eventSink: undefined,
+      requestApproval: options.requestApproval ?? (
+        options.approvalMode === "interactive"
+          ? approvalBroker.request
+          : undefined
+      ),
     },
     events,
     (event) => {
@@ -374,6 +383,53 @@ export function startAgentRun(
       }
       return result;
     },
+    submitApproval(proposalDigest, decision) {
+      return approvalBroker.submit(proposalDigest, decision);
+    },
+  };
+}
+
+function createApprovalBroker(): {
+  request: RequestPlanApproval;
+  submit(proposalDigest: string, decision: ApprovalDecision): boolean;
+} {
+  let pending: {
+    request: ApprovalRequest;
+    resolve: (decision: ApprovalDecision) => void;
+    reject: (error: unknown) => void;
+    removeAbort: () => void;
+  } | undefined;
+  return {
+    request(request, signal) {
+      if (pending) throw new AgentRunConfigurationError("An approval request is already pending.");
+      return new Promise<ApprovalDecision>((resolve, reject) => {
+        const abort = () => {
+          const current = pending;
+          pending = undefined;
+          current?.removeAbort();
+          reject(new DOMException("Plan approval wait was cancelled.", "AbortError"));
+        };
+        if (signal?.aborted) {
+          reject(new DOMException("Plan approval wait was cancelled.", "AbortError"));
+          return;
+        }
+        signal?.addEventListener("abort", abort, { once: true });
+        pending = {
+          request,
+          resolve,
+          reject,
+          removeAbort: () => signal?.removeEventListener("abort", abort),
+        };
+      });
+    },
+    submit(proposalDigest, decision) {
+      if (!pending || pending.request.proposalDigest !== proposalDigest) return false;
+      const current = pending;
+      pending = undefined;
+      current.removeAbort();
+      current.resolve(decision);
+      return true;
+    },
   };
 }
 
@@ -427,6 +483,14 @@ async function executeAgentRun(
         "Existing checkpoint belongs to another repository or task.",
       );
     }
+    const approvalMode = options.approvalMode ?? (
+      options.requestApproval ? "interactive" as const : undefined
+    );
+    if (!existing && !approvalMode) {
+      throw new AgentRunUsageError(
+        "Headless runs require an explicit approval mode or approval handler.",
+      );
+    }
     const templateId =
       options.templateId ?? process.env.E2B_TEMPLATE_ID?.trim() ?? "";
     if ((!existing || existing.lifecycle === "running") && !templateId) {
@@ -442,7 +506,7 @@ async function executeAgentRun(
       checkpointStore,
       modelRuntime,
       hooks: options.hooks,
-      approvalMode: options.approvalMode,
+      approvalMode,
       onSessionStart: () => lifecycleEvent("hooks_started"),
       ...(options.maxModelTurns === undefined ? {} : { budgetLimits: { maxModelCalls: options.maxModelTurns } }),
     });
@@ -469,7 +533,7 @@ async function executeAgentRun(
         signal: options.signal,
         events,
         hooks: options.hooks,
-        approvalMode: options.approvalMode,
+        approvalMode,
         requestApproval: options.requestApproval,
       });
       const completedDelivery = await loadCompletedResultDelivery(
@@ -513,7 +577,7 @@ async function executeAgentRun(
         signal: options.signal,
         events,
         hooks: options.hooks,
-        approvalMode: options.approvalMode,
+        approvalMode,
         requestApproval: options.requestApproval,
       });
     }

@@ -186,6 +186,40 @@ describe("responsive Ink application", () => {
     expect(frame).toContain("Model calls 2 / 50");
     expect(frame).toContain("DENIED: Policy blocked");
   });
+
+  test("renders the complete proposal and submits approve or revision feedback", async () => {
+    const state = reduceAgentEvent(initialTuiState, event({
+      type: "approval_requested",
+      proposal: approvalProposal(),
+      proposalDigest: "a".repeat(64),
+      revision: 2,
+      mode: "interactive",
+      reapprovalReason: "Dependency choice changed.",
+    }));
+    const decisions: unknown[] = [];
+    const view = render(
+      <AgentApp
+        state={state}
+        width={100}
+        onApprovalDecision={(digest, decision) => decisions.push({ digest, decision })}
+      />,
+    );
+    expect(view.lastFrame()).toContain("Plan approval · revision 2");
+    expect(view.lastFrame()).toContain("existing runtime boundaries");
+    expect(view.lastFrame()).toContain("No mutation before approval");
+    view.stdin.write("a");
+    await Bun.sleep(0);
+    expect(decisions).toEqual([{ digest: "a".repeat(64), decision: { kind: "approve" } }]);
+    decisions.length = 0;
+    view.stdin.write("r");
+    await Bun.sleep(0);
+    view.stdin.write("Prefer current dependencies");
+    await Bun.sleep(0);
+    view.stdin.write("\r");
+    await Bun.sleep(0);
+    expect(decisions).toEqual([{ digest: "a".repeat(64), decision: { kind: "revise", feedback: "Prefer current dependencies" } }]);
+    view.unmount();
+  });
 });
 
 describe("non-TTY output", () => {
@@ -255,4 +289,18 @@ function event(
       1_700_000_000_000 + (explicitSequence ?? sequence),
     ).toISOString(),
   } as AgentEvent;
+}
+
+function approvalProposal() {
+  return {
+    approach: "Use existing runtime boundaries.",
+    visualDirection: "not_applicable" as const,
+    technologyChoices: [{ name: "Zod", rationale: "Validate checkpoints." }],
+    includedScope: ["Approval state"],
+    excludedScope: ["Remote approval"],
+    acceptanceCriteria: [{ id: "safe", criterion: "No mutation before approval.", verification: "Inspect session calls." }],
+    assumptions: ["Single local approver"],
+    unresolvedQuestions: [],
+    executionPlan: [{ id: "state", description: "Persist approval state." }],
+  };
 }

@@ -32,6 +32,7 @@ process.exitCode = await runCli(process.argv.slice(2), {
     return startAgentRun({
       ...options,
       templateId: "template:test",
+      approvalMode: "auto",
       checkpointStore,
       callModel: async (_request, modelOptions) => {
         if (phase === "model") {
@@ -39,7 +40,8 @@ process.exitCode = await runCli(process.argv.slice(2), {
           await waitForAbort(modelOptions?.signal);
         }
         modelTurns += 1;
-        if (modelTurns > 1) {
+        if (modelTurns === 1) return proposalTurn();
+        if (modelTurns > 2) {
           throw new Error("Cancellation did not stop the next model turn.");
         }
         return firstTurn(phase);
@@ -121,6 +123,29 @@ function firstTurn(cancellationPhase: string): ModelTurn {
       },
       action,
     ],
+    stopReason: "tool_use",
+    usage: { inputTokens: 1, outputTokens: 1 },
+  };
+}
+
+function proposalTurn(): ModelTurn {
+  return {
+    content: [{
+      type: "tool_use",
+      id: crypto.randomUUID(),
+      name: "propose_plan",
+      input: {
+        approach: "Exercise cancellation safely.",
+        visualDirection: "not_applicable",
+        technologyChoices: [],
+        includedScope: ["Cancellation lifecycle"],
+        excludedScope: ["Unrelated work"],
+        acceptanceCriteria: [{ id: "cancel", criterion: "Cancellation reaches terminal cleanup.", verification: "Observe lifecycle output." }],
+        assumptions: [],
+        unresolvedQuestions: [],
+        executionPlan: [{ id: "cancel", description: "Exercise cancellation" }],
+      },
+    }],
     stopReason: "tool_use",
     usage: { inputTokens: 1, outputTokens: 1 },
   };

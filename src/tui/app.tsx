@@ -1,21 +1,32 @@
-import { Box, Text, useStdout } from "ink";
+import { Box, Text, useInput, useStdout } from "ink";
 import { useEffect, useState } from "react";
 import type { TodoItem } from "../plan/schema";
 import type { ToolOutcome } from "../runtime/events";
 import { sanitizeTerminalText } from "../runtime/events";
 import type { ToolActivity, TuiState } from "./state";
+import type { ApprovalDecision } from "../runtime/approval";
 
 export type AgentAppProps = {
   state: TuiState;
   width?: number;
+  onApprovalDecision?: (proposalDigest: string, decision: ApprovalDecision) => void;
 };
 
-export function AgentApp({ state, width }: AgentAppProps) {
+export function AgentApp({ state, width, onApprovalDecision }: AgentAppProps) {
   const terminalWidth = useTerminalWidth(width);
   const now = useElapsedClock(state.tools.some((tool) => !tool.outcome));
   const plan = <PlanPane plan={state.plan} />;
   const tools = <ToolPane tools={state.tools} now={now} />;
   const budget = <BudgetPane state={state} />;
+
+  if (state.approval) {
+    return (
+      <Box flexDirection="column" width={terminalWidth}>
+        <ApprovalPane approval={state.approval} onDecision={onApprovalDecision} />
+        {budget}
+      </Box>
+    );
+  }
 
   if (terminalWidth >= 120) {
     return (
@@ -46,6 +57,73 @@ export function AgentApp({ state, width }: AgentAppProps) {
       {budget}
     </Box>
   );
+}
+
+function ApprovalPane({
+  approval,
+  onDecision,
+}: {
+  approval: NonNullable<TuiState["approval"]>;
+  onDecision?: AgentAppProps["onApprovalDecision"];
+}) {
+  const [revising, setRevising] = useState(false);
+  const [feedback, setFeedback] = useState("");
+  useInput((input, key) => {
+    if (approval.mode !== "interactive" || !onDecision) return;
+    if (revising) {
+      if (key.escape) {
+        setRevising(false);
+        setFeedback("");
+      } else if (key.return) {
+        const value = feedback.trim();
+        if (value) onDecision(approval.proposalDigest, { kind: "revise", feedback: value });
+      } else if (key.backspace || key.delete) {
+        setFeedback((value) => value.slice(0, -1));
+      } else if (!key.ctrl && !key.meta && input && feedback.length < 8_192) {
+        setFeedback((value) => `${value}${input}`.slice(0, 8_192));
+      }
+      return;
+    }
+    if (input.toLowerCase() === "a") onDecision(approval.proposalDigest, { kind: "approve" });
+    if (input.toLowerCase() === "c") onDecision(approval.proposalDigest, { kind: "cancel" });
+    if (input.toLowerCase() === "r") setRevising(true);
+  }, { isActive: approval.mode === "interactive" });
+
+  const proposal = approval.proposal;
+  return (
+    <Pane title={`Plan approval · revision ${approval.revision}`}>
+      {approval.reapprovalReason ? <Text color="yellow">Reapproval: {safe(approval.reapprovalReason)}</Text> : null}
+      <Text bold>Approach</Text>
+      <Text>{safe(proposal.approach)}</Text>
+      <Text bold>Visual direction</Text>
+      <Text>{safe(proposal.visualDirection)}</Text>
+      <Text bold>Technology</Text>
+      {proposal.technologyChoices.length === 0
+        ? <Text dimColor>None</Text>
+        : proposal.technologyChoices.map((choice) => <Text key={choice.name}>• {safe(choice.name)} — {safe(choice.rationale)}</Text>)}
+      <Text bold>Included scope</Text>
+      {proposal.includedScope.map((item) => <Text key={item}>• {safe(item)}</Text>)}
+      <Text bold>Excluded scope</Text>
+      {proposal.excludedScope.length === 0 ? <Text dimColor>None</Text> : proposal.excludedScope.map((item) => <Text key={item}>• {safe(item)}</Text>)}
+      <Text bold>Acceptance</Text>
+      {proposal.acceptanceCriteria.map((item) => <Text key={item.id}>• {safe(item.criterion)} — verify: {safe(item.verification)}</Text>)}
+      <Text bold>Assumptions / unresolved</Text>
+      {[...proposal.assumptions, ...proposal.unresolvedQuestions].length === 0
+        ? <Text dimColor>None</Text>
+        : [...proposal.assumptions, ...proposal.unresolvedQuestions].map((item) => <Text key={item}>• {safe(item)}</Text>)}
+      <Text bold>Execution plan</Text>
+      {proposal.executionPlan.map((item, index) => <Text key={item.id}>{index + 1}. {safe(item.description)}</Text>)}
+      {approval.mode === "interactive"
+        ? revising
+          ? <Text color="cyan">Revision feedback: {safe(feedback)}▌ (Enter submit · Esc back)</Text>
+          : <Text color="cyan">[A]pprove · [R]evise · [C]ancel</Text>
+        : <Text dimColor>Auto-approval requested</Text>}
+    </Pane>
+  );
+}
+
+function safe(value: string): string {
+  return sanitizeTerminalText(value);
 }
 
 function PlanPane({ plan }: { plan: TodoItem[] }) {

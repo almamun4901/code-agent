@@ -41,6 +41,7 @@ describe("production lifecycle budgets", () => {
       repoPath: process.cwd(),
       task: "Denied lifecycle test",
       templateId: "unused",
+      approvalMode: "auto",
       checkpointStore: new MemoryProductionCheckpointStore(),
       modelRuntime: runtimeFor([]),
       hooks,

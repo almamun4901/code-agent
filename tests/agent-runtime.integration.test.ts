@@ -20,6 +20,7 @@ liveTest(
           "Inspect README.md using read_file. On the first response, create a single in_progress plan task and call read_file. Only mark it completed on the following response after the tool result. Do not modify files.",
         maxModelTurns: 12,
         modelProvider: "anthropic",
+        approvalMode: "auto",
       });
 
       expect(result.status).toBe("completed");

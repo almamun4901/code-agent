@@ -18,6 +18,21 @@ export function formatStaticEvent(event: AgentEvent): string[] {
         (task) =>
           `Plan [${task.status}] ${singleLine(task.description)}`,
       );
+    case "approval_requested":
+      return [
+        `Plan approval requested: revision ${event.revision} (${event.mode})`,
+        `Approach: ${singleLine(event.proposal.approach)}`,
+        `Visual direction: ${singleLine(event.proposal.visualDirection)}`,
+        ...event.proposal.technologyChoices.map((choice) => `Technology: ${singleLine(choice.name)} — ${singleLine(choice.rationale)}`),
+        ...event.proposal.includedScope.map((item) => `Included: ${singleLine(item)}`),
+        ...event.proposal.excludedScope.map((item) => `Excluded: ${singleLine(item)}`),
+        ...event.proposal.acceptanceCriteria.map((item) => `Acceptance: ${singleLine(item.criterion)} — verify: ${singleLine(item.verification)}`),
+        ...event.proposal.assumptions.map((item) => `Assumption: ${singleLine(item)}`),
+        ...event.proposal.unresolvedQuestions.map((item) => `Unresolved: ${singleLine(item)}`),
+        ...event.proposal.executionPlan.map((item, index) => `Execution ${index + 1}: ${singleLine(item.description)}`),
+      ];
+    case "approval_resolved":
+      return [`Plan approval resolved: ${event.decision} (revision ${event.revision})`];
     case "tool_started":
       return [
         `Tool started: ${event.toolName} ${singleLine(event.summary)}`.trim(),

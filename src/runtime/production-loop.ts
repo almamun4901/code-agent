@@ -141,6 +141,9 @@ const SYSTEM_PROMPT = [
   "8. When every task is completed, call only rewrite_plan.",
   "9. Between plan rewrites, action responses may call exactly one repository",
   "   tool without repeating rewrite_plan. Rewrite the plan when status changes.",
+  "10. If product/visual direction, dependencies, scope, acceptance criteria,",
+  "   assumptions, or unresolved questions materially change, call",
+  "   request_reapproval after rewrite_plan and pause before further work.",
   "",
   "Use repository-relative paths. Inspect before editing, preview edits before",
   "applying them, verify changes, and do not attempt to publish or access the host.",
@@ -536,6 +539,7 @@ async function configureApprovalMode(
   options: ProductionLoopOptions,
 ): Promise<ProductionAgentState> {
   if (!options.approvalMode) return state;
+  if (state.lifecycle !== "running") return state;
   if (state.approval.mode && state.approval.mode !== options.approvalMode) {
     throw new ProductionTurnProtocolError(
       `Checkpoint approval mode ${state.approval.mode} does not match requested mode ${options.approvalMode}.`,
@@ -763,6 +767,16 @@ async function resolvePlanApproval(
   if (!proposal || !digest) {
     throw new ProductionTurnProtocolError("Awaiting approval checkpoint has no proposal.");
   }
+  options.events?.emit({
+    type: "approval_requested",
+    proposal,
+    proposalDigest: digest,
+    revision: state.approval.revision,
+    mode: state.approval.mode ?? "interactive",
+    ...(state.approval.pendingReapproval?.reason
+      ? { reapprovalReason: state.approval.pendingReapproval.reason }
+      : {}),
+  });
   let rawDecision;
   if (state.approval.mode === "auto") {
     rawDecision = { kind: "approve" as const };
@@ -790,6 +804,7 @@ async function resolvePlanApproval(
       approval: { ...state.approval, phase: "cancelled", pendingDiscoveryTurn: null },
     };
     await options.checkpointStore.save(cancelled);
+    options.events?.emit({ type: "approval_resolved", proposalDigest: digest, revision: state.approval.revision, decision: "cancel" });
     throw new PlanApprovalCancelledError();
   }
   if (decision.kind === "revise") {
@@ -806,6 +821,7 @@ async function resolvePlanApproval(
       },
     };
     await options.checkpointStore.save(revised);
+    options.events?.emit({ type: "approval_resolved", proposalDigest: digest, revision: state.approval.revision, decision: "revise" });
     return revised;
   }
   const approved: ProductionAgentState = {
@@ -817,6 +833,7 @@ async function resolvePlanApproval(
     },
   };
   await options.checkpointStore.save(approved);
+  options.events?.emit({ type: "approval_resolved", proposalDigest: digest, revision: state.approval.revision, decision: "approve" });
   return approved;
 }
 

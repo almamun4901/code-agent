@@ -27,6 +27,25 @@ liveTest(
       releaseToolStarted = resolve;
     });
     const turns: ModelTurn[] = [{
+      content: [{
+        type: "tool_use",
+        id: "proposal-live-cancel",
+        name: "propose_plan",
+        input: {
+          approach: "Exercise cancellable mutation cleanup.",
+          visualDirection: "not_applicable",
+          technologyChoices: [],
+          includedScope: ["Cancellable mutation cleanup"],
+          excludedScope: ["Unrelated changes"],
+          acceptanceCriteria: [{ id: "cancel", criterion: "Cancellation cleans up the sandbox.", verification: "Observe the terminal lifecycle." }],
+          assumptions: [],
+          unresolvedQuestions: [],
+          executionPlan: [{ id: "mutate", description: "Exercise cancellable mutation cleanup" }],
+        },
+      }],
+      stopReason: "tool_use",
+      usage: { inputTokens: 1, outputTokens: 1 },
+    }, {
       content: [
         {
           type: "tool_use",
@@ -60,6 +79,7 @@ liveTest(
         repoPath: repository.worktreePath,
         task: "Verify live cancellation cleanup without a model provider.",
         templateId: liveConfig.templateRef,
+        approvalMode: "auto",
         checkpointStore: undefined,
         sessionRecoveryStore: recoveryStore,
         callModel: async () => {

@@ -402,6 +402,7 @@ describe("host-side production runner", () => {
         repoPath: repo.worktreePath,
         task: "requested task",
         templateId: "template:test",
+        approvalMode: "auto",
         checkpointStore: store,
         callModel: async () => {
           modelCalls += 1;
@@ -424,8 +425,9 @@ describe("host-side production runner", () => {
       runHeadlessAgent({
         repoPath: repo.worktreePath,
         task: "Validate provider",
-        templateId: "template:test",
-        checkpointStore: new MemoryProductionCheckpointStore(),
+      templateId: "template:test",
+      approvalMode: "auto",
+      checkpointStore: new MemoryProductionCheckpointStore(),
         modelProvider: "unknown" as "anthropic",
         openSession: async () => {
           sessionCalls += 1;
@@ -443,6 +445,7 @@ describe("host-side production runner", () => {
       repoPath: repo.worktreePath,
       task: "Inspect one file",
       templateId: "template:test",
+      approvalMode: "auto",
       checkpointStore: new MemoryProductionCheckpointStore(),
       sessionRecoveryStore: new MemoryE2bSessionRecoveryStore(),
       callModel: queuedModel([
@@ -517,6 +520,50 @@ describe("host-side production runner", () => {
     });
   });
 
+  test("requires an explicit approval mode before opening a fresh headless run", async () => {
+    const repo = await repository();
+    let opened = 0;
+    await expect(runHeadlessAgent({
+      repoPath: repo.worktreePath,
+      task: "Require approval configuration",
+      templateId: "template:test",
+      checkpointStore: new MemoryProductionCheckpointStore(),
+      callModel: queuedModel([]),
+      openSession: async () => {
+        opened += 1;
+        return new FakeSession() as unknown as E2bTaskSession;
+      },
+    })).rejects.toThrow("explicit approval mode");
+    expect(opened).toBe(0);
+  });
+
+  test("accepts one controller decision for the current proposal digest", async () => {
+    const repo = await repository();
+    const session = new FakeSession();
+    let releaseApproval!: (digest: string) => void;
+    const approvalRequested = new Promise<string>((resolve) => { releaseApproval = resolve; });
+    const controller = startAgentRun({
+      repoPath: repo.worktreePath,
+      task: "Approve once",
+      templateId: "template:test",
+      approvalMode: "interactive",
+      checkpointStore: new MemoryProductionCheckpointStore(),
+      callModel: queuedModel([
+        turn(plan([["inspect", "Inspect once", "in_progress"]]), action("read", "read_file", { path: "README.md" })),
+        turn(plan([["inspect", "Inspect once", "completed"]])),
+      ]),
+      openSession: async () => session as unknown as E2bTaskSession,
+      eventSink(event) {
+        if (event.type === "approval_requested") releaseApproval(event.proposalDigest);
+      },
+    });
+    const digest = await approvalRequested;
+    expect(controller.submitApproval("0".repeat(64), { kind: "approve" })).toBe(false);
+    expect(controller.submitApproval(digest, { kind: "approve" })).toBe(true);
+    expect(controller.submitApproval(digest, { kind: "cancel" })).toBe(false);
+    await expect(controller.result).resolves.toMatchObject({ status: "completed" });
+  });
+
   test("coordinates repeated cancellation through one cleanup result", async () => {
     const repo = await repository();
     const session = new FakeSession();
@@ -540,6 +587,7 @@ describe("host-side production runner", () => {
       repoPath: repo.worktreePath,
       task: "Cancel safely",
       templateId: "template:test",
+      approvalMode: "auto",
       checkpointStore: new MemoryProductionCheckpointStore(),
       sessionRecoveryStore: new MemoryE2bSessionRecoveryStore(),
       callModel: queuedModel([
@@ -590,6 +638,7 @@ describe("host-side production runner", () => {
       repoPath: repo.worktreePath,
       task: "Cancel model",
       templateId: "template:test",
+      approvalMode: "auto",
       checkpointStore: new MemoryProductionCheckpointStore(),
       callModel: async (_request, options) => {
         modelStarted();
@@ -641,6 +690,7 @@ describe("host-side production runner", () => {
       repoPath: repo.worktreePath,
       task: "Cancel checkpoint",
       templateId: "template:test",
+      approvalMode: "auto",
       checkpointStore: store,
       callModel: queuedModel([
         turn(
@@ -679,6 +729,7 @@ describe("host-side production runner", () => {
       repoPath: repo.worktreePath,
       task: "Finish safely",
       templateId: "template:test",
+      approvalMode: "auto",
       checkpointStore: new MemoryProductionCheckpointStore(),
       callModel: queuedModel([
         turn(
@@ -718,6 +769,7 @@ describe("host-side production runner", () => {
       repoPath: repo.worktreePath,
       task: "Preserve an undelivered result",
       templateId: "template:test",
+      approvalMode: "auto",
       checkpointStore: new MemoryProductionCheckpointStore(),
       sessionRecoveryStore: new MemoryE2bSessionRecoveryStore(),
       callModel: queuedModel([
@@ -740,6 +792,7 @@ describe("host-side production runner", () => {
       repoPath: repo.worktreePath,
       task: "Bound lifecycle hook",
       templateId: "template:test",
+      approvalMode: "auto",
       checkpointStore: new MemoryProductionCheckpointStore(),
       callModel: queuedModel([
         turn(plan([["done", "Finish", "in_progress"]]), action(
@@ -775,6 +828,7 @@ describe("host-side production runner", () => {
       repoPath: repo.worktreePath,
       task: "Finish with cleanup failure",
       templateId: "template:test",
+      approvalMode: "auto",
       checkpointStore: new MemoryProductionCheckpointStore(),
       callModel: queuedModel([
         turn(
@@ -820,6 +874,7 @@ describe("host-side production runner", () => {
       repoPath: repo.worktreePath,
       task: "Aggregate cleanup",
       templateId: "template:test",
+      approvalMode: "auto",
       checkpointStore: new MemoryProductionCheckpointStore(),
       callModel: queuedModel([
         turn(
@@ -870,6 +925,7 @@ describe("host-side production runner", () => {
       repoPath: repo.worktreePath,
       task: "Await cleanup",
       templateId: "template:test",
+      approvalMode: "auto",
       checkpointStore: new MemoryProductionCheckpointStore(),
       callModel: queuedModel([
         turn(
@@ -910,6 +966,7 @@ describe("host-side production runner", () => {
       repoPath: repo.worktreePath,
       task: secretTask,
       templateId: "template:test",
+      approvalMode: "auto",
       checkpointStore: new MemoryProductionCheckpointStore(),
       callModel: async () => {
         throw error;
@@ -942,6 +999,7 @@ describe("host-side production runner", () => {
       repoPath: "relative",
       task: "task",
       templateId: "template:test",
+      approvalMode: "auto",
       openSession: async () => {
         opened += 1;
         return new FakeSession() as unknown as E2bTaskSession;
@@ -962,6 +1020,7 @@ describe("host-side production runner", () => {
       repoPath: root,
       task: "task",
       templateId: "template:test",
+      approvalMode: "auto",
     });
     await expect(controller.result).resolves.toMatchObject({
       status: "failed",
@@ -1063,7 +1122,37 @@ class FakeSession {
 
 function queuedModel(turns: ModelTurn[]): CallModel {
   let index = 0;
-  return async () => {
+  let discoveryProposed = false;
+  return async (request) => {
+    if (!discoveryProposed && request.tools.some((tool) => tool.name === "propose_plan")) {
+      discoveryProposed = true;
+      const firstRewrite = turns.flatMap((turn) => turn.content).find(
+        (block) => block.type === "tool_use" && block.name === "rewrite_plan",
+      );
+      const input = firstRewrite?.type === "tool_use" && typeof firstRewrite.input === "object" && firstRewrite.input !== null
+        ? firstRewrite.input as { plan?: Array<{ id: string; description: string }> }
+        : {};
+      return {
+        content: [{
+          type: "tool_use",
+          id: crypto.randomUUID(),
+          name: "propose_plan",
+          input: {
+            approach: "Follow the existing runtime architecture.",
+            visualDirection: "not_applicable",
+            technologyChoices: [],
+            includedScope: ["Complete the requested task"],
+            excludedScope: ["Unrelated changes"],
+            acceptanceCriteria: [{ id: "done", criterion: "The requested task is complete.", verification: "Run the focused test." }],
+            assumptions: [],
+            unresolvedQuestions: [],
+            executionPlan: (input.plan ?? [{ id: "work", description: "Complete the task" }]).map(({ id, description }) => ({ id, description })),
+          },
+        }],
+        stopReason: "tool_use",
+        usage: { inputTokens: 1, outputTokens: 1 },
+      };
+    }
     const next = turns[index++];
     if (!next) throw new Error("Unexpected model call.");
     return next;

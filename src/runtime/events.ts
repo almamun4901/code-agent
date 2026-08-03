@@ -4,6 +4,7 @@ import type {
   ModelToolRequest,
   ToolResult,
 } from "../tools/contracts";
+import type { ApprovalDecision, ApprovalMode, PlanProposal } from "./approval";
 
 const MAX_SUMMARY_BYTES = 2 * 1024;
 
@@ -49,6 +50,20 @@ export type AgentEvent =
   | (AgentEventBase & {
       type: "plan_committed";
       plan: TodoItem[];
+    })
+  | (AgentEventBase & {
+      type: "approval_requested";
+      proposal: PlanProposal;
+      proposalDigest: string;
+      revision: number;
+      mode: ApprovalMode;
+      reapprovalReason?: string;
+    })
+  | (AgentEventBase & {
+      type: "approval_resolved";
+      proposalDigest: string;
+      revision: number;
+      decision: ApprovalDecision["kind"];
     })
   | (AgentEventBase & {
       type: "tool_started";

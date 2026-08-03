@@ -18,20 +18,21 @@ describe("agent command", () => {
     });
     let received: ControlledAgentRunOptions | undefined;
 
-    const running = runCli(["run", ".", "Inspect safely"], {
+    const running = runCli(["run", ".", "Inspect safely", "--auto-approve"], {
       stdout,
       stderr,
       installSigint: () => () => {},
       startRun(options) {
         order.push("start");
         received = options;
-        return { result, stop: () => result };
+        return { result, stop: () => result, submitApproval: () => false };
       },
     });
 
     expect(order.slice(0, 2)).toEqual(["output", "start"]);
     expect(stdout.value).toBe("Initializing…\n");
     expect(received?.repoPath).toBe(path.resolve("."));
+    expect(received?.approvalMode).toBe("auto");
     finish(completed());
     expect(await running).toBe(0);
     expect(stderr.value).toBe("");
@@ -39,7 +40,7 @@ describe("agent command", () => {
 
   test("emits static lifecycle lines with no terminal controls", async () => {
     const stdout = new MemoryOutput();
-    const exitCode = await runCli(["run", ".", "Inspect"], {
+    const exitCode = await runCli(["run", ".", "Inspect", "--auto-approve"], {
       stdout,
       stderr: new MemoryOutput(),
       installSigint: () => () => {},
@@ -58,7 +59,7 @@ describe("agent command", () => {
           cleanup: "succeeded",
         });
         const result = Promise.resolve(completed());
-        return { result, stop: () => result };
+        return { result, stop: () => result, submitApproval: () => false };
       },
     });
 
@@ -88,6 +89,22 @@ describe("agent command", () => {
     expect(stderr.value).toContain("Usage: agent run");
   });
 
+  test("requires explicit auto approval for non-interactive output", async () => {
+    const stderr = new MemoryOutput();
+    let starts = 0;
+    const exitCode = await runCli(["run", ".", "Inspect"], {
+      stdout: new MemoryOutput(),
+      stderr,
+      startRun() {
+        starts += 1;
+        throw new Error("must not start");
+      },
+    });
+    expect(exitCode).toBe(2);
+    expect(starts).toBe(0);
+    expect(stderr.value).toContain("require explicit --auto-approve");
+  });
+
   test("routes Ctrl-C through the controller exactly once", async () => {
     let signalHandler: (() => void) | undefined;
     let removed = 0;
@@ -108,8 +125,9 @@ describe("agent command", () => {
         });
         return result;
       },
+      submitApproval: () => false,
     };
-    const running = runCli(["run", ".", "Cancel"], {
+    const running = runCli(["run", ".", "Cancel", "--auto-approve"], {
       stdout: new MemoryOutput(),
       stderr: new MemoryOutput(),
       startRun: () => controller,
@@ -137,13 +155,14 @@ describe("agent command", () => {
       exitCode: 1,
       error: { code: "TEST_FAILURE", message: "Model unavailable" },
     };
-    const exitCode = await runCli(["run", ".", "Fail"], {
+    const exitCode = await runCli(["run", ".", "Fail", "--auto-approve"], {
       stdout,
       stderr,
       installSigint: () => () => {},
       startRun: () => ({
         result: Promise.resolve(failed),
         stop: async () => failed,
+        submitApproval: () => false,
       }),
     });
 

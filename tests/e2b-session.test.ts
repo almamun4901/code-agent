@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -32,6 +32,7 @@ import {
   RepositoryBundleError,
   createRepositoryBundle,
 } from "../src/sandbox/repository-bundle";
+import { MemoryResultDeliveryStore } from "../src/sandbox/result-delivery";
 import {
   provisionTask,
   taskGroupForLayout,
@@ -233,6 +234,8 @@ class FakeSandbox implements E2bSandbox {
   killError: unknown;
   killCalls = 0;
   runCalls = 0;
+  resultBundle: Uint8Array | undefined;
+  resultSha = "";
 
   async write(remotePath: string, data: string | ArrayBuffer): Promise<void> {
     if (this.writeError) throw this.writeError;
@@ -251,6 +254,14 @@ class FakeSandbox implements E2bSandbox {
     throw new Error(`Unexpected read path: ${remotePath}`);
   }
 
+  async readBytes(remotePath: string): Promise<Uint8Array> {
+    const value = this.writes.get(remotePath);
+    if (typeof value === "string" || value === undefined) {
+      throw new Error(`Unexpected byte path: ${remotePath}`);
+    }
+    return new Uint8Array(value);
+  }
+
   async run(command = "") {
     this.runCalls += 1;
     if (this.runError) throw this.runError;
@@ -259,6 +270,24 @@ class FakeSandbox implements E2bSandbox {
         exitCode: this.mutationJournal ? 1 : 0,
         stderr: "",
         stdout: "",
+      };
+    }
+    if (command.includes("/tmp/terminal-agent-result.bundle")) {
+      if (!this.resultBundle || !this.resultSha) {
+        return { exitCode: 1, stderr: "missing fake result", stdout: "" };
+      }
+      const bytes = this.resultBundle.slice();
+      this.writes.set(
+        "/tmp/terminal-agent-result.bundle",
+        bytes.buffer as ArrayBuffer,
+      );
+      return {
+        exitCode: 0,
+        stderr: "",
+        stdout: JSON.stringify({
+          resultSha: this.resultSha,
+          bundleBytes: bytes.byteLength,
+        }),
       };
     }
     return {
@@ -410,6 +439,70 @@ describe("E2B task session", () => {
     await Promise.all([session.close(), session.close()]);
     expect(setup.client.closeCalls).toBe(1);
     expect(setup.sandbox.killCalls).toBe(1);
+  });
+
+  test("exports and delivers the exact sandbox result before close", async () => {
+    const setup = await sessionFixture();
+    const sourceRoot = await mkdtemp(path.join(os.tmpdir(), "session-result-"));
+    temporaryRoots.push(sourceRoot);
+    const clone = path.join(sourceRoot, "clone");
+    const bundlePath = path.join(sourceRoot, "result.bundle");
+    await git(sourceRoot, "clone", setup.repository.worktreePath, clone);
+    await git(clone, "config", "user.email", "delivery@example.invalid");
+    await git(clone, "config", "user.name", "Delivery Test");
+    await writeFile(path.join(clone, "delivered.txt"), "available locally\n");
+    await git(clone, "add", "-A");
+    await git(clone, "commit", "-m", "test: create session result");
+    setup.sandbox.resultSha = await git(clone, "rev-parse", "HEAD");
+    await git(clone, "bundle", "create", bundlePath, "HEAD");
+    setup.sandbox.resultBundle = new Uint8Array(await readFile(bundlePath));
+    const recoveryStore = new MemoryE2bSessionRecoveryStore();
+    const deliveryStore = new MemoryResultDeliveryStore();
+    const runIdentity = "d".repeat(64);
+    const session = await setup.create({
+      recovery: { runIdentity, store: recoveryStore },
+      resultDeliveryStore: deliveryStore,
+    });
+
+    const receipt = await session.deliverResult(runIdentity);
+
+    expect(receipt).toMatchObject({
+      resultSha: setup.sandbox.resultSha,
+      branch: "result/dddddddddddd",
+      changedFiles: ["delivered.txt"],
+    });
+    expect(await git(
+      setup.repository.worktreePath,
+      "rev-parse",
+      "refs/heads/result/dddddddddddd",
+    )).toBe(setup.sandbox.resultSha);
+    await session.close();
+    expect(await recoveryStore.load()).toBeNull();
+  });
+
+  test("disconnects an undelivered session while preserving its sandbox lease", async () => {
+    const setup = await sessionFixture();
+    const recoveryStore = new MemoryE2bSessionRecoveryStore();
+    const runIdentity = "preserve-delivery";
+    const session = await setup.create({
+      recovery: { runIdentity, store: recoveryStore },
+    });
+
+    await Promise.all([
+      session.preserveForRecovery(),
+      session.preserveForRecovery(),
+    ]);
+
+    expect(setup.client.closeCalls).toBe(1);
+    expect(setup.sandbox.killCalls).toBe(0);
+    expect(await recoveryStore.load()).toMatchObject({
+      runIdentity,
+      sandboxId: setup.sandbox.sandboxId,
+    });
+    await expect(session.call({
+      name: "read_file",
+      input: { path: "README.md" },
+    })).rejects.toThrow("closing or closed");
   });
 
   test("validates task, template, timeout, and repository before sandbox creation", async () => {

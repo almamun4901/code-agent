@@ -28,6 +28,14 @@ import {
   type RuntimeManifest,
 } from "./runtime-manifest";
 import { createRepositoryBundle } from "./repository-bundle";
+import {
+  FileResultDeliveryStore,
+  MAX_RESULT_BUNDLE_BYTES,
+  MemoryResultDeliveryStore,
+  deliverResult,
+  type ResultDeliveryReceipt,
+  type ResultDeliveryStore,
+} from "./result-delivery";
 import type {
   E2bSessionRecoveryState,
   E2bSessionRecoveryStore,
@@ -41,6 +49,7 @@ const CREATE_REQUEST_TIMEOUT_MS = 25_000;
 const RECONCILE_POLL_MS = 100;
 const REMOTE_BUNDLE_PATH = "/tmp/repository.bundle";
 const REMOTE_CONFIG_PATH = "/tmp/provision-task.json";
+const REMOTE_RESULT_BUNDLE_PATH = "/tmp/terminal-agent-result.bundle";
 const REMOTE_TASKS_ROOT = "/workspace/tasks";
 const REMOTE_RUNTIME_ROOT = "/opt/agent";
 export const REMOTE_MUTATION_JOURNAL_PATH =
@@ -79,6 +88,11 @@ const provisionResultSchema = z
   })
   .strict();
 
+const resultExportSchema = z.object({
+  resultSha: z.string().regex(/^[a-f0-9]{40,64}$/),
+  bundleBytes: z.number().int().positive().max(MAX_RESULT_BUNDLE_BYTES),
+}).strict();
+
 export type E2bTaskSessionOptions = {
   localRepoPath: string;
   taskId: string;
@@ -90,6 +104,7 @@ export type E2bTaskSessionOptions = {
     runIdentity: string;
     store: E2bSessionRecoveryStore;
   };
+  resultDeliveryStore?: ResultDeliveryStore;
 };
 
 export type SandboxCommandResult = {
@@ -103,6 +118,7 @@ export type E2bSandbox = {
   readonly commands: E2bCommandController;
   write(path: string, data: string | ArrayBuffer): Promise<void>;
   readText(path: string): Promise<string>;
+  readBytes(path: string): Promise<Uint8Array>;
   run(
     command: string,
     options?: { cwd?: string; timeoutMs?: number },
@@ -134,6 +150,7 @@ function sandboxAdapter(sandbox: Sandbox): E2bSandbox {
       await sandbox.files.write(remotePath, data);
     },
     readText: (remotePath) => sandbox.files.read(remotePath),
+    readBytes: (remotePath) => sandbox.files.read(remotePath, { format: "bytes" }),
     async run(command, options = {}) {
       return sandbox.commands.run(command, options);
     },
@@ -188,6 +205,8 @@ export type E2bTaskSession = {
     options?: McpToolCallOptions,
   ): Promise<ToolResult>;
   reconcileActiveMutation(timeoutMs?: number): Promise<MutationRecord | null>;
+  deliverResult(runIdentity: string): Promise<ResultDeliveryReceipt>;
+  preserveForRecovery(): Promise<void>;
   close(): Promise<void>;
 };
 
@@ -232,7 +251,11 @@ class OwnedE2bTaskSession implements E2bTaskSession {
         store: E2bSessionRecoveryStore;
       }
     | undefined;
+  readonly #localRepoPath: string;
+  readonly #taskBranch: string;
+  readonly #resultDeliveryStore: ResultDeliveryStore;
   #closePromise: Promise<void> | undefined;
+  #preservePromise: Promise<void> | undefined;
   #callTail: Promise<void> = Promise.resolve();
 
   constructor(options: {
@@ -246,6 +269,9 @@ class OwnedE2bTaskSession implements E2bTaskSession {
       runIdentity: string;
       store: E2bSessionRecoveryStore;
     };
+    localRepoPath: string;
+    taskBranch: string;
+    resultDeliveryStore: ResultDeliveryStore;
   }) {
     this.#sandbox = options.sandbox;
     this.sandboxId = options.sandbox.sandboxId;
@@ -255,6 +281,9 @@ class OwnedE2bTaskSession implements E2bTaskSession {
     this.serverPid = options.serverPid;
     this.recoveredMutation = options.recoveredMutation ?? null;
     this.#recovery = options.recovery;
+    this.#localRepoPath = options.localRepoPath;
+    this.#taskBranch = options.taskBranch;
+    this.#resultDeliveryStore = options.resultDeliveryStore;
   }
 
   async call(
@@ -315,6 +344,58 @@ class OwnedE2bTaskSession implements E2bTaskSession {
     return completed;
   }
 
+  async deliverResult(runIdentity: string): Promise<ResultDeliveryReceipt> {
+    this.#assertOpen();
+    if (!this.#localRepoPath) {
+      throw new E2bTaskSessionError(
+        "Recovered session lacks a local result delivery destination.",
+      );
+    }
+    await this.#callTail;
+    if (this.#recovery) {
+      const state = await this.#requiredRecoveryState();
+      if (state.runIdentity !== runIdentity) {
+        throw new E2bTaskSessionError(
+          "Result delivery run identity does not match the owned sandbox.",
+        );
+      }
+      if (state.activeMutation?.status === "in_flight") {
+        throw new MutationRecoveryBlockedError(
+          `Mutation ${state.activeMutation.operationId} must finish before result delivery.`,
+          {
+            sandboxId: state.sandboxId,
+            operationId: state.activeMutation.operationId,
+          },
+        );
+      }
+    }
+    const artifact = await exportSandboxResult(
+      this.#sandbox,
+      this.remoteRepoPath,
+      this.#taskBranch,
+      this.baseSha,
+    );
+    return deliverResult({
+      canonicalRepoPath: this.#localRepoPath,
+      runIdentity,
+      artifact,
+      store: this.#resultDeliveryStore,
+    });
+  }
+
+  async preserveForRecovery(): Promise<void> {
+    if (this.#closePromise) {
+      throw new E2bTaskSessionError(
+        "E2B task session is closing or closed.",
+      );
+    }
+    this.#preservePromise ??= (async () => {
+      await this.#callTail;
+      await this.client.close();
+    })();
+    return this.#preservePromise;
+  }
+
   async #drainEarlierRequests(): Promise<boolean> {
     try {
       await this.client.call({
@@ -330,6 +411,7 @@ class OwnedE2bTaskSession implements E2bTaskSession {
   async #close(): Promise<void> {
     const errors: unknown[] = [];
     await this.#callTail;
+    await this.#preservePromise?.catch((error) => errors.push(error));
     if (this.#recovery) {
       const state = await this.#requiredRecoveryState();
       if (state.activeMutation?.status === "in_flight") {
@@ -432,7 +514,7 @@ class OwnedE2bTaskSession implements E2bTaskSession {
   }
 
   #assertOpen(): void {
-    if (this.#closePromise) {
+    if (this.#closePromise || this.#preservePromise) {
       throw new E2bTaskSessionError(
         "E2B task session is closing or closed.",
       );
@@ -667,6 +749,11 @@ export async function createE2bTaskSession(
       client,
       serverPid: transport.pid,
       recovery: options.recovery,
+      localRepoPath: bundle.repositoryPath,
+      taskBranch: result.branch,
+      resultDeliveryStore:
+        options.resultDeliveryStore ??
+        new FileResultDeliveryStore(bundle.repositoryPath),
     });
   } catch (error) {
     await cleanupPartial(client, transport, sandbox);
@@ -687,6 +774,8 @@ export async function recoverE2bTaskSession(
   options: {
     runIdentity: string;
     store: E2bSessionRecoveryStore;
+    localRepoPath?: string;
+    resultDeliveryStore?: ResultDeliveryStore;
     reconcileTimeoutMs?: number;
     signal?: AbortSignal;
   },
@@ -798,6 +887,13 @@ export async function recoverE2bTaskSession(
       serverPid: transport.pid,
       recoveredMutation,
       recovery: options,
+      localRepoPath: options.localRepoPath ?? "",
+      taskBranch: `task/${pathBasename(state.remoteRepoPath)}`,
+      resultDeliveryStore:
+        options.resultDeliveryStore ??
+        (options.localRepoPath
+          ? new FileResultDeliveryStore(options.localRepoPath)
+          : new MemoryResultDeliveryStore()),
     });
   } catch (error) {
     await client?.close().catch(() => {});
@@ -821,6 +917,83 @@ function throwIfSessionAborted(signal: AbortSignal | undefined): void {
       : "E2B session setup was cancelled.",
     "AbortError",
   );
+}
+
+async function exportSandboxResult(
+  sandbox: E2bSandbox,
+  repositoryPath: string,
+  branch: string,
+  baseSha: string,
+) {
+  if (
+    !repositoryPath.startsWith(`${REMOTE_TASKS_ROOT}/`) ||
+    !/^task\/[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/.test(branch) ||
+    !/^[a-f0-9]{40,64}$/.test(baseSha)
+  ) {
+    throw new E2bTaskSessionError(
+      "Sandbox result export received invalid bound Git metadata.",
+    );
+  }
+  const hardened = [
+    "-c core.hooksPath=/dev/null",
+    "-c commit.gpgSign=false",
+    "-c protocol.ext.allow=never",
+    "-c core.pager=cat",
+  ].join(" ");
+  const command = [
+    "set -eu",
+    `repo='${repositoryPath}'`,
+    `branch='${branch}'`,
+    `base='${baseSha}'`,
+    `bundle='${REMOTE_RESULT_BUNDLE_PATH}'`,
+    `current=$(git ${hardened} -C "$repo" symbolic-ref --quiet --short HEAD)`,
+    '[ "$current" = "$branch" ]',
+    `if [ -n "$(git ${hardened} -C "$repo" status --porcelain=v1 --untracked-files=all)" ]; then git ${hardened} -C "$repo" add -A && git ${hardened} -C "$repo" commit -m 'chore: deliver completed task' >/dev/null; fi`,
+    `test -z "$(git ${hardened} -C "$repo" status --porcelain=v1 --untracked-files=all)"`,
+    `result=$(git ${hardened} -C "$repo" rev-parse HEAD)`,
+    `if [ "$result" = "$base" ]; then git ${hardened} -C "$repo" commit --allow-empty -m 'chore: record completed task' >/dev/null && result=$(git ${hardened} -C "$repo" rev-parse HEAD); fi`,
+    `git ${hardened} -C "$repo" merge-base --is-ancestor "$base" "$result"`,
+    `rm -f "$bundle"`,
+    `git ${hardened} -C "$repo" bundle create "$bundle" "$base..refs/heads/$branch"`,
+    'bytes=$(stat -c %s "$bundle")',
+    `test "$bytes" -le ${MAX_RESULT_BUNDLE_BYTES}`,
+    `printf '{"resultSha":"%s","bundleBytes":%s}\\n' "$result" "$bytes"`,
+  ].join("\n");
+  const exported = await sandbox.run(command, {
+    cwd: REMOTE_RUNTIME_ROOT,
+    timeoutMs: 60_000,
+  });
+  if (exported.exitCode !== 0) {
+    throw new E2bTaskSessionError(
+      `Sandbox result export failed: ${exported.stderr.trim() || "No diagnostic output."}`,
+    );
+  }
+  let metadata;
+  try {
+    metadata = resultExportSchema.parse(JSON.parse(exported.stdout.trim()));
+  } catch (error) {
+    throw new E2bTaskSessionError(
+      "Sandbox result export returned invalid metadata.",
+      { cause: error },
+    );
+  }
+  const bundle = await sandbox.readBytes(REMOTE_RESULT_BUNDLE_PATH);
+  if (bundle.byteLength !== metadata.bundleBytes) {
+    throw new E2bTaskSessionError(
+      "Sandbox result bundle size changed during export.",
+    );
+  }
+  return { baseSha, resultSha: metadata.resultSha, bundle };
+}
+
+function pathBasename(absolutePath: string): string {
+  const value = absolutePath.split("/").filter(Boolean).at(-1);
+  if (!value || !taskIdPattern.test(value)) {
+    throw new E2bTaskSessionError(
+      "Recovered task path cannot identify its bound branch.",
+    );
+  }
+  return value;
 }
 
 async function reconcileRemoteMutation(

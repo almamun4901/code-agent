@@ -8,6 +8,7 @@ import type {
 } from "../src/model/contracts";
 import type { E2bTaskSession } from "../src/sandbox/e2b-session";
 import { MemoryE2bSessionRecoveryStore } from "../src/sandbox/session-recovery";
+import { MemoryResultDeliveryStore } from "../src/sandbox/result-delivery";
 import type {
   McpToolCallOptions,
 } from "../src/mcp/client";
@@ -455,7 +456,64 @@ describe("host-side production runner", () => {
     });
 
     expect(result.status).toBe("completed");
-    expect(session.lifecycle).toEqual(["reconcile", "close"]);
+    expect(session.lifecycle).toEqual(["reconcile", "deliver", "close"]);
+  });
+
+  test("resumes a completed checkpoint from its durable delivery receipt without reopening E2B", async () => {
+    const repo = await repository();
+    const prepared = await prepareAgentRun(repo.worktreePath, "Deliver once");
+    const checkpointStore = new MemoryProductionCheckpointStore();
+    await runProductionLoop({
+      ...prepared,
+      callModel: queuedModel([
+        turn(
+          plan([["inspect", "Inspect", "in_progress"]]),
+          action("read", "read_file", { path: "README.md" }),
+        ),
+        turn(plan([["inspect", "Inspect", "completed"]])),
+      ]),
+      session: new FakeSession(),
+      checkpointStore,
+    });
+    const resultDeliveryStore = new MemoryResultDeliveryStore();
+    const resultSha = await git(prepared.canonicalRepoPath, "rev-parse", "HEAD");
+    const branch = `result/${prepared.runIdentity.slice(0, 12)}`;
+    await git(prepared.canonicalRepoPath, "branch", branch, resultSha);
+    await resultDeliveryStore.save({
+      version: 1,
+      status: "completed",
+      runIdentity: prepared.runIdentity,
+      canonicalRepoPath: prepared.canonicalRepoPath,
+      baseSha: resultSha,
+      resultSha,
+      branch,
+      bundleSha256: "c".repeat(64),
+      bundleBytes: 1,
+      changedFiles: ["README.md"],
+      deliveredAt: new Date(0).toISOString(),
+    });
+    let opened = false;
+
+    const resumed = await runHeadlessAgent({
+      repoPath: repo.worktreePath,
+      task: "Deliver once",
+      checkpointStore,
+      resultDeliveryStore,
+      sessionRecoveryStore: new MemoryE2bSessionRecoveryStore(),
+      callModel: async () => {
+        throw new Error("completed run must not call the model");
+      },
+      openSession: async () => {
+        opened = true;
+        return new FakeSession() as unknown as E2bTaskSession;
+      },
+    });
+
+    expect(opened).toBe(false);
+    expect(resumed.delivery).toMatchObject({
+      branch: `result/${prepared.runIdentity.slice(0, 12)}`,
+      changedFiles: ["README.md"],
+    });
   });
 
   test("coordinates repeated cancellation through one cleanup result", async () => {
@@ -640,7 +698,38 @@ describe("host-side production runner", () => {
       cleanup: "succeeded",
       exitCode: 0,
     });
-    expect(lifecycle).toEqual(["reconcile", "close", "sessionEnd"]);
+    expect(lifecycle).toEqual([
+      "reconcile",
+      "deliver",
+      "close",
+      "sessionEnd",
+    ]);
+  });
+
+  test("keeps the sandbox alive when durable result delivery fails", async () => {
+    const repo = await repository();
+    const session = new FakeSession();
+    session.deliverImpl = async () => {
+      throw new Error("delivery interrupted");
+    };
+
+    await expect(runHeadlessAgent({
+      repoPath: repo.worktreePath,
+      task: "Preserve an undelivered result",
+      templateId: "template:test",
+      checkpointStore: new MemoryProductionCheckpointStore(),
+      sessionRecoveryStore: new MemoryE2bSessionRecoveryStore(),
+      callModel: queuedModel([
+        turn(
+          plan([["finish", "Finish the work", "in_progress"]]),
+          action("read", "read_file", { path: "README.md" }),
+        ),
+        turn(plan([["finish", "Finish the work", "completed"]])),
+      ]),
+      openSession: async () => session as unknown as E2bTaskSession,
+    })).rejects.toThrow("delivery interrupted");
+
+    expect(session.lifecycle).toEqual(["reconcile", "deliver", "preserve"]);
   });
 
   test("fails cleanup when SessionEnd exceeds its bound", async () => {
@@ -807,7 +896,7 @@ describe("host-side production runner", () => {
       exitCode: 1,
       error: { code: "SHUTDOWN_TIMEOUT" },
     });
-    expect(session.lifecycle).toEqual(["reconcile", "close"]);
+    expect(session.lifecycle).toEqual(["reconcile", "deliver", "close"]);
   });
 
   test("keeps prompt text and hostile error names out of observation events", async () => {
@@ -920,6 +1009,7 @@ class FakeSession {
       ) => Promise<ToolResult>)
     | undefined;
   reconcileImpl: (() => Promise<null>) | undefined;
+  deliverImpl: (() => Promise<never>) | undefined;
   closeImpl: (() => Promise<void>) | undefined;
 
   async call(
@@ -941,6 +1031,27 @@ class FakeSession {
     this.lifecycle.push("reconcile");
     if (this.reconcileImpl) return this.reconcileImpl();
     return null;
+  }
+
+  async deliverResult(runIdentity: string) {
+    this.lifecycle.push("deliver");
+    if (this.deliverImpl) return this.deliverImpl();
+    return {
+      version: 1 as const,
+      runIdentity,
+      canonicalRepoPath: "/test/repository",
+      baseSha: "a".repeat(40),
+      resultSha: "b".repeat(40),
+      branch: `result/${runIdentity.slice(0, 12)}`,
+      bundleSha256: "c".repeat(64),
+      bundleBytes: 1,
+      changedFiles: [],
+      deliveredAt: new Date(0).toISOString(),
+    };
+  }
+
+  async preserveForRecovery(): Promise<void> {
+    this.lifecycle.push("preserve");
   }
 
   async close(): Promise<void> {
@@ -1052,4 +1163,20 @@ function initialState(
     terminalCode: null,
     lastToolResult: null,
   };
+}
+
+async function git(cwd: string, ...args: string[]): Promise<string> {
+  const child = Bun.spawn(["git", ...args], {
+    cwd,
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  if (exitCode !== 0) throw new Error(`git ${args[0]} failed: ${stderr}`);
+  return stdout.trim();
 }

@@ -45,6 +45,7 @@ import {
   LifecycleHooks,
   type LifecycleBudgetSnapshot,
 } from "./lifecycle";
+import type { ResultDeliveryReceipt } from "../sandbox/result-delivery";
 
 const MAX_PLAN_TASKS = 20;
 
@@ -58,6 +59,7 @@ export type ProductionLoopResult = {
   inputTokens: number;
   outputTokens: number;
   plan: TodoItem[];
+  delivery?: ResultDeliveryReceipt;
 };
 
 export type ProductionLoopOptions = {

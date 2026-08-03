@@ -8,8 +8,10 @@ creation.
 
 ## Current status
 
-Steps 0–8 are complete. The deterministic fake loop, live Claude loop with fake
-tools, six real local tools, crash-safe plan persistence, MCP stdio transport,
+Steps 0–8 are complete. Gate 8A is implemented and has passed its feature-branch
+acceptance gates; roadmap completion awaits landing and merged-main verification.
+The deterministic fake loop, live Claude loop with fake tools, six real local
+tools, crash-safe plan persistence, MCP stdio transport,
 isolated E2B execution, and the PreToolUse safety boundary have passed their
 acceptance gates. Mutation recovery is also complete: mutating calls are
 journaled on both host and sandbox, interrupted sessions reconnect to the same
@@ -20,14 +22,13 @@ model to those real tools. The runner validates repository/task identity
 before external activity, checkpoints validated tool intent before execution,
 resumes the same E2B mutation operation, and reconciles before cleanup.
 
-The core runtime is not yet a complete end-user delivery workflow. Live
-dogfooding proved that a successful sandbox run is currently cleaned up without
-importing its files into the local repository, implementation starts before a
-human can approve product/design choices, and plan completion can include
-claims stronger than the captured verification evidence. Roadmap gates 8A–8C
-now block telemetry and evaluation: safe local Git result delivery, durable
-plan approval before mutations, and trusted completion evidence with an
-inspectable audit surface. GitHub PR delivery remains Step 10.
+Successful sandbox work is now committed, exported as a bounded Git bundle,
+validated against the exact starting commit, and imported into a new local
+`result/<run-id>` branch before E2B cleanup. The checked-out branch, HEAD, and
+worktree are never switched or modified. Gate 8B remains next: implementation
+still starts before a human can approve product/design choices. Gate 8C then
+requires completion claims to reference durable verification evidence. Those
+two gates block telemetry and evaluation; GitHub PR delivery remains Step 10.
 
 The code currently proves:
 
@@ -60,6 +61,11 @@ The code currently proves:
   for edit apply, shell, and Git commit;
 - same-sandbox reconnection, terminal cancellation reconciliation, and
   duplicate-mutation prevention;
+- transactional result export/import with bounded bundle, commit, object, and
+  path validation; owner-only receipts; crash-resumable transitions; and
+  idempotent local branch creation;
+- result branches that survive E2B cleanup without switching the user's branch
+  or accepting a dirty host worktree, protected paths, symlinks, or gitlinks;
 - separate `agent` and `runner` identities, immutable runtime ownership,
   protected linked-worktree Git metadata, and a fixed root-owned shell wrapper;
 - component-wise symlink rejection, no-follow file access, controlled shell
@@ -75,10 +81,10 @@ The code currently proves:
   50-call / 200k-context / $5.00 ceilings, and transactional compaction at
   150k tokens.
 
-Until gate 8A lands, `agent run` should be treated as a sandbox execution and
-recovery demonstration: it does not return a successful sandbox worktree to a
-local-only repository. Do not spend model budget on work whose files must be
-retained unless an external delivery path has been arranged.
+On success, `agent run` prints the new local result branch and its commit. The
+user can inspect or merge that branch normally; the active branch remains
+untouched. Interactive plan approval and completion-evidence inspection are
+still pending in Gates 8B and 8C.
 
 ## Current architecture
 
@@ -143,6 +149,8 @@ src/runtime/agent-runner.ts
     +---- lifecycle hooks + durable budget preflight
     +---- transactional context compaction
     +---- reconciliation before sandbox cleanup
+    +---- bounded Git export + validated result/<run-id> import
+    +---- durable receipt before E2B cleanup
 ```
 
 `E2bTaskSession` now uploads an exact clean Git revision, provisions a
@@ -151,7 +159,11 @@ through streamed E2B stdin/stdout. The sandbox starts with internet disabled;
 typed tools run as `agent`, while arbitrary shell commands run as `runner`
 through the fixed wrapper. Its host lease records the exact sandbox and active
 mutation; recovery verifies the sandbox journal before reconnecting or
-refusing replay. The production runner now joins that session to the routed
+refusing replay. Shell commands use a group-preserving umask so their task
+artifacts remain editable by typed tools under the separate `agent` identity.
+On completion, the host validates the sandbox's delta bundle in a temporary
+bare repository, creates a new result branch with `git update-ref`, checkpoints
+the receipt, and only then permits cleanup. The production runner joins that session to the routed
 model and durable version-3 checkpoint. The Ink terminal UI renders committed
 plan, tool, lifecycle notice, context, call, compaction, and dual-cost state.
 Later roadmap steps add telemetry and evaluation/PR publication.
@@ -235,6 +247,11 @@ adds the PreToolUse red-team matrix, two-identity runtime checks, network and
 environment isolation gates, process cleanup checks, and a reusable evidence
 record. Its live cases remain opt-in and must be run one at a time.
 
+The live E2B safety suite also proves shell-create to typed-edit parity and
+end-to-end result delivery: the delivered file remains available through its
+new local branch after the sandbox is gone. Use the immutable
+`terminal-coding-agent-tools:result-delivery-v1` template tag.
+
 `bun run phase1` and `bun run test:integration` send the synthetic Phase 1
 prompt, plan state, and canned tool results to Anthropic. Standard `bun test`
 keeps the live integration test skipped even when a key is present.
@@ -312,6 +329,9 @@ The authoritative agent instructions and exact sequence are in
   Step 4 schema, lifecycle, mutation-parity, and result-boundary review.
 - [`docs/reviews/phase-6-implementation-review.md`](docs/reviews/phase-6-implementation-review.md):
   Step 6 security review, engineering findings, fixes, and landing evidence.
+- [`docs/reviews/result-delivery-implementation-review.md`](docs/reviews/result-delivery-implementation-review.md):
+  Gate 8A scope audit, transaction and trust-boundary review, fixes, and live
+  delivery evidence.
 
 Read `PROGRESS.md` first when resuming work. It is intentionally more current
 than the roadmap.

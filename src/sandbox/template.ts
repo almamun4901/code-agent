@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { RUNTIME_MANIFEST_PATH } from "./runtime-manifest";
 
 export const DEFAULT_E2B_TEMPLATE_NAME =
-  "terminal-coding-agent-tools:mutation-recovery-v1";
+  "terminal-coding-agent-tools:result-delivery-v1";
 export const E2B_RUNTIME_ROOT = "/opt/agent";
 export const E2B_SHELL_WRAPPER = "/usr/local/sbin/agent-run-shell";
 

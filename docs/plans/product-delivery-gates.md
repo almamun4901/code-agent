@@ -7,8 +7,8 @@ and completion is backed by inspectable evidence.
 
 ## Gate 8A — Result delivery
 
-**Implementation status:** complete on the Gate 8A feature branch; final
-roadmap completion requires branch landing and merged-main verification.
+**Implementation status:** complete on merged `main`; offline, live E2B, and
+real-model delivery acceptance gates pass.
 
 The sandbox remains the only model-controlled filesystem. Before cleanup, the
 trusted host must receive a bounded Git artifact rooted at the exact bundled

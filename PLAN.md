@@ -209,7 +209,7 @@ order above.
 | 6 — PreToolUse safety hook    | complete                                              |
 | 7 — TUI (Ink)                 | complete                                              |
 | 8 — Remaining hooks + budget  | complete                                              |
-| 8A — Result delivery          | not started                                           |
+| 8A — Result delivery          | complete                                              |
 | 8B — Plan approval            | not started                                           |
 | 8C — Completion evidence      | not started                                           |
 | 9 — Telemetry                 | not started                                           |

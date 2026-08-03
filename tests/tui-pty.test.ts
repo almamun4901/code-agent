@@ -166,6 +166,27 @@ async function installCompletedCheckpoint(
   const store = new FileProductionCheckpointStore(repo.worktreePath);
   const turns: ModelTurn[] = [
     {
+      content: [{
+        type: "tool_use",
+        id: crypto.randomUUID(),
+        name: "propose_plan",
+        input: {
+          approach: "Inspect the repository safely.",
+          productDirection: "Preserve existing behavior.",
+          visualDirection: "not_applicable",
+          technologyChoices: [],
+          includedScope: ["Inspect the repository"],
+          excludedScope: [],
+          acceptanceCriteria: [{ id: "inspect", criterion: "Repository inspected.", verification: "Read succeeds." }],
+          assumptions: [],
+          unresolvedQuestions: [],
+          executionPlan: [{ id: "inspect", description: "Inspect" }],
+        },
+      }],
+      stopReason: "tool_use",
+      usage: { inputTokens: 1, outputTokens: 1 },
+    },
+    {
       content: [
         plan("Inspect", "in_progress"),
         {
@@ -187,6 +208,7 @@ async function installCompletedCheckpoint(
   let turnIndex = 0;
   await runProductionLoop({
     ...prepared,
+    approvalMode: "auto",
     checkpointStore: store,
     callModel: async () => turns[turnIndex++]!,
     session: {

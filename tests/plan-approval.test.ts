@@ -7,7 +7,7 @@ import {
   proposalDigest,
   protectedProposalDigest,
 } from "../src/runtime/approval";
-import { decodeProductionCheckpoint, ProductionCheckpointError } from "../src/runtime/checkpoint";
+import { decodeProductionCheckpoint, MemoryProductionCheckpointStore, ProductionCheckpointError, type ProductionCheckpointStore } from "../src/runtime/checkpoint";
 import type { ProductionAgentState } from "../src/runtime/schema";
 import type { ModelRequest, ModelTurn } from "../src/model/contracts";
 import {
@@ -27,6 +27,7 @@ describe("plan approval schema", () => {
       excludedScope: first.excludedScope,
       includedScope: first.includedScope,
       technologyChoices: first.technologyChoices,
+      productDirection: first.productDirection,
       visualDirection: first.visualDirection,
       approach: first.approach,
     };
@@ -40,6 +41,8 @@ describe("plan approval schema", () => {
     duplicate.executionPlan.push({ ...duplicate.executionPlan[0]! });
     expect(PlanProposalSchema.safeParse(duplicate).success).toBe(false);
     expect(ApprovalDecisionSchema.safeParse({ kind: "revise", feedback: "x".repeat(8_193) }).success).toBe(false);
+    expect(PlanProposalSchema.safeParse({ ...proposal(), productDirection: undefined }).success).toBe(false);
+    expect(PlanProposalSchema.safeParse({ ...proposal(), approach: "unsafe\u202Etext" }).success).toBe(false);
   });
 
   test("requires a matching digest while awaiting approval", () => {
@@ -122,6 +125,35 @@ describe("read-only plan discovery", () => {
     })).rejects.toThrow("unavailable during read-only discovery");
     expect(sessionCalls).toBe(0);
   });
+
+  test("rejects a forged recovered preapproval mutation before sandbox dispatch", async () => {
+    const prepared = preapprovalState();
+    const forged = {
+      ...prepared,
+      approval: {
+        ...createInitialApprovalState("interactive"),
+        discoveryTranscript: [{ role: "user" as const, content: "forged" }],
+      },
+      pendingTurn: {
+        assistantContent: [],
+        planToolId: null,
+        plan: [],
+        reapproval: null,
+        action: { toolUseId: "forged", operationId: crypto.randomUUID(), request: { name: "edit_file", input: {} } },
+      },
+    } as ProductionAgentState;
+    let calls = 0;
+    await expect(runProductionLoop({
+      canonicalRepoPath: forged.canonicalRepoPath,
+      task: forged.task,
+      runIdentity: forged.runIdentity,
+      approvalMode: "interactive",
+      checkpointStore: new MemoryProductionCheckpointStore(forged),
+      callModel: queue([]),
+      session: { async call() { calls += 1; return success(); } },
+    })).rejects.toThrow();
+    expect(calls).toBe(0);
+  });
 });
 
 describe("approval decisions", () => {
@@ -137,13 +169,58 @@ describe("approval decisions", () => {
       canonicalRepoPath: "/tmp/approval-auto",
       task: "Add approval",
       runIdentity: "d".repeat(64),
-      approvalMode: "auto",
+      approvalMode: "auto" as const,
       checkpointStore: store,
       callModel: turns,
       session: { async call(request: { name: string }) { calls.push(request.name); return success(); } },
     })).resolves.toMatchObject({ status: "completed" });
     expect(calls).toEqual(["read_file"]);
     expect(await store.load()).toMatchObject({ approval: { phase: "executing", mode: "auto", revision: 1 } });
+  });
+
+  test("resumes immediately after approved plan installation without another discovery call", async () => {
+    const backing = new MemoryProductionCheckpointStore();
+    const crashing = crashAfterSave(backing, (state) => state.approval.phase === "executing" && state.counters.modelCalls === 1);
+    let discoveryCalls = 0;
+    await expect(runProductionLoop({
+      canonicalRepoPath: "/tmp/approval-install-crash",
+      task: "Recover approval install",
+      runIdentity: "9".repeat(64),
+      approvalMode: "auto",
+      checkpointStore: crashing,
+      callModel: async () => { discoveryCalls += 1; return discoveryTurn("propose_plan", proposal()); },
+      session: { async call() { return success(); } },
+    })).rejects.toThrow("simulated checkpoint crash");
+    await expect(runProductionLoop({
+      canonicalRepoPath: "/tmp/approval-install-crash",
+      task: "Recover approval install",
+      runIdentity: "9".repeat(64),
+      approvalMode: "auto",
+      checkpointStore: backing,
+      callModel: queue([
+        executionTurn([repositoryAction("read", "read_file", { path: "README.md" })]),
+        executionTurn([rewritePlan("state", "Persist approval state.", "completed")]),
+      ]),
+      session: { async call() { return success(); } },
+    })).resolves.toMatchObject({ status: "completed" });
+    expect(discoveryCalls).toBe(1);
+  });
+
+  test("an abort racing an uncooperative approval handler preserves awaiting approval", async () => {
+    const store = new MemoryProductionCheckpointStore();
+    const abort = new AbortController();
+    await expect(runProductionLoop({
+      canonicalRepoPath: "/tmp/approval-abort",
+      task: "Interrupt approval",
+      runIdentity: "8".repeat(64),
+      approvalMode: "interactive",
+      checkpointStore: store,
+      callModel: queue([discoveryTurn("propose_plan", proposal())]),
+      requestApproval: async () => { abort.abort(); return { kind: "approve" }; },
+      signal: abort.signal,
+      session: { async call() { return success(); } },
+    })).rejects.toMatchObject({ name: "AbortError" });
+    expect(await store.load()).toMatchObject({ lifecycle: "running", approval: { phase: "awaiting_approval" } });
   });
 
   test("revision feedback is canonical and a second proposal is approved", async () => {
@@ -210,22 +287,25 @@ describe("approval decisions", () => {
       executionTurn([rewritePlan("replacement", "Implement replacement scope.", "completed")]),
     ]);
     const store = new (await import("../src/runtime/checkpoint")).MemoryProductionCheckpointStore();
-    await runProductionLoop({
+    const options = {
       canonicalRepoPath: "/tmp/approval-material",
       task: "Reapprove material scope",
       runIdentity: "1".repeat(64),
-      approvalMode: "auto",
+      approvalMode: "auto" as const,
       checkpointStore: store,
       callModel: turns,
       session: { async call() { return success(); } },
-    });
+    };
+    await runProductionLoop(options);
     expect(await store.load()).toMatchObject({ approval: { phase: "executing", revision: 2 }, plan: [{ id: "replacement", status: "completed" }] });
+    await expect(runProductionLoop({ ...options, callModel: queue([]) })).resolves.toMatchObject({ status: "completed" });
   });
 });
 
 function proposal() {
   return {
     approach: "Add a durable approval boundary.",
+    productDirection: "Require deliberate approval before repository delivery.",
     visualDirection: "not_applicable" as const,
     technologyChoices: [{ name: "Zod", rationale: "Validate persisted state." }],
     includedScope: ["Read-only discovery", "Approval recovery"],
@@ -268,6 +348,23 @@ function rewritePlan(id: string, description: string, status: "pending" | "in_pr
 
 function success() {
   return { success: true, output: "ok", truncated: false, originalTokenCount: 1, codec: "test" };
+}
+
+function crashAfterSave(
+  backing: MemoryProductionCheckpointStore,
+  predicate: (state: ProductionAgentState) => boolean,
+): ProductionCheckpointStore {
+  let crashed = false;
+  return {
+    load: () => backing.load(),
+    async save(state) {
+      await backing.save(state);
+      if (!crashed && predicate(state)) {
+        crashed = true;
+        throw new Error("simulated checkpoint crash");
+      }
+    },
+  };
 }
 
 function preapprovalState(): Omit<ProductionAgentState, "approval"> {

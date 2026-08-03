@@ -136,6 +136,7 @@ function proposalTurn(): ModelTurn {
       name: "propose_plan",
       input: {
         approach: "Exercise cancellation safely.",
+        productDirection: "Preserve the requested product behavior.",
         visualDirection: "not_applicable",
         technologyChoices: [],
         includedScope: ["Cancellation lifecycle"],

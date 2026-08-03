@@ -17,6 +17,7 @@ import {
   prepareAgentRun,
   runHeadlessAgent,
   startAgentRun,
+  type HeadlessAgentRunOptions,
   type SessionEndContext,
 } from "../src/runtime/agent-runner";
 import type { AgentEvent } from "../src/runtime/events";
@@ -66,7 +67,7 @@ describe("production agent loop", () => {
       repo.worktreePath,
       "Update the greeting",
     );
-    const store = new MemoryProductionCheckpointStore();
+    const store = new MemoryProductionCheckpointStore(initialState(prepared));
     const session = new FakeSession();
     const callModel = queuedModel([
       turn(
@@ -134,7 +135,7 @@ describe("production agent loop", () => {
   test("resumes a pending mutation with its durable operation ID", async () => {
     const repo = await repository();
     const prepared = await prepareAgentRun(repo.worktreePath, "Edit safely");
-    const store = new MemoryProductionCheckpointStore();
+    const store = new MemoryProductionCheckpointStore(initialState(prepared));
     const abort = new AbortController();
     const firstSession = new FakeSession();
     firstSession.callImpl = async (_request, options) => {
@@ -187,7 +188,7 @@ describe("production agent loop", () => {
       repo.worktreePath,
       "Reject altered intent",
     );
-    const store = new MemoryProductionCheckpointStore();
+    const store = new MemoryProductionCheckpointStore(initialState(prepared));
     const abort = new AbortController();
     const interrupted = new FakeSession();
     interrupted.callImpl = async () => {
@@ -239,7 +240,7 @@ describe("production agent loop", () => {
       repo.worktreePath,
       "Inspect sequentially",
     );
-    const store = new MemoryProductionCheckpointStore();
+    const store = new MemoryProductionCheckpointStore(initialState(prepared));
     const session = new FakeSession();
 
     const result = await runProductionLoop({
@@ -329,7 +330,7 @@ describe("production agent loop", () => {
         ),
       ]),
       session,
-      checkpointStore: new MemoryProductionCheckpointStore(),
+      checkpointStore: new MemoryProductionCheckpointStore(initialState(prepared)),
     });
 
     expect(result).toMatchObject({
@@ -348,7 +349,7 @@ describe("production agent loop", () => {
   test("rejects two malformed turns and persists the terminal failure", async () => {
     const repo = await repository();
     const prepared = await prepareAgentRun(repo.worktreePath, "Fail closed");
-    const store = new MemoryProductionCheckpointStore();
+    const store = new MemoryProductionCheckpointStore(initialState(prepared));
     const badTurn: ModelTurn = {
       content: [{ type: "text", text: "No tools" }],
       stopReason: "end_turn",
@@ -466,7 +467,7 @@ describe("host-side production runner", () => {
   test("resumes a completed checkpoint from its durable delivery receipt without reopening E2B", async () => {
     const repo = await repository();
     const prepared = await prepareAgentRun(repo.worktreePath, "Deliver once");
-    const checkpointStore = new MemoryProductionCheckpointStore();
+    const checkpointStore = new MemoryProductionCheckpointStore(initialState(prepared));
     await runProductionLoop({
       ...prepared,
       callModel: queuedModel([
@@ -501,6 +502,7 @@ describe("host-side production runner", () => {
     const resumed = await runHeadlessAgent({
       repoPath: repo.worktreePath,
       task: "Deliver once",
+      approvalMode: "auto",
       checkpointStore,
       resultDeliveryStore,
       sessionRecoveryStore: new MemoryE2bSessionRecoveryStore(),
@@ -533,7 +535,7 @@ describe("host-side production runner", () => {
         opened += 1;
         return new FakeSession() as unknown as E2bTaskSession;
       },
-    })).rejects.toThrow("explicit approval mode");
+    } as unknown as HeadlessAgentRunOptions)).rejects.toThrow("explicit approval mode");
     expect(opened).toBe(0);
   });
 
@@ -1139,6 +1141,7 @@ function queuedModel(turns: ModelTurn[]): CallModel {
           name: "propose_plan",
           input: {
             approach: "Follow the existing runtime architecture.",
+            productDirection: "Preserve the requested product behavior.",
             visualDirection: "not_applicable",
             technologyChoices: [],
             includedScope: ["Complete the requested task"],
@@ -1213,7 +1216,7 @@ function initialState(
     appendedPromptContext: "",
     lifecycle: "running",
     plan: [],
-    transcript: [{ role: "user", content: "test" }],
+    transcript: [{ role: "user", content: `Complete the following repository task:\n${prepared.task}\n\nFirst create a concrete plan, then perform one safe action per turn.` }],
     lastToolSucceeded: null,
     pendingTurn: null,
     pendingModelCall: null,

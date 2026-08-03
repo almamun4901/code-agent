@@ -21,7 +21,9 @@ export function formatStaticEvent(event: AgentEvent): string[] {
     case "approval_requested":
       return [
         `Plan approval requested: revision ${event.revision} (${event.mode})`,
+        ...(event.reapprovalReason ? [`Reapproval: ${singleLine(event.reapprovalReason)}`] : []),
         `Approach: ${singleLine(event.proposal.approach)}`,
+        `Product direction: ${singleLine(event.proposal.productDirection)}`,
         `Visual direction: ${singleLine(event.proposal.visualDirection)}`,
         ...event.proposal.technologyChoices.map((choice) => `Technology: ${singleLine(choice.name)} — ${singleLine(choice.rationale)}`),
         ...event.proposal.includedScope.map((item) => `Included: ${singleLine(item)}`),

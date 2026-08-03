@@ -294,6 +294,7 @@ function event(
 function approvalProposal() {
   return {
     approach: "Use existing runtime boundaries.",
+    productDirection: "Preserve the requested product behavior.",
     visualDirection: "not_applicable" as const,
     technologyChoices: [{ name: "Zod", rationale: "Validate checkpoints." }],
     includedScope: ["Approval state"],

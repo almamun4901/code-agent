@@ -24,7 +24,7 @@ describe("production lifecycle budgets", () => {
         return { outcome: "allow", appendContext: "Use the existing test style." };
       });
     const store = new MemoryProductionCheckpointStore();
-    await prepareProductionLifecycle({ ...prepared, checkpointStore: store, modelRuntime: runtimeFor([]), hooks });
+    await prepareProductionLifecycle({ ...prepared, checkpointStore: store, modelRuntime: runtimeFor([]), hooks, approvalMode: "auto" });
     expect(order).toEqual(["start", "prompt"]);
     expect(await store.load()).toMatchObject({ promptStatus: "accepted", appendedPromptContext: "Use the existing test style." });
     expect(JSON.stringify((await store.load())?.transcript)).toContain("Lifecycle context");
@@ -55,7 +55,7 @@ describe("production lifecycle budgets", () => {
     const runtime = runtimeFor([
       agentTurn([["work", "Work", "in_progress"]]),
     ]);
-    const store = new MemoryProductionCheckpointStore();
+    const store = preapprovedStore({ maxModelCalls: 1, compactAtTokens: 300_000 });
     await expect(runProductionLoop({
       ...prepared,
       modelRuntime: runtime,
@@ -72,7 +72,7 @@ describe("production lifecycle budgets", () => {
     await expect(runProductionLoop({
       ...prepared,
       modelRuntime: exact,
-      checkpointStore: new MemoryProductionCheckpointStore(),
+      checkpointStore: preapprovedStore({ maxModelCalls: 1, compactAtTokens: 250_000, maxContextTokens: 200_000 }),
       session: session(),
       budgetLimits: { maxModelCalls: 1, compactAtTokens: 250_000, maxContextTokens: 200_000 },
     })).rejects.toMatchObject({ code: "MODEL_CALL_LIMIT" });
@@ -82,7 +82,7 @@ describe("production lifecycle budgets", () => {
     await expect(runProductionLoop({
       ...prepared,
       modelRuntime: over,
-      checkpointStore: new MemoryProductionCheckpointStore(),
+      checkpointStore: preapprovedStore({ compactAtTokens: 250_000, maxContextTokens: 200_000 }),
       session: session(),
       budgetLimits: { compactAtTokens: 250_000, maxContextTokens: 200_000 },
     })).rejects.toMatchObject({ code: "CONTEXT_BUDGET_EXCEEDED" });
@@ -95,14 +95,14 @@ describe("production lifecycle budgets", () => {
     const reservation = catalogCostMicroUsd(10, 4_096, pricing);
     const exact = runtimeFor([agentTurn([["work", "Work", "in_progress"]])], () => 10);
     await expect(runProductionLoop({
-      ...prepared, modelRuntime: exact, checkpointStore: new MemoryProductionCheckpointStore(), session: session(),
+      ...prepared, modelRuntime: exact, checkpointStore: preapprovedStore({ maxModelCalls: 1, compactAtTokens: 100, maxProjectedCostMicroUsd: reservation }), session: session(),
       budgetLimits: { maxModelCalls: 1, compactAtTokens: 100, maxProjectedCostMicroUsd: reservation },
     })).rejects.toMatchObject({ code: "MODEL_CALL_LIMIT" });
     expect(exact.calls()).toBe(1);
 
     const over = runtimeFor([], () => 10);
     await expect(runProductionLoop({
-      ...prepared, modelRuntime: over, checkpointStore: new MemoryProductionCheckpointStore(), session: session(),
+      ...prepared, modelRuntime: over, checkpointStore: preapprovedStore({ compactAtTokens: 100, maxProjectedCostMicroUsd: reservation - 1 }), session: session(),
       budgetLimits: { compactAtTokens: 100, maxProjectedCostMicroUsd: reservation - 1 },
     })).rejects.toMatchObject({ code: "COST_BUDGET_EXCEEDED" });
     expect(over.calls()).toBe(0);
@@ -115,7 +115,7 @@ describe("production lifecycle budgets", () => {
       agentTurn([["work", "Work", "in_progress"]], action("read", "read_file", { path: "README.md" })),
       agentTurn([["work", "Work", "completed"]]),
     ], () => counts.shift() ?? 10);
-    const store = new MemoryProductionCheckpointStore();
+    const store = preapprovedStore({ compactAtTokens: 100, maxContextTokens: 200, maxModelCalls: 5 });
     const result = await runProductionLoop({
       ...prepared,
       modelRuntime: runtime,
@@ -133,7 +133,7 @@ describe("production lifecycle budgets", () => {
 
   test("recovers a completed checkpoint whose compaction removed earlier turns", async () => {
     const counts = [10, 10, 100, 100, 10, 10];
-    const store = new MemoryProductionCheckpointStore();
+    const store = preapprovedStore({ compactAtTokens: 100, maxContextTokens: 200, maxModelCalls: 5 });
     await runProductionLoop({
       ...prepared,
       modelRuntime: runtimeFor([
@@ -151,7 +151,7 @@ describe("production lifecycle budgets", () => {
   });
 
   test("persists invalid compaction output as a terminal failure", async () => {
-    const store = new MemoryProductionCheckpointStore();
+    const store = preapprovedStore({ compactAtTokens: 100, maxContextTokens: 200 });
     const invalidSummary: ModelTurn = { content: [{ type: "text", text: "not json" }], stopReason: "end_turn", usage: { inputTokens: 1, outputTokens: 1 } };
     await expect(runProductionLoop({
       ...prepared,
@@ -164,7 +164,7 @@ describe("production lifecycle budgets", () => {
   });
 
   test("persists an ambiguous reservation and never replays it", async () => {
-    const store = new MemoryProductionCheckpointStore();
+    const store = preapprovedStore();
     const failedRuntime = runtimeFor([], () => 10, new Error("connection lost"));
     await expect(runProductionLoop({ ...prepared, modelRuntime: failedRuntime, checkpointStore: store, session: session() })).rejects.toThrow("connection lost");
     expect((await store.load())?.pendingModelCall?.response).toBeNull();
@@ -176,7 +176,7 @@ describe("production lifecycle budgets", () => {
   });
 
   test("installs a persisted response after a crash without replaying it", async () => {
-    const backing = new MemoryProductionCheckpointStore();
+    const backing = preapprovedStore({ compactAtTokens: 100, maxContextTokens: 200, maxModelCalls: 5 });
     let interrupted = false;
     const crashingStore = {
       load: () => backing.load(),
@@ -198,7 +198,7 @@ describe("production lifecycle budgets", () => {
   });
 
   test("installs a persisted compaction response after a crash without treating it as an agent turn", async () => {
-    const backing = new MemoryProductionCheckpointStore();
+    const backing = preapprovedStore({ compactAtTokens: 100, maxContextTokens: 200, maxModelCalls: 5 });
     let interrupted = false;
     const crashingStore = {
       load: () => backing.load(),
@@ -235,7 +235,7 @@ describe("production lifecycle budgets", () => {
         ? { outcome: "deny", code: "VERIFY_MORE", reason: "Run one more verification." }
         : { outcome: "allow" };
     });
-    const store = new MemoryProductionCheckpointStore();
+    const store = preapprovedStore();
     await runProductionLoop({
       ...prepared,
       hooks,
@@ -254,7 +254,7 @@ describe("production lifecycle budgets", () => {
   });
 
   test("rejects a resumed runtime whose identity differs from persisted pricing", async () => {
-    const store = new MemoryProductionCheckpointStore();
+    const store = preapprovedStore({ maxModelCalls: 1 });
     const first = runtimeFor([agentTurn([["work", "Work", "in_progress"]])]);
     await expect(runProductionLoop({ ...prepared, modelRuntime: first, checkpointStore: store, session: session(), budgetLimits: { maxModelCalls: 1 } })).rejects.toMatchObject({ code: "MODEL_CALL_LIMIT" });
     const state = await store.load();
@@ -279,7 +279,7 @@ describe("production lifecycle budgets", () => {
         agentTurn([["work", "Work", "in_progress"]], action("read", "read_file", { path: "README.md" })),
         agentTurn([["work", "Work", "completed"]]),
       ]),
-      checkpointStore: new MemoryProductionCheckpointStore(),
+      checkpointStore: preapprovedStore(),
       session: session(),
     });
     expect(observed).toHaveLength(1);
@@ -287,7 +287,7 @@ describe("production lifecycle budgets", () => {
   });
 
   test("commits a shutdown-reconciled mutation and invokes PostToolUse once", async () => {
-    const store = new MemoryProductionCheckpointStore();
+    const store = preapprovedStore();
     const hooks = new LifecycleHooks();
     const observed: unknown[] = [];
     hooks.register("PostToolUse", (context) => { observed.push(context); });
@@ -318,7 +318,7 @@ describe("production lifecycle budgets", () => {
   });
 
   test("falls back to a replay-safe terminal checkpoint at the byte ceiling", async () => {
-    const store = new MemoryProductionCheckpointStore();
+    const store = preapprovedStore();
     const state = baseState();
     state.transcript.push({ role: "user", content: "界".repeat(10_000) });
     state.limits.maxCheckpointBytes = 4_096;
@@ -332,7 +332,7 @@ describe("production lifecycle budgets", () => {
     const oversized = agentTurn([["work", "Work", "in_progress"]]);
     oversized.content.unshift({ type: "text", text: "界".repeat(10_000) });
     const runtime = runtimeFor([oversized]);
-    const store = new MemoryProductionCheckpointStore();
+    const store = preapprovedStore({ maxCheckpointBytes: 4_096 });
     await expect(runProductionLoop({
       ...prepared,
       modelRuntime: runtime,
@@ -412,4 +412,10 @@ function baseState(): ProductionAgentState {
     context: { lastEstimateTokens: 0, estimateSource: null, requestFingerprint: null }, cost: { projectedMicroUsd: 0, observedMicroUsd: 0, observedAvailable: false, driftMicroUsd: 0 }, compaction: { count: 0, lastPreTokens: 0, lastPostTokens: 0, baselineCommittedTurns: 0, baselineProtocolRetries: 0, baselineToolCalls: 0, baselinePlanRewrites: 0, baselineStopRejections: 0 }, notificationKeys: [], lastNotification: null,
     counters: { modelTurns: 0, modelCalls: 0, agentCalls: 0, compactionCalls: 0, stopRejections: 0, committedTurns: 0, protocolRetries: 0, toolCalls: 0, planRewrites: 0, inputTokens: 0, outputTokens: 0 }, consecutiveInvalidAttempts: 0, terminalCode: null, terminalError: null, lastToolResult: null,
   };
+}
+
+function preapprovedStore(limits: Partial<ProductionAgentState["limits"]> = {}): MemoryProductionCheckpointStore {
+  const state = baseState();
+  state.limits = { ...state.limits, ...limits };
+  return new MemoryProductionCheckpointStore(state);
 }

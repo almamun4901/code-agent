@@ -55,7 +55,7 @@ export type PreparedAgentRun = {
 
 export type AgentModelProvider = "anthropic" | "openrouter";
 
-export type HeadlessAgentRunOptions = {
+type AgentRunBaseOptions = {
   repoPath: string;
   task: string;
   templateId?: string;
@@ -76,9 +76,12 @@ export type HeadlessAgentRunOptions = {
     templateId: string;
     signal?: AbortSignal;
   }) => Promise<E2bTaskSession>;
-  approvalMode?: ApprovalMode;
-  requestApproval?: RequestPlanApproval;
 };
+
+export type HeadlessAgentRunOptions = AgentRunBaseOptions & (
+  | { approvalMode: "auto"; requestApproval?: never }
+  | { approvalMode: "interactive"; requestApproval: RequestPlanApproval }
+);
 
 export type SessionEndContext = {
   reason: "completed" | "cancelled" | "failed";
@@ -98,7 +101,9 @@ export type AgentRunController = {
   submitApproval(proposalDigest: string, decision: ApprovalDecision): boolean;
 };
 
-export type ControlledAgentRunOptions = HeadlessAgentRunOptions & {
+export type ControlledAgentRunOptions = AgentRunBaseOptions & {
+  approvalMode: ApprovalMode;
+  requestApproval?: RequestPlanApproval;
   sessionEnd?: (context: SessionEndContext) => void | Promise<void>;
   sessionEndTimeoutMs?: number;
   shutdownTimeoutMs?: number;
@@ -440,7 +445,7 @@ type ExecutionResult = {
 };
 
 async function executeAgentRun(
-  options: HeadlessAgentRunOptions,
+  options: AgentRunBaseOptions & { approvalMode?: ApprovalMode; requestApproval?: RequestPlanApproval },
   events: AgentEventPublisher,
   lifecycleEvent: (event: "run_started" | "hooks_started") => void,
   beginShutdown: (
@@ -486,9 +491,19 @@ async function executeAgentRun(
     const approvalMode = options.approvalMode ?? (
       options.requestApproval ? "interactive" as const : undefined
     );
-    if (!existing && !approvalMode) {
+    if ((!existing || existing.lifecycle === "running") && !approvalMode) {
       throw new AgentRunUsageError(
         "Headless runs require an explicit approval mode or approval handler.",
+      );
+    }
+    if ((!existing || existing.lifecycle === "running") && approvalMode === "interactive" && !options.requestApproval) {
+      throw new AgentRunUsageError(
+        "Interactive headless runs require an injected approval handler.",
+      );
+    }
+    if (existing?.lifecycle === "running" && existing.approval.mode && approvalMode !== existing.approval.mode) {
+      throw new AgentRunUsageError(
+        `Checkpoint approval mode ${existing.approval.mode} does not match requested mode ${approvalMode}.`,
       );
     }
     const templateId =

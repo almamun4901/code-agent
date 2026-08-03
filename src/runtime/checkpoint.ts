@@ -86,6 +86,7 @@ export class FileProductionCheckpointStore
     try {
       return decodeProductionCheckpoint(JSON.parse(serialized));
     } catch (error) {
+      if (error instanceof ProductionCheckpointError) throw error;
       throw new ProductionCheckpointError(
         `Checkpoint "${this.statePath}" is corrupt or incompatible with the production runner.`,
         { cause: error },

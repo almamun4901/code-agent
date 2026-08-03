@@ -11,7 +11,10 @@ const assistantBlockSchema = z.union([
   z.object({ type: z.literal("tool_use"), id: z.string().min(1), name: z.string().min(1), input: z.unknown() }).strict(),
 ]);
 
-const boundedText = (max: number) => z.string().trim().min(1).max(max);
+const boundedText = (max: number) => z.string().trim().min(1).max(max).refine(
+  (value) => !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/u.test(value),
+  "Control characters are not allowed.",
+);
 const scopedItemSchema = z.object({
   name: boundedText(256),
   rationale: boundedText(2_048),
@@ -28,6 +31,7 @@ const executionTaskSchema = z.object({
 
 export const PlanProposalSchema = z.object({
   approach: boundedText(8_192),
+  productDirection: boundedText(4_096),
   visualDirection: z.union([z.literal("not_applicable"), boundedText(4_096)]),
   technologyChoices: z.array(scopedItemSchema).max(20),
   includedScope: z.array(boundedText(2_048)).min(1).max(30),
@@ -39,8 +43,8 @@ export const PlanProposalSchema = z.object({
 }).strict().superRefine((proposal, context) => {
   uniqueIds(proposal.acceptanceCriteria, "acceptance criterion", context);
   uniqueIds(proposal.executionPlan, "execution task", context);
-  if (utf8Bytes(proposal) > 128 * 1024) {
-    context.addIssue({ code: "custom", message: "Plan proposal exceeds 128 KiB." });
+  if (utf8Bytes(proposal) > 8 * 1024) {
+    context.addIssue({ code: "custom", message: "Plan proposal exceeds 8 KiB." });
   }
 });
 
@@ -56,12 +60,18 @@ export const ApprovalStateSchema = z.object({
   currentProposal: PlanProposalSchema.nullable(),
   proposalDigest: z.string().regex(/^[a-f0-9]{64}$/).nullable(),
   approvedProposalDigest: z.string().regex(/^[a-f0-9]{64}$/).nullable(),
+  executionBaseProposal: PlanProposalSchema.nullable().default(null),
+  executionBaseDigest: z.string().regex(/^[a-f0-9]{64}$/).nullable().default(null),
   revision: z.number().int().nonnegative(),
   feedbackHistory: z.array(boundedText(8_192)).max(20),
-  discoveryTranscript: z.array(ConversationMessageSchema).max(100),
+  discoveryTranscript: z.array(ConversationMessageSchema).max(101),
   discoveryCommittedTurns: z.number().int().nonnegative(),
   discoveryProtocolRetries: z.number().int().nonnegative(),
   discoveryToolCalls: z.number().int().nonnegative(),
+  discoveryCompactions: z.number().int().nonnegative().default(0),
+  discoveryBaselineCommittedTurns: z.number().int().nonnegative().default(0),
+  discoveryBaselineProtocolRetries: z.number().int().nonnegative().default(0),
+  discoveryBaselineToolCalls: z.number().int().nonnegative().default(0),
   pendingDiscoveryTurn: z.object({
     assistantContent: z.array(assistantBlockSchema),
     proposalToolId: z.string().min(1).nullable(),
@@ -81,6 +91,12 @@ export const ApprovalStateSchema = z.object({
   if ((approval.currentProposal === null) !== (approval.proposalDigest === null)) {
     context.addIssue({ code: "custom", message: "Proposal and proposal digest must be present together." });
   }
+  if ((approval.executionBaseProposal === null) !== (approval.executionBaseDigest === null)) {
+    context.addIssue({ code: "custom", message: "Execution base proposal and digest must be present together." });
+  }
+  if (approval.executionBaseProposal && approval.executionBaseDigest !== proposalDigest(approval.executionBaseProposal)) {
+    context.addIssue({ code: "custom", message: "Execution base digest does not match its proposal." });
+  }
   if (approval.currentProposal && approval.proposalDigest !== proposalDigest(approval.currentProposal)) {
     context.addIssue({ code: "custom", message: "Proposal digest does not match the proposal." });
   }
@@ -94,6 +110,12 @@ export const ApprovalStateSchema = z.object({
   }
   if (approval.phase === "discovering" && approval.approvedProposalDigest !== null && !approval.pendingReapproval) {
     context.addIssue({ code: "custom", message: "Initial discovery cannot retain an approved digest." });
+  }
+  if (approval.phase === "awaiting_approval" && (approval.approvedProposalDigest !== null) !== (approval.pendingReapproval !== null)) {
+    context.addIssue({ code: "custom", message: "Awaiting reapproval requires both prior approval and reapproval metadata." });
+  }
+  if (approval.phase === "executing" && approval.pendingReapproval !== null) {
+    context.addIssue({ code: "custom", message: "Executing state cannot retain pending reapproval metadata." });
   }
   if (utf8Bytes(approval) > 512 * 1024) {
     context.addIssue({ code: "custom", message: "Approval state exceeds 512 KiB." });
@@ -124,12 +146,18 @@ export function createInitialApprovalState(mode: ApprovalMode | null = null): Ap
     currentProposal: null,
     proposalDigest: null,
     approvedProposalDigest: null,
+    executionBaseProposal: null,
+    executionBaseDigest: null,
     revision: 0,
     feedbackHistory: [],
     discoveryTranscript: [],
     discoveryCommittedTurns: 0,
     discoveryProtocolRetries: 0,
     discoveryToolCalls: 0,
+    discoveryCompactions: 0,
+    discoveryBaselineCommittedTurns: 0,
+    discoveryBaselineProtocolRetries: 0,
+    discoveryBaselineToolCalls: 0,
     pendingDiscoveryTurn: null,
     pendingReapproval: null,
     legacyTerminal: false,
@@ -151,6 +179,8 @@ export function proposalDigest(proposal: PlanProposal): string {
 
 export function protectedProposalDigest(proposal: PlanProposal): string {
   return digest(stableJson({
+    approach: proposal.approach,
+    productDirection: proposal.productDirection,
     visualDirection: proposal.visualDirection,
     technologyChoices: proposal.technologyChoices,
     includedScope: proposal.includedScope,

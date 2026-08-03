@@ -95,6 +95,8 @@ function ApprovalPane({
       {approval.reapprovalReason ? <Text color="yellow">Reapproval: {safe(approval.reapprovalReason)}</Text> : null}
       <Text bold>Approach</Text>
       <Text>{safe(proposal.approach)}</Text>
+      <Text bold>Product direction</Text>
+      <Text>{safe(proposal.productDirection)}</Text>
       <Text bold>Visual direction</Text>
       <Text>{safe(proposal.visualDirection)}</Text>
       <Text bold>Technology</Text>

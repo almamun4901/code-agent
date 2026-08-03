@@ -33,6 +33,7 @@ liveTest(
         name: "propose_plan",
         input: {
           approach: "Exercise cancellable mutation cleanup.",
+          productDirection: "Preserve the requested product behavior.",
           visualDirection: "not_applicable",
           technologyChoices: [],
           includedScope: ["Cancellable mutation cleanup"],

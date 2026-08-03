@@ -7,6 +7,9 @@ and completion is backed by inspectable evidence.
 
 ## Gate 8A — Result delivery
 
+**Implementation status:** complete on the Gate 8A feature branch; final
+roadmap completion requires branch landing and merged-main verification.
+
 The sandbox remains the only model-controlled filesystem. Before cleanup, the
 trusted host must receive a bounded Git artifact rooted at the exact bundled
 commit, validate its object graph and changed paths, and import it into a new
@@ -33,6 +36,13 @@ Acceptance evidence includes shell-create → typed-edit parity, dirty-host
 refusal, malicious bundle/path rejection, death at every delivery transition,
 idempotent resume, and a completed local-only calculator appearing on a new
 local branch after E2B cleanup.
+
+The implementation uses `result/<first-12-run-id>` for the deterministic local
+branch. It bounds the bundle to 16 MiB, the introduced object graph to 64 MiB
+and 10,000 objects, history to 200 commits, and changed paths to 2,000. Changed
+`.git`/`.agent` paths, control-character paths, symlinks, and gitlinks are
+rejected. A successful no-op task receives an empty completion commit so it
+still has an exportable, inspectable result receipt.
 
 ## Gate 8B — Plan approval
 

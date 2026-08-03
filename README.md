@@ -8,8 +8,8 @@ creation.
 
 ## Current status
 
-Steps 0–8 are complete. Gate 8A is implemented and has passed its feature-branch
-acceptance gates; roadmap completion awaits landing and merged-main verification.
+Steps 0–8A are complete on merged `main`. Gate 8B, durable plan approval before
+mutation, is the next roadmap task.
 The deterministic fake loop, live Claude loop with fake tools, six real local
 tools, crash-safe plan persistence, MCP stdio transport,
 isolated E2B execution, and the PreToolUse safety boundary have passed their

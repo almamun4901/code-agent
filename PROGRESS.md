@@ -15,10 +15,10 @@ now reaches a deterministic local result branch through a bounded, validated,
 transactional Git delivery before cleanup. A fresh Anthropic calculator run
 proved the branch survives sandbox cleanup and its 26 tests pass from a
 detached local worktree. Shell-created and typed-tool-edited files are mutually
-writable across the sandbox identities. Gate 8B is implemented and offline
-verified on `feat/plan-approval`; live credentialed acceptance, branch merge,
-and merged-`main` verification remain before it can be marked complete. Gate
-8C still blocks Steps 9–10 with trusted completion/audit evidence.
+writable across the sandbox identities. Gate 8B is implemented, reviewed,
+merged, and offline verified on `main`; live credentialed acceptance remains
+before it can be marked complete. Gate 8C still blocks Steps 9–10 with trusted
+completion/audit evidence.
 
 **Step-by-step:**
 
@@ -34,7 +34,7 @@ and merged-`main` verification remain before it can be marked complete. Gate
 | 7 — TUI (Ink) | complete | Responsive Ink/static views, packaged CLI, honest committed-plan events, safe cancellation, PTY gates, and live E2B cleanup verified on merged `main` |
 | 8 — Remaining hooks + budget | complete | Eight bounded hooks, checkpoint-v3 dual ledgers, paid-call reservations, transactional compaction, recovery gates, and budget UI pass on merged `main` |
 | 8A — Result delivery | complete | Bounded Git delivery, durable recovery receipt, safe local result branch, shared artifact ownership, and live dogfood pass on merged `main` |
-| 8B — Plan approval | implemented; final gates pending | Durable discovery/approval/reapproval, CLI/TUI controls, migration, recovery, and offline tests pass; live credentials, push/merge, and merged-main verification remain |
+| 8B — Plan approval | merged; live gate pending | Durable discovery/approval/reapproval, CLI/TUI controls, migration, recovery, review, push/merge, and merged-main offline verification pass; credentialed live acceptance remains |
 | 8C — Completion evidence | not started | Require correlated diff/check/commit evidence and provide durable host inspection |
 | 9 — Telemetry | not started | — |
 | 10 — Eval + PR posting | not started | — |
@@ -213,12 +213,13 @@ and merged-`main` verification remain before it can be marked complete. Gate
   lifecycle/performance tests pass. The gstack security, recovery, and test
   reviews were resolved. Live E2B and provider acceptance could not run because
   `E2B_API_KEY`, `ANTHROPIC_API_KEY`, and `OPENROUTER_API_KEY` are absent.
-- Current status of the step in progress: Implementation and offline review
-  gates pass on `feat/plan-approval`; the step is not complete until the branch
-  is pushed, merged into updated `main`, reverified, and `main` is pushed.
+- Current status of the step in progress: Implementation, review, branch push,
+  merge, merged-main verification (271 tests), and main push pass. The step is
+  not complete because its credentialed live acceptance could not run.
 - Next session should start with: Supply live credentials and run interactive
-  revision/restart plus explicit auto-approval E2B acceptance, then complete
-  the required push/merge/reverification workflow before marking 8B complete.
+  revision/restart plus explicit auto-approval E2B acceptance. Mark 8B complete
+  only after both live paths pass and sandbox cleanup/result delivery are
+  confirmed.
 
 ### 2026-08-03 — Step 8B implementation planning
 

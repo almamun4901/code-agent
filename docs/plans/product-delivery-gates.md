@@ -46,8 +46,8 @@ still has an exportable, inspectable result receipt.
 
 ## Gate 8B — Plan approval
 
-**Implementation status:** implemented and offline-verified on
-`feat/plan-approval`; merge and merged-`main` verification remain required.
+**Implementation status:** implemented, reviewed, merged, and offline-verified
+on `main`; credentialed live interactive and auto-approval acceptance remain.
 
 Interactive runs begin in read-only discovery. The proposed artifact must make
 product choices visible—not merely list implementation verbs—including visual

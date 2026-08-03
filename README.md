@@ -8,8 +8,8 @@ creation.
 
 ## Current status
 
-Steps 0–8A are complete on merged `main`. Gate 8B is implemented on its
-feature branch and awaiting the required merge/reverification workflow.
+Steps 0–8A are complete on merged `main`. Gate 8B is implemented, reviewed,
+merged, and offline-verified; credentialed live acceptance remains outstanding.
 The deterministic fake loop, live Claude loop with fake tools, six real local
 tools, crash-safe plan persistence, MCP stdio transport,
 isolated E2B execution, and the PreToolUse safety boundary have passed their

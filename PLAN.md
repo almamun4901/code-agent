@@ -210,7 +210,7 @@ order above.
 | 7 — TUI (Ink)                 | complete                                              |
 | 8 — Remaining hooks + budget  | complete                                              |
 | 8A — Result delivery          | complete                                              |
-| 8B — Plan approval            | not started                                           |
+| 8B — Plan approval            | complete                                              |
 | 8C — Completion evidence      | not started                                           |
 | 9 — Telemetry                 | not started                                           |
 | 10 — Eval + PR posting        | not started                                           |

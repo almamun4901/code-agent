@@ -46,8 +46,9 @@ still has an exportable, inspectable result receipt.
 
 ## Gate 8B — Plan approval
 
-**Implementation status:** implemented, reviewed, merged, and offline-verified
-on `main`; credentialed live interactive and auto-approval acceptance remain.
+**Implementation status:** complete. Implementation, review, merged-main
+offline verification, interactive revision/restart E2B, explicit auto-approval
+E2B, result delivery, cancellation, and sandbox cleanup gates pass.
 
 Interactive runs begin in read-only discovery. The proposed artifact must make
 product choices visible—not merely list implementation verbs—including visual

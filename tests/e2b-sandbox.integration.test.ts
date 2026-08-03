@@ -9,6 +9,7 @@ import {
   recoverE2bTaskSession,
 } from "../src/sandbox/e2b-session";
 import { MemoryE2bSessionRecoveryStore } from "../src/sandbox/session-recovery";
+import { MemoryResultDeliveryStore } from "../src/sandbox/result-delivery";
 import {
   readLiveE2bConfig,
   toolStdout,
@@ -37,6 +38,22 @@ async function gitStatus(cwd: string): Promise<string> {
   ]);
   if (exitCode !== 0) throw new Error(stderr);
   return stdout;
+}
+
+async function git(cwd: string, ...args: string[]): Promise<string> {
+  const process = Bun.spawn(["git", ...args], {
+    cwd,
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(process.stdout).text(),
+    new Response(process.stderr).text(),
+    process.exited,
+  ]);
+  if (exitCode !== 0) throw new Error(stderr);
+  return stdout.trim();
 }
 
 function shellQuote(value: string): string {
@@ -482,6 +499,67 @@ test.skipIf(!LIVE_ENABLED)(
     }
   },
   240_000,
+);
+
+test.skipIf(!LIVE_ENABLED)(
+  "delivers a committed E2B result locally before sandbox cleanup",
+  async () => {
+    const repository = await createTemporaryRepository();
+    const recoveryStore = new MemoryE2bSessionRecoveryStore();
+    const deliveryStore = new MemoryResultDeliveryStore();
+    const runIdentity = "e".repeat(64);
+    const originalBranch = await git(
+      repository.worktreePath,
+      "branch",
+      "--show-current",
+    );
+    const originalHead = await git(repository.worktreePath, "rev-parse", "HEAD");
+    let session:
+      | Awaited<ReturnType<typeof createE2bTaskSession>>
+      | undefined;
+    try {
+      session = await createE2bTaskSession({
+        localRepoPath: repository.worktreePath,
+        taskId: "delivery-live",
+        templateId,
+        recovery: { runIdentity, store: recoveryStore },
+        resultDeliveryStore: deliveryStore,
+      });
+      const created = await session.call({
+        name: "run_shell",
+        input: {
+          cwd: ".",
+          command: "printf 'survives E2B cleanup\\n' > delivered.txt",
+        },
+      });
+      expect(created).toMatchObject({ success: true });
+
+      const receipt = await session.deliverResult(runIdentity);
+      const sandboxId = session.sandboxId;
+      await session.close();
+      session = undefined;
+
+      expect(receipt).toMatchObject({
+        branch: "result/eeeeeeeeeeee",
+        changedFiles: ["delivered.txt"],
+      });
+      expect(await git(repository.worktreePath, "branch", "--show-current"))
+        .toBe(originalBranch);
+      expect(await git(repository.worktreePath, "rev-parse", "HEAD"))
+        .toBe(originalHead);
+      expect(await git(
+        repository.worktreePath,
+        "show",
+        `${receipt.branch}:delivered.txt`,
+      )).toBe("survives E2B cleanup");
+      await expect(Sandbox.connect(sandboxId)).rejects.toThrow();
+    } finally {
+      await session?.reconcileActiveMutation(10_000).catch(() => {});
+      await session?.close().catch(() => {});
+      await repository.cleanup();
+    }
+  },
+  120_000,
 );
 
 test.skipIf(!LIVE_ENABLED)(

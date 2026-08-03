@@ -281,7 +281,7 @@ describe("approval decisions", () => {
       discoveryTurn("propose_plan", original),
       executionTurn([
         rewritePlan("state", "Persist approval state.", "in_progress"),
-        repositoryAction("reapprove", "request_reapproval", { proposal: replacement, reason: "The repository requires replacement scope." }),
+        repositoryAction("reapprove", "request_reapproval", { proposalJson: JSON.stringify(replacement), reason: "The repository requires replacement scope." }),
       ]),
       executionTurn([repositoryAction("read", "read_file", { path: "README.md" })]),
       executionTurn([rewritePlan("replacement", "Implement replacement scope.", "completed")]),

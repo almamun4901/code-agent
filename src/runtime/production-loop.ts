@@ -143,13 +143,14 @@ const SYSTEM_PROMPT = [
   "   tool without repeating rewrite_plan. Rewrite the plan when status changes.",
   "10. If product/visual direction, dependencies, scope, acceptance criteria,",
   "   assumptions, or unresolved questions materially change, call",
-  "   request_reapproval after rewrite_plan and pause before further work.",
+  "   request_reapproval after rewrite_plan with proposalJson containing the",
+  "   complete replacement proposal as JSON, then pause before further work.",
   "",
   "Use repository-relative paths. Inspect before editing, preview edits before",
   "applying them, verify changes, and do not attempt to publish or access the host.",
 ].join("\n");
 
-const TOOL_DEFINITIONS: ModelToolDefinition[] = [
+const RAW_TOOL_DEFINITIONS: ModelToolDefinition[] = [
   {
     name: "rewrite_plan",
     description:
@@ -220,18 +221,29 @@ const TOOL_DEFINITIONS: ModelToolDefinition[] = [
   {
     name: "request_reapproval",
     description: "Pause implementation and request approval for a material change to protected plan intent.",
-    strict: true,
+    // Keep this small schema advisory at the provider boundary. The complete
+    // JSON proposal is parsed and strictly validated by PlanProposalSchema
+    // before any checkpoint or sandbox action.
+    strict: false,
     inputSchema: {
       type: "object",
       properties: {
-        proposal: proposalInputSchema(),
+        proposalJson: { type: "string" },
         reason: { type: "string" },
       },
-      required: ["proposal", "reason"],
+      required: ["proposalJson", "reason"],
       additionalProperties: false,
     },
   },
 ];
+
+const TOOL_DEFINITIONS: ModelToolDefinition[] = RAW_TOOL_DEFINITIONS.map((tool) => ({
+  ...tool,
+  // Anthropic cannot compile the aggregate eight-tool execution grammar.
+  // validateProductionTurn and validateToolCall remain the authoritative
+  // fail-closed boundary before checkpoint changes or sandbox dispatch.
+  strict: false,
+}));
 
 const DISCOVERY_SYSTEM_PROMPT = [
   "You are a coding agent performing read-only repository discovery.",
@@ -1692,13 +1704,18 @@ function validateProductionTurn(
     }
     if (actionCall.name === "request_reapproval") {
       const input = actionCall.input;
-      const parsedReapproval = typeof input === "object" && input !== null && !Array.isArray(input)
-        ? PlanProposalSchema.safeParse((input as Record<string, unknown>).proposal)
-        : { success: false as const };
+      let decodedProposal: unknown;
+      const proposalJson = typeof input === "object" && input !== null && !Array.isArray(input)
+        ? (input as Record<string, unknown>).proposalJson
+        : undefined;
+      if (typeof proposalJson === "string") {
+        try { decodedProposal = JSON.parse(proposalJson); } catch { decodedProposal = undefined; }
+      }
+      const parsedReapproval = PlanProposalSchema.safeParse(decodedProposal);
       const reason = typeof input === "object" && input !== null && !Array.isArray(input)
         ? (input as Record<string, unknown>).reason
         : undefined;
-      if (!parsedReapproval.success || typeof reason !== "string" || !reason.trim() || reason.length > 2_048 || Object.keys(input as Record<string, unknown>).some((key) => key !== "proposal" && key !== "reason")) {
+      if (!parsedReapproval.success || typeof reason !== "string" || !reason.trim() || reason.length > 2_048 || Object.keys(input as Record<string, unknown>).some((key) => key !== "proposalJson" && key !== "reason")) {
         throw new ProductionTurnProtocolError("request_reapproval requires one complete proposal and a bounded reason.");
       }
       if (validateReapprovalMateriality && (!state.approval.currentProposal || protectedProposalDigest(parsedReapproval.data) === protectedProposalDigest(state.approval.currentProposal))) {

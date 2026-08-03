@@ -32,7 +32,7 @@ human plan approval and trusted completion/audit evidence.
 | 7 — TUI (Ink) | complete | Responsive Ink/static views, packaged CLI, honest committed-plan events, safe cancellation, PTY gates, and live E2B cleanup verified on merged `main` |
 | 8 — Remaining hooks + budget | complete | Eight bounded hooks, checkpoint-v3 dual ledgers, paid-call reservations, transactional compaction, recovery gates, and budget UI pass on merged `main` |
 | 8A — Result delivery | complete | Bounded Git delivery, durable recovery receipt, safe local result branch, shared artifact ownership, and live dogfood pass on merged `main` |
-| 8B — Plan approval | not started | Pause after read-only discovery for durable approve/revise/cancel before any mutation |
+| 8B — Plan approval | planned, not started | Detailed state machine, trust boundaries, substeps, recovery matrix, and acceptance gates are in `docs/plans/plan-approval.md` |
 | 8C — Completion evidence | not started | Require correlated diff/check/commit evidence and provide durable host inspection |
 | 9 — Telemetry | not started | — |
 | 10 — Eval + PR posting | not started | — |
@@ -128,6 +128,10 @@ human plan approval and trusted completion/audit evidence.
   local branch, human-approved intent must precede mutations, and completion
   must reference durable external evidence. OTel/Langfuse remains a redacted
   asynchronous projection, not the source of execution truth. See ADR 0020.
+- Plan approval is checkpoint-owned rather than TUI-owned. Discovery exposes
+  phase-specific read-only schemas plus a host mutation guard; protected plan
+  changes return through the same gate, and headless auto-approval must be
+  explicit. See ADR 0021.
 - Result delivery uses a deterministic `result/<run-id>` branch and a bounded
   Git bundle rooted at the exact input commit. The host validates the bundle,
   records each recovery transition durably, imports without checkout, and only
@@ -183,6 +187,28 @@ human plan approval and trusted completion/audit evidence.
 ---
 
 ## Session log
+
+### 2026-08-03 — Step 8B implementation planning
+
+- What was done: Wrote `docs/plans/plan-approval.md`, defining the structured
+  proposal contract, read-only discovery protocol, checkpoint-owned
+  approve/revise/cancel state machine, explicit headless auto-approval,
+  material reapproval, migration behavior, implementation substeps, test
+  matrix, and offline/live definition of done. Added ADR 0021 for the approval
+  trust boundary.
+- What broke / had to be reworked: No code was changed or run. The plan makes
+  explicit that the existing execution transcript/counter validation cannot
+  simply absorb discovery turns without new bounded state and invariants.
+- Decisions made this session: Approval authority lives in checkpoint state;
+  discovery has phase-specific read-only schemas plus a host mutation guard;
+  protected proposal changes use `request_reapproval`; auto-approval is
+  explicit and follows the same durable transition.
+- Current status of the step in progress: Step 8B is fully planned but
+  implementation has not started.
+- Next session should start with: From an updated clean `main`, create a new
+  feature branch and implement substep 1 from `docs/plans/plan-approval.md`:
+  approval schemas, proposal digests, checkpoint invariants, and safe legacy
+  migration. Do not reuse this documentation branch for implementation.
 
 ### 2026-07-24 — Planning session
 

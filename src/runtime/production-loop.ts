@@ -46,6 +46,7 @@ import {
   type LifecycleBudgetSnapshot,
 } from "./lifecycle";
 import type { ResultDeliveryReceipt } from "../sandbox/result-delivery";
+import { createLegacyExecutionApprovalState } from "./approval";
 
 const MAX_PLAN_TASKS = 20;
 
@@ -405,6 +406,7 @@ function createBootstrapState(
 ): ProductionAgentState {
   return {
     version: 3,
+    approval: createLegacyExecutionApprovalState(),
     runIdentity: options.runIdentity,
     canonicalRepoPath: options.canonicalRepoPath,
     task: options.task,
@@ -1198,6 +1200,7 @@ async function initializeState(
   if (existing) return existing;
   const state: ProductionAgentState = {
     version: 3,
+    approval: createLegacyExecutionApprovalState(),
     runIdentity: options.runIdentity,
     canonicalRepoPath: options.canonicalRepoPath,
     task: options.task,

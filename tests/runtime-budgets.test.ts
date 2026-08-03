@@ -6,6 +6,7 @@ import { decodeProductionCheckpoint, MemoryProductionCheckpointStore, Production
 import { commitReconciledProductionMutation, prepareProductionLifecycle, runProductionLoop } from "../src/runtime/production-loop";
 import { startAgentRun } from "../src/runtime/agent-runner";
 import type { ProductionAgentState } from "../src/runtime/schema";
+import { createLegacyExecutionApprovalState } from "../src/runtime/approval";
 
 const prepared = {
   canonicalRepoPath: "/tmp/lifecycle-budget-repo",
@@ -404,7 +405,7 @@ function session() {
 
 function baseState(): ProductionAgentState {
   return {
-    version: 3, ...prepared, promptStatus: "accepted", appendedPromptContext: "", lifecycle: "running", plan: [], transcript: [{ role: "user", content: "Complete the following repository task:\nImplement safely\n\nFirst create a concrete plan, then perform one safe action per turn." }], lastToolSucceeded: null, pendingTurn: null, pendingModelCall: null,
+    version: 3, ...prepared, approval: createLegacyExecutionApprovalState(), promptStatus: "accepted", appendedPromptContext: "", lifecycle: "running", plan: [], transcript: [{ role: "user", content: "Complete the following repository task:\nImplement safely\n\nFirst create a concrete plan, then perform one safe action per turn." }], lastToolSucceeded: null, pendingTurn: null, pendingModelCall: null,
     limits: { maxModelCalls: 50, compactAtTokens: 150_000, maxContextTokens: 200_000, maxProjectedCostMicroUsd: 5_000_000, compactAtCheckpointBytes: 1_572_864, maxCheckpointBytes: 2 * 1024 * 1024 },
     pricing: { catalogVersion: 1, identity: { provider: "injected", model: "claude-haiku-4-5" }, inputRateMicroUsdPerMillion: 1_000_000, outputRateMicroUsdPerMillion: 5_000_000 },
     context: { lastEstimateTokens: 0, estimateSource: null, requestFingerprint: null }, cost: { projectedMicroUsd: 0, observedMicroUsd: 0, observedAvailable: false, driftMicroUsd: 0 }, compaction: { count: 0, lastPreTokens: 0, lastPostTokens: 0, baselineCommittedTurns: 0, baselineProtocolRetries: 0, baselineToolCalls: 0, baselinePlanRewrites: 0, baselineStopRejections: 0 }, notificationKeys: [], lastNotification: null,

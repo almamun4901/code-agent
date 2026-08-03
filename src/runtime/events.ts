@@ -42,7 +42,7 @@ export type AgentEvent =
     })
   | (AgentEventBase & {
       type: "state_loaded";
-      lifecycle: "running" | "completed" | "failed";
+      lifecycle: "running" | "completed" | "cancelled" | "failed";
       plan: TodoItem[];
       usage: AgentUsage;
     })

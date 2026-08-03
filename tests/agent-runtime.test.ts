@@ -31,6 +31,7 @@ import {
   type ProductionLoopOptions,
 } from "../src/runtime/production-loop";
 import type { ProductionAgentState } from "../src/runtime/schema";
+import { createLegacyExecutionApprovalState } from "../src/runtime/approval";
 import type {
   ModelToolRequest,
   ToolResult,
@@ -1117,6 +1118,7 @@ function initialState(
 ): ProductionAgentState {
   return {
     version: 3,
+    approval: createLegacyExecutionApprovalState(),
     ...prepared,
     promptStatus: "accepted",
     appendedPromptContext: "",

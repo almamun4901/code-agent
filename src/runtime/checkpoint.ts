@@ -12,9 +12,14 @@ import { join, resolve } from "node:path";
 import {
   DEFAULT_BUDGET_LIMITS,
   LegacyProductionAgentStateSchema,
+  PreApprovalProductionAgentStateSchema,
   ProductionAgentStateSchema,
   type ProductionAgentState,
 } from "./schema";
+import {
+  createInitialApprovalState,
+  createLegacyTerminalApprovalState,
+} from "./approval";
 
 const STATE_FILE = "state.json";
 const TEMP_PREFIX = ".state.json.tmp-";
@@ -253,6 +258,28 @@ function boundedCheckpoint(state: ProductionAgentState): {
 export function decodeProductionCheckpoint(value: unknown): ProductionAgentState {
   const current = ProductionAgentStateSchema.safeParse(value);
   if (current.success) return current.data;
+  const preApproval = PreApprovalProductionAgentStateSchema.safeParse(value);
+  if (preApproval.success) {
+    const state = preApproval.data;
+    if (state.lifecycle === "running" && (
+      state.counters.modelCalls !== 0 ||
+      state.counters.committedTurns !== 0 ||
+      state.counters.toolCalls !== 0 ||
+      state.plan.length !== 0 ||
+      state.pendingTurn !== null ||
+      state.pendingModelCall !== null
+    )) {
+      throw new ProductionCheckpointError(
+        "APPROVAL_MIGRATION_REQUIRED: active checkpoint already contains execution history and cannot be treated as approved; start a fresh task or migrate it explicitly.",
+      );
+    }
+    return ProductionAgentStateSchema.parse({
+      ...state,
+      approval: state.lifecycle === "running"
+        ? createInitialApprovalState()
+        : createLegacyTerminalApprovalState(),
+    });
+  }
   const legacy = LegacyProductionAgentStateSchema.safeParse(value);
   if (!legacy.success) throw current.error;
   if (
@@ -268,6 +295,7 @@ export function decodeProductionCheckpoint(value: unknown): ProductionAgentState
   return ProductionAgentStateSchema.parse({
     ...legacy.data,
     version: 3,
+    approval: createInitialApprovalState(),
     promptStatus: "accepted",
     appendedPromptContext: "",
     pendingModelCall: null,

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { ConversationMessageSchema, TodoItemSchema } from "../plan/schema";
+import { ApprovalStateSchema } from "./approval";
 
 export const DEFAULT_BUDGET_LIMITS = {
   maxModelCalls: 50,
@@ -100,14 +101,15 @@ const pendingModelCallSchema = z.object({
   response: pendingResponseSchema.nullable(),
 }).strict();
 
-export const ProductionAgentStateSchema = z.object({
+const ProductionAgentStateBaseSchema = z.object({
   version: z.literal(3),
   runIdentity: z.string().regex(/^[a-f0-9]{64}$/),
   canonicalRepoPath: z.string().startsWith("/"),
   task: z.string().min(1),
+  approval: ApprovalStateSchema,
   promptStatus: z.enum(["pending", "accepted", "denied"]),
   appendedPromptContext: z.string(),
-  lifecycle: z.enum(["running", "completed", "failed"]),
+  lifecycle: z.enum(["running", "completed", "cancelled", "failed"]),
   plan: z.array(TodoItemSchema).max(20),
   transcript: z.array(ConversationMessageSchema),
   lastToolSucceeded: z.boolean().nullable(),
@@ -155,7 +157,11 @@ export const ProductionAgentStateSchema = z.object({
   terminalCode: z.string().min(1).max(64).nullable(),
   terminalError: z.string().min(1).nullable(),
   lastToolResult: toolResultSchema.nullable(),
-}).strict().superRefine((state, context) => {
+}).strict();
+
+export const PreApprovalProductionAgentStateSchema = ProductionAgentStateBaseSchema.omit({ approval: true });
+
+export const ProductionAgentStateSchema = ProductionAgentStateBaseSchema.superRefine((state, context) => {
   if (state.counters.modelTurns !== state.counters.modelCalls) {
     context.addIssue({ code: "custom", message: "modelTurns must equal modelCalls." });
   }
@@ -170,6 +176,18 @@ export const ProductionAgentStateSchema = z.object({
   }
   if (state.promptStatus === "accepted" && state.transcript.length === 0) {
     context.addIssue({ code: "custom", message: "Accepted prompt checkpoint requires a transcript." });
+  }
+  if (state.approval.phase === "awaiting_approval" && (state.pendingTurn || state.pendingModelCall)) {
+    context.addIssue({ code: "custom", message: "Awaiting approval cannot contain pending model or repository work." });
+  }
+  if ((state.approval.phase === "discovering" || state.approval.phase === "awaiting_approval") && state.pendingTurn?.action) {
+    context.addIssue({ code: "custom", message: "Preapproval checkpoint cannot contain a repository action." });
+  }
+  if (state.approval.phase === "cancelled" && (state.lifecycle !== "cancelled" || state.pendingTurn || state.pendingModelCall)) {
+    context.addIssue({ code: "custom", message: "Cancelled approval must be terminal without pending work." });
+  }
+  if (state.lifecycle === "cancelled" && state.approval.phase !== "cancelled") {
+    context.addIssue({ code: "custom", message: "Cancelled lifecycle requires cancelled approval state." });
   }
 });
 

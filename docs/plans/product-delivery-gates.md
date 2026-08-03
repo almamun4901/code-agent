@@ -46,6 +46,9 @@ still has an exportable, inspectable result receipt.
 
 ## Gate 8B — Plan approval
 
+**Implementation status:** implemented and offline-verified on
+`feat/plan-approval`; merge and merged-`main` verification remain required.
+
 Interactive runs begin in read-only discovery. The proposed artifact must make
 product choices visible—not merely list implementation verbs—including visual
 direction, technology, feature scope, acceptance checks, and material
@@ -60,6 +63,21 @@ criteria require reapproval; ordinary progress updates do not.
 
 Non-interactive evaluation must opt into auto-approval explicitly. It cannot
 be the default for a human TTY session.
+
+Checkpoint v3 owns the proposal, revision, feedback, digests, phase, and
+reapproval metadata. Discovery exposes only bounded file reads, search,
+symbol lookup, Git status/diff, and `propose_plan`; a second host guard rejects
+forged or recovered preapproval mutations before sandbox dispatch. Approval is
+checkpointed before the execution plan is installed. Ctrl-C preserves
+`awaiting_approval`, while explicit cancel is terminal with exit code 130 and
+no delivery. Protected approach, product/visual direction, technology, scope,
+acceptance, assumptions, and unresolved-question changes require
+`request_reapproval`; todo progress alone does not.
+
+Interactive TTY runs use the approval screen. Programmatic interactive runs
+must inject an approval handler. Non-TTY runs must pass `--auto-approve` (or
+the typed `approvalMode: "auto"` option); persisted state and environment
+variables are not authorization for a new invocation.
 
 ## Gate 8C — Completion evidence and inspection
 

@@ -15,8 +15,10 @@ now reaches a deterministic local result branch through a bounded, validated,
 transactional Git delivery before cleanup. A fresh Anthropic calculator run
 proved the branch survives sandbox cleanup and its 26 tests pass from a
 detached local worktree. Shell-created and typed-tool-edited files are mutually
-writable across the sandbox identities. Gates 8B–8C still block Steps 9–10:
-human plan approval and trusted completion/audit evidence.
+writable across the sandbox identities. Gate 8B is implemented and offline
+verified on `feat/plan-approval`; live credentialed acceptance, branch merge,
+and merged-`main` verification remain before it can be marked complete. Gate
+8C still blocks Steps 9–10 with trusted completion/audit evidence.
 
 **Step-by-step:**
 
@@ -32,7 +34,7 @@ human plan approval and trusted completion/audit evidence.
 | 7 — TUI (Ink) | complete | Responsive Ink/static views, packaged CLI, honest committed-plan events, safe cancellation, PTY gates, and live E2B cleanup verified on merged `main` |
 | 8 — Remaining hooks + budget | complete | Eight bounded hooks, checkpoint-v3 dual ledgers, paid-call reservations, transactional compaction, recovery gates, and budget UI pass on merged `main` |
 | 8A — Result delivery | complete | Bounded Git delivery, durable recovery receipt, safe local result branch, shared artifact ownership, and live dogfood pass on merged `main` |
-| 8B — Plan approval | planned, not started | Detailed state machine, trust boundaries, substeps, recovery matrix, and acceptance gates are in `docs/plans/plan-approval.md` |
+| 8B — Plan approval | implemented; final gates pending | Durable discovery/approval/reapproval, CLI/TUI controls, migration, recovery, and offline tests pass; live credentials, push/merge, and merged-main verification remain |
 | 8C — Completion evidence | not started | Require correlated diff/check/commit evidence and provide durable host inspection |
 | 9 — Telemetry | not started | — |
 | 10 — Eval + PR posting | not started | — |
@@ -145,7 +147,7 @@ human plan approval and trusted completion/audit evidence.
 
 - [x] Deliver a successful E2B Git result into a new local branch before
   sandbox cleanup; the first calculator dogfood worktree was discarded.
-- [ ] Add a durable plan approve/revise/cancel pause after read-only discovery
+- [x] Add a durable plan approve/revise/cancel pause after read-only discovery
   and deny mutation tools until approval.
 - [x] Make shell-created task files group-writable so typed `edit_file` can
   apply its preview under the separate `agent` identity.
@@ -187,6 +189,36 @@ human plan approval and trusted completion/audit evidence.
 ---
 
 ## Session log
+
+### 2026-08-03 — Step 8B durable approval implementation
+
+- What was done: Implemented checkpoint-owned read-only discovery, structured
+  proposal digests, approve/revise/cancel decisions, protected-field
+  reapproval, explicit headless auto approval, controller events, and complete
+  Ink/static proposal rendering. Added safe legacy migration, preapproval
+  mutation denial, discovery compaction, crash-safe plan installation, and
+  bounded recovery validation. Updated usage and delivery-gate documentation.
+- What broke / had to be reworked: Review found immediate post-approval and
+  post-reapproval replay failures, inherited headless authorization, missing
+  product direction/control-text validation, reapproval context loss, and a
+  discovery transcript boundary. These were fixed and covered with focused
+  regression tests. Legacy execution fixtures now seed explicit historical
+  state instead of exercising a production approval bypass.
+- Decisions made this session: The current invocation—not checkpoint contents
+  or environment variables—supplies approval authority. Product direction is
+  explicit and protected. Discovery uses a bounded deterministic compaction
+  record, while execution compaction retains the current approved proposal.
+- Verification: `bun run typecheck`, `bun run test`, `git diff --check`, the
+  focused runtime/MCP/sandbox/safety suites, responsive TUI tests, and PTY
+  lifecycle/performance tests pass. The gstack security, recovery, and test
+  reviews were resolved. Live E2B and provider acceptance could not run because
+  `E2B_API_KEY`, `ANTHROPIC_API_KEY`, and `OPENROUTER_API_KEY` are absent.
+- Current status of the step in progress: Implementation and offline review
+  gates pass on `feat/plan-approval`; the step is not complete until the branch
+  is pushed, merged into updated `main`, reverified, and `main` is pushed.
+- Next session should start with: Supply live credentials and run interactive
+  revision/restart plus explicit auto-approval E2B acceptance, then complete
+  the required push/merge/reverification workflow before marking 8B complete.
 
 ### 2026-08-03 — Step 8B implementation planning
 

@@ -8,8 +8,8 @@ creation.
 
 ## Current status
 
-Steps 0–8A are complete on merged `main`. Gate 8B, durable plan approval before
-mutation, is the next roadmap task.
+Steps 0–8A are complete on merged `main`. Gate 8B is implemented on its
+feature branch and awaiting the required merge/reverification workflow.
 The deterministic fake loop, live Claude loop with fake tools, six real local
 tools, crash-safe plan persistence, MCP stdio transport,
 isolated E2B execution, and the PreToolUse safety boundary have passed their
@@ -25,8 +25,8 @@ resumes the same E2B mutation operation, and reconciles before cleanup.
 Successful sandbox work is now committed, exported as a bounded Git bundle,
 validated against the exact starting commit, and imported into a new local
 `result/<run-id>` branch before E2B cleanup. The checked-out branch, HEAD, and
-worktree are never switched or modified. Gate 8B remains next: implementation
-still starts before a human can approve product/design choices. Gate 8C then
+worktree are never switched or modified. Read-only discovery now presents a
+structured product/design proposal before any repository mutation. Gate 8C then
 requires completion claims to reference durable verification evidence. Those
 two gates block telemetry and evaluation; GitHub PR delivery remains Step 10.
 
@@ -81,10 +81,22 @@ The code currently proves:
   50-call / 200k-context / $5.00 ceilings, and transactional compaction at
   150k tokens.
 
-On success, `agent run` prints the new local result branch and its commit. The
-user can inspect or merge that branch normally; the active branch remains
-untouched. Interactive plan approval and completion-evidence inspection are
-still pending in Gates 8B and 8C.
+Interactive TTY runs render the complete proposal and accept approve, revise,
+or cancel. Revision feedback is durable and material changes return through
+the same gate. Non-TTY runs fail before sandbox creation or model spending
+unless auto approval is explicitly selected:
+
+```sh
+agent run /absolute/path/to/repo "Implement the requested change"
+agent run /absolute/path/to/repo "Run an unattended task" --auto-approve
+```
+
+Environment variables cannot enable auto approval. If the process is
+interrupted while waiting, rerunning the same task renders the checkpointed
+proposal without another paid model call. Explicit cancellation exits with
+code 130 and produces no result branch. On success, `agent run` prints the new
+local result branch and its commit; the active branch remains untouched.
+Completion-evidence inspection remains pending in Gate 8C.
 
 ## Current architecture
 

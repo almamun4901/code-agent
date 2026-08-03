@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 
-export const TOOL_RUNTIME_VERSION = "mutation-recovery-v1";
+export const TOOL_RUNTIME_VERSION = "result-delivery-v1";
 export const RUNTIME_MANIFEST_PATH = "/opt/agent/runtime-manifest.json";
 
 export type RuntimeManifest = {

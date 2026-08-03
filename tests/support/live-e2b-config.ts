@@ -1,4 +1,4 @@
-const REQUIRED_TEMPLATE_TAG = "mutation-recovery-v1";
+const REQUIRED_TEMPLATE_TAG = "result-delivery-v1";
 
 export function readLiveE2bConfig(
   environment: NodeJS.ProcessEnv = process.env,

@@ -84,8 +84,8 @@ setpriv \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
     TASK_ROOT="$task_root" \
-  timeout --signal=TERM --kill-after=1s "$timeout_duration" \
-  /bin/sh -c "cd \"\$1\" && exec /bin/sh -c \"\$2\"" sh \
+timeout --signal=TERM --kill-after=1s "$timeout_duration" \
+  /bin/sh -c "cd \"\$1\" && umask 0007 && exec /bin/sh -c \"\$2\"" sh \
   "$working_directory" "$command"
 status=$?
 set -e

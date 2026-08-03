@@ -729,7 +729,7 @@ describe("host-side production runner", () => {
       openSession: async () => session as unknown as E2bTaskSession,
     })).rejects.toThrow("delivery interrupted");
 
-    expect(session.lifecycle).toEqual(["reconcile", "deliver"]);
+    expect(session.lifecycle).toEqual(["reconcile", "deliver", "preserve"]);
   });
 
   test("fails cleanup when SessionEnd exceeds its bound", async () => {
@@ -1048,6 +1048,10 @@ class FakeSession {
       changedFiles: [],
       deliveredAt: new Date(0).toISOString(),
     };
+  }
+
+  async preserveForRecovery(): Promise<void> {
+    this.lifecycle.push("preserve");
   }
 
   async close(): Promise<void> {

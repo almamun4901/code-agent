@@ -535,6 +535,11 @@ async function executeAgentRun(
       } catch (error) {
         deliveryFailed = true;
         cleanupErrors.push(error);
+        try {
+          await session.preserveForRecovery();
+        } catch (preserveError) {
+          cleanupErrors.push(preserveError);
+        }
       }
     }
     if (!deliveryFailed) {

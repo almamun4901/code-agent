@@ -1,5 +1,13 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -50,6 +58,7 @@ async function git(cwd: string, ...args: string[]): Promise<string> {
 async function artifact(
   repository: TemporaryRepository,
   changedPath = "delivered.txt",
+  kind: "file" | "symlink" = "file",
 ): Promise<ResultDeliveryArtifact> {
   const root = await mkdtemp(path.join(os.tmpdir(), "result-source-"));
   roots.push(root);
@@ -60,7 +69,11 @@ async function artifact(
   await git(clone, "config", "user.name", "Delivery Test");
   const baseSha = await git(clone, "rev-parse", "HEAD");
   await mkdir(path.dirname(path.join(clone, changedPath)), { recursive: true });
-  await writeFile(path.join(clone, changedPath), "survives cleanup\n");
+  if (kind === "symlink") {
+    await symlink("/tmp/outside-result", path.join(clone, changedPath));
+  } else {
+    await writeFile(path.join(clone, changedPath), "survives cleanup\n");
+  }
   await git(clone, "add", "-A");
   await git(clone, "commit", "-m", "test: create delivered result");
   const resultSha = await git(clone, "rev-parse", "HEAD");
@@ -140,6 +153,15 @@ describe("transactional result delivery", () => {
     await expect(
       deliverResult(options(repository, protectedArtifact)),
     ).rejects.toThrow("forbidden changed path");
+
+    const symlinkArtifact = await artifact(
+      repository,
+      "escape-link",
+      "symlink",
+    );
+    await expect(
+      deliverResult(options(repository, symlinkArtifact)),
+    ).rejects.toThrow("symbolic-link or gitlink");
   });
 
   for (const transition of [

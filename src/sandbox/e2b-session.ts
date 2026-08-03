@@ -206,6 +206,7 @@ export type E2bTaskSession = {
   ): Promise<ToolResult>;
   reconcileActiveMutation(timeoutMs?: number): Promise<MutationRecord | null>;
   deliverResult(runIdentity: string): Promise<ResultDeliveryReceipt>;
+  preserveForRecovery(): Promise<void>;
   close(): Promise<void>;
 };
 
@@ -254,6 +255,7 @@ class OwnedE2bTaskSession implements E2bTaskSession {
   readonly #taskBranch: string;
   readonly #resultDeliveryStore: ResultDeliveryStore;
   #closePromise: Promise<void> | undefined;
+  #preservePromise: Promise<void> | undefined;
   #callTail: Promise<void> = Promise.resolve();
 
   constructor(options: {
@@ -381,6 +383,19 @@ class OwnedE2bTaskSession implements E2bTaskSession {
     });
   }
 
+  async preserveForRecovery(): Promise<void> {
+    if (this.#closePromise) {
+      throw new E2bTaskSessionError(
+        "E2B task session is closing or closed.",
+      );
+    }
+    this.#preservePromise ??= (async () => {
+      await this.#callTail;
+      await this.client.close();
+    })();
+    return this.#preservePromise;
+  }
+
   async #drainEarlierRequests(): Promise<boolean> {
     try {
       await this.client.call({
@@ -396,6 +411,7 @@ class OwnedE2bTaskSession implements E2bTaskSession {
   async #close(): Promise<void> {
     const errors: unknown[] = [];
     await this.#callTail;
+    await this.#preservePromise?.catch((error) => errors.push(error));
     if (this.#recovery) {
       const state = await this.#requiredRecoveryState();
       if (state.activeMutation?.status === "in_flight") {
@@ -498,7 +514,7 @@ class OwnedE2bTaskSession implements E2bTaskSession {
   }
 
   #assertOpen(): void {
-    if (this.#closePromise) {
+    if (this.#closePromise || this.#preservePromise) {
       throw new E2bTaskSessionError(
         "E2B task session is closing or closed.",
       );
@@ -935,6 +951,7 @@ async function exportSandboxResult(
     `if [ -n "$(git ${hardened} -C "$repo" status --porcelain=v1 --untracked-files=all)" ]; then git ${hardened} -C "$repo" add -A && git ${hardened} -C "$repo" commit -m 'chore: deliver completed task' >/dev/null; fi`,
     `test -z "$(git ${hardened} -C "$repo" status --porcelain=v1 --untracked-files=all)"`,
     `result=$(git ${hardened} -C "$repo" rev-parse HEAD)`,
+    `if [ "$result" = "$base" ]; then git ${hardened} -C "$repo" commit --allow-empty -m 'chore: record completed task' >/dev/null && result=$(git ${hardened} -C "$repo" rev-parse HEAD); fi`,
     `git ${hardened} -C "$repo" merge-base --is-ancestor "$base" "$result"`,
     `rm -f "$bundle"`,
     `git ${hardened} -C "$repo" bundle create "$bundle" "$base..refs/heads/$branch"`,

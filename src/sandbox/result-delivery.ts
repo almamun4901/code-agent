@@ -405,6 +405,7 @@ async function validateBundle(
       );
     }
     for (const changedPath of changedFiles) validateChangedPath(changedPath);
+    await validateChangedEntryModes(bare, state);
 
     const objectIds = (await git(bare, [
       "rev-list",
@@ -445,6 +446,7 @@ function validateChangedPath(changedPath: string): void {
   if (
     path.posix.isAbsolute(changedPath) ||
     changedPath.includes("\\") ||
+    /[\u0000-\u001f\u007f]/.test(changedPath) ||
     changedPath.split("/").some((part) => part === "" || part === "..") ||
     changedPath === ".git" ||
     changedPath.startsWith(".git/") ||
@@ -454,6 +456,49 @@ function validateChangedPath(changedPath: string): void {
     throw new ResultDeliveryError(
       `Result contains forbidden changed path "${changedPath}".`,
     );
+  }
+}
+
+async function validateChangedEntryModes(
+  repositoryPath: string,
+  state: ResultDeliveryState,
+): Promise<void> {
+  const raw = (await git(repositoryPath, [
+    "diff",
+    "--raw",
+    "-z",
+    "--no-abbrev",
+    state.baseSha,
+    state.resultSha,
+  ])).stdout.split("\0");
+  let index = 0;
+  while (index < raw.length) {
+    const header = raw[index++];
+    if (!header) break;
+    const match =
+      /^:(\d{6}) (\d{6}) [a-f0-9]+ [a-f0-9]+ ([A-Z])\d*$/.exec(header);
+    if (!match) {
+      throw new ResultDeliveryError(
+        "Result contains an invalid raw Git diff entry.",
+      );
+    }
+    const oldPath = raw[index++];
+    if (oldPath === undefined) {
+      throw new ResultDeliveryError("Result raw Git diff is truncated.");
+    }
+    const status = match[3];
+    const resultPath = status === "R" || status === "C"
+      ? raw[index++]
+      : oldPath;
+    if (resultPath === undefined) {
+      throw new ResultDeliveryError("Result rename entry is truncated.");
+    }
+    const newMode = match[2];
+    if (newMode === "120000" || newMode === "160000") {
+      throw new ResultDeliveryError(
+        `Result contains forbidden symbolic-link or gitlink path "${resultPath}".`,
+      );
+    }
   }
 }
 

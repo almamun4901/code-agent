@@ -480,6 +480,31 @@ describe("E2B task session", () => {
     expect(await recoveryStore.load()).toBeNull();
   });
 
+  test("disconnects an undelivered session while preserving its sandbox lease", async () => {
+    const setup = await sessionFixture();
+    const recoveryStore = new MemoryE2bSessionRecoveryStore();
+    const runIdentity = "preserve-delivery";
+    const session = await setup.create({
+      recovery: { runIdentity, store: recoveryStore },
+    });
+
+    await Promise.all([
+      session.preserveForRecovery(),
+      session.preserveForRecovery(),
+    ]);
+
+    expect(setup.client.closeCalls).toBe(1);
+    expect(setup.sandbox.killCalls).toBe(0);
+    expect(await recoveryStore.load()).toMatchObject({
+      runIdentity,
+      sandboxId: setup.sandbox.sandboxId,
+    });
+    await expect(session.call({
+      name: "read_file",
+      input: { path: "README.md" },
+    })).rejects.toThrow("closing or closed");
+  });
+
   test("validates task, template, timeout, and repository before sandbox creation", async () => {
     const setup = await sessionFixture();
 

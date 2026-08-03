@@ -32,7 +32,7 @@ import {
   type ProductionLoopOptions,
 } from "../src/runtime/production-loop";
 import type { ProductionAgentState } from "../src/runtime/schema";
-import { createLegacyExecutionApprovalState } from "../src/runtime/approval";
+import { createLegacyExecutionApprovalState } from "./support/approval";
 import type {
   ModelToolRequest,
   ToolResult,

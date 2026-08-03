@@ -51,7 +51,6 @@ import {
   PlanProposalSchema,
   ApprovalDecisionSchema,
   createInitialApprovalState,
-  createLegacyExecutionApprovalState,
   proposalDigest,
   proposalExecutionPlan,
   protectedProposalDigest,

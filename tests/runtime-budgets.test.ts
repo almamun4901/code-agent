@@ -6,7 +6,7 @@ import { decodeProductionCheckpoint, MemoryProductionCheckpointStore, Production
 import { commitReconciledProductionMutation, prepareProductionLifecycle, runProductionLoop } from "../src/runtime/production-loop";
 import { startAgentRun } from "../src/runtime/agent-runner";
 import type { ProductionAgentState } from "../src/runtime/schema";
-import { createLegacyExecutionApprovalState } from "../src/runtime/approval";
+import { createLegacyExecutionApprovalState } from "./support/approval";
 
 const prepared = {
   canonicalRepoPath: "/tmp/lifecycle-budget-repo",

@@ -168,11 +168,6 @@ export function createLegacyTerminalApprovalState(): ApprovalState {
   return { ...createInitialApprovalState(), phase: "executing", legacyTerminal: true };
 }
 
-/** Compatibility only for low-level loop fixtures; production runners must set an approval mode. */
-export function createLegacyExecutionApprovalState(): ApprovalState {
-  return { ...createInitialApprovalState(), phase: "executing", legacyTerminal: true };
-}
-
 export function proposalDigest(proposal: PlanProposal): string {
   return digest(stableJson(PlanProposalSchema.parse(proposal)));
 }

@@ -26,8 +26,13 @@ import {
   runProductionLoop,
   prepareProductionLifecycle,
   commitReconciledProductionMutation,
+  PlanApprovalCancelledError,
   type ProductionLoopResult,
 } from "./production-loop";
+import type {
+  ApprovalMode,
+  RequestPlanApproval,
+} from "./approval";
 import { LifecycleHooks } from "./lifecycle";
 import {
   createAgentEventPublisher,
@@ -69,6 +74,8 @@ export type HeadlessAgentRunOptions = {
     templateId: string;
     signal?: AbortSignal;
   }) => Promise<E2bTaskSession>;
+  approvalMode?: ApprovalMode;
+  requestApproval?: RequestPlanApproval;
 };
 
 export type SessionEndContext = {
@@ -435,6 +442,7 @@ async function executeAgentRun(
       checkpointStore,
       modelRuntime,
       hooks: options.hooks,
+      approvalMode: options.approvalMode,
       onSessionStart: () => lifecycleEvent("hooks_started"),
       ...(options.maxModelTurns === undefined ? {} : { budgetLimits: { maxModelCalls: options.maxModelTurns } }),
     });
@@ -461,6 +469,8 @@ async function executeAgentRun(
         signal: options.signal,
         events,
         hooks: options.hooks,
+        approvalMode: options.approvalMode,
+        requestApproval: options.requestApproval,
       });
       const completedDelivery = await loadCompletedResultDelivery(
         resultDeliveryStore,
@@ -503,6 +513,8 @@ async function executeAgentRun(
         signal: options.signal,
         events,
         hooks: options.hooks,
+        approvalMode: options.approvalMode,
+        requestApproval: options.requestApproval,
       });
     }
   } catch (error) {
@@ -564,6 +576,7 @@ function resultReason(
   stopReason: "sigint" | "ui" | "runtime" | undefined,
 ): SessionEndContext["reason"] {
   if (!error) return "completed";
+  if (error instanceof PlanApprovalCancelledError) return "cancelled";
   if (stopReason === "sigint" || stopReason === "ui") return "cancelled";
   return "failed";
 }

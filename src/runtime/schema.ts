@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { ConversationMessageSchema, TodoItemSchema } from "../plan/schema";
 import { ApprovalStateSchema } from "./approval";
+import { PlanProposalSchema } from "./approval";
 
 export const DEFAULT_BUDGET_LIMITS = {
   maxModelCalls: 50,
@@ -42,6 +43,11 @@ const pendingTurnSchema = z.object({
     toolUseId: z.string().min(1),
     operationId: z.string().uuid(),
     request: modelToolRequestSchema,
+  }).strict().nullable(),
+  reapproval: z.object({
+    toolUseId: z.string().min(1),
+    proposal: PlanProposalSchema,
+    reason: z.string().trim().min(1).max(2_048),
   }).strict().nullable(),
 }).strict();
 

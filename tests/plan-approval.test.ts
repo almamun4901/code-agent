@@ -11,6 +11,7 @@ import { decodeProductionCheckpoint, ProductionCheckpointError } from "../src/ru
 import type { ProductionAgentState } from "../src/runtime/schema";
 import type { ModelRequest, ModelTurn } from "../src/model/contracts";
 import {
+  PlanApprovalCancelledError,
   PlanApprovalRequiredError,
   runProductionLoop,
 } from "../src/runtime/production-loop";
@@ -123,6 +124,105 @@ describe("read-only plan discovery", () => {
   });
 });
 
+describe("approval decisions", () => {
+  test("auto approval durably installs the plan before repository work", async () => {
+    const store = new (await import("../src/runtime/checkpoint")).MemoryProductionCheckpointStore();
+    const calls: string[] = [];
+    const turns = queue([
+      discoveryTurn("propose_plan", proposal()),
+      executionTurn([repositoryAction("read", "read_file", { path: "README.md" })]),
+      executionTurn([rewritePlan("state", "Persist approval state.", "completed")]),
+    ]);
+    await expect(runProductionLoop({
+      canonicalRepoPath: "/tmp/approval-auto",
+      task: "Add approval",
+      runIdentity: "d".repeat(64),
+      approvalMode: "auto",
+      checkpointStore: store,
+      callModel: turns,
+      session: { async call(request: { name: string }) { calls.push(request.name); return success(); } },
+    })).resolves.toMatchObject({ status: "completed" });
+    expect(calls).toEqual(["read_file"]);
+    expect(await store.load()).toMatchObject({ approval: { phase: "executing", mode: "auto", revision: 1 } });
+  });
+
+  test("revision feedback is canonical and a second proposal is approved", async () => {
+    const first = proposal();
+    const second = { ...proposal(), approach: "Use the existing runtime boundaries." };
+    const requests: ModelRequest[] = [];
+    const turns = [
+      discoveryTurn("propose_plan", first),
+      discoveryTurn("propose_plan", second),
+      executionTurn([repositoryAction("read", "read_file", { path: "README.md" })]),
+      executionTurn([rewritePlan("state", "Persist approval state.", "completed")]),
+    ];
+    let modelCalls = 0;
+    let decisions = 0;
+    const store = new (await import("../src/runtime/checkpoint")).MemoryProductionCheckpointStore();
+    await runProductionLoop({
+      canonicalRepoPath: "/tmp/approval-revise",
+      task: "Add approval",
+      runIdentity: "e".repeat(64),
+      approvalMode: "interactive",
+      requestApproval: async () => decisions++ === 0
+        ? { kind: "revise", feedback: "Prefer existing boundaries." }
+        : { kind: "approve" },
+      checkpointStore: store,
+      callModel: async (request) => { requests.push(request); return turns[modelCalls++]!; },
+      session: { async call() { return success(); } },
+    });
+    expect(decisions).toBe(2);
+    expect(JSON.stringify(requests[1]?.messages)).toContain("Prefer existing boundaries.");
+    expect(await store.load()).toMatchObject({ approval: { revision: 2, feedbackHistory: ["Prefer existing boundaries."] } });
+  });
+
+  test("explicit cancel is terminal and never dispatches or delivers work", async () => {
+    const store = new (await import("../src/runtime/checkpoint")).MemoryProductionCheckpointStore();
+    let sessionCalls = 0;
+    await expect(runProductionLoop({
+      canonicalRepoPath: "/tmp/approval-cancel",
+      task: "Cancel approval",
+      runIdentity: "f".repeat(64),
+      approvalMode: "interactive",
+      requestApproval: async () => ({ kind: "cancel" }),
+      checkpointStore: store,
+      callModel: queue([discoveryTurn("propose_plan", proposal())]),
+      session: { async call() { sessionCalls += 1; return success(); } },
+    })).rejects.toBeInstanceOf(PlanApprovalCancelledError);
+    expect(sessionCalls).toBe(0);
+    expect(await store.load()).toMatchObject({ lifecycle: "cancelled", terminalCode: "PLAN_CANCELLED", approval: { phase: "cancelled" } });
+  });
+
+  test("material intent changes return through approval before more work", async () => {
+    const original = proposal();
+    const replacement = {
+      ...proposal(),
+      includedScope: [...proposal().includedScope, "Material replacement"],
+      executionPlan: [{ id: "replacement", description: "Implement replacement scope." }],
+    };
+    const turns = queue([
+      discoveryTurn("propose_plan", original),
+      executionTurn([
+        rewritePlan("state", "Persist approval state.", "in_progress"),
+        repositoryAction("reapprove", "request_reapproval", { proposal: replacement, reason: "The repository requires replacement scope." }),
+      ]),
+      executionTurn([repositoryAction("read", "read_file", { path: "README.md" })]),
+      executionTurn([rewritePlan("replacement", "Implement replacement scope.", "completed")]),
+    ]);
+    const store = new (await import("../src/runtime/checkpoint")).MemoryProductionCheckpointStore();
+    await runProductionLoop({
+      canonicalRepoPath: "/tmp/approval-material",
+      task: "Reapprove material scope",
+      runIdentity: "1".repeat(64),
+      approvalMode: "auto",
+      checkpointStore: store,
+      callModel: turns,
+      session: { async call() { return success(); } },
+    });
+    expect(await store.load()).toMatchObject({ approval: { phase: "executing", revision: 2 }, plan: [{ id: "replacement", status: "completed" }] });
+  });
+});
+
 function proposal() {
   return {
     approach: "Add a durable approval boundary.",
@@ -143,6 +243,31 @@ function discoveryTurn(name: string, input: unknown): ModelTurn {
     stopReason: "tool_use",
     usage: { inputTokens: 10, outputTokens: 5 },
   };
+}
+
+function queue(turns: ModelTurn[]) {
+  let index = 0;
+  return async () => {
+    const turn = turns[index++];
+    if (!turn) throw new Error("Unexpected model call.");
+    return turn;
+  };
+}
+
+function executionTurn(content: ModelTurn["content"]): ModelTurn {
+  return { content, stopReason: "tool_use", usage: { inputTokens: 10, outputTokens: 5 } };
+}
+
+function repositoryAction(id: string, name: string, input: unknown) {
+  return { type: "tool_use" as const, id, name, input };
+}
+
+function rewritePlan(id: string, description: string, status: "pending" | "in_progress" | "completed") {
+  return repositoryAction(crypto.randomUUID(), "rewrite_plan", { plan: [{ id, description, status }] });
+}
+
+function success() {
+  return { success: true, output: "ok", truncated: false, originalTokenCount: 1, codec: "test" };
 }
 
 function preapprovalState(): Omit<ProductionAgentState, "approval"> {

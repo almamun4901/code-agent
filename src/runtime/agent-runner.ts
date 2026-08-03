@@ -14,6 +14,11 @@ import {
   type E2bSessionRecoveryStore,
 } from "../sandbox/session-recovery";
 import {
+  FileResultDeliveryStore,
+  loadCompletedResultDelivery,
+  type ResultDeliveryStore,
+} from "../sandbox/result-delivery";
+import {
   FileProductionCheckpointStore,
   type ProductionCheckpointStore,
 } from "./checkpoint";
@@ -56,9 +61,11 @@ export type HeadlessAgentRunOptions = {
   hooks?: LifecycleHooks;
   checkpointStore?: ProductionCheckpointStore;
   sessionRecoveryStore?: E2bSessionRecoveryStore;
+  resultDeliveryStore?: ResultDeliveryStore;
   openSession?: (context: {
     prepared: PreparedAgentRun;
     recoveryStore: E2bSessionRecoveryStore;
+    resultDeliveryStore: ResultDeliveryStore;
     templateId: string;
     signal?: AbortSignal;
   }) => Promise<E2bTaskSession>;
@@ -432,6 +439,14 @@ async function executeAgentRun(
       ...(options.maxModelTurns === undefined ? {} : { budgetLimits: { maxModelCalls: options.maxModelTurns } }),
     });
     const preparedState = await checkpointStore.load();
+    const recoveryStore =
+      options.sessionRecoveryStore ??
+      new FileE2bSessionRecoveryStore(
+        path.join(prepared.canonicalRepoPath, ".agent", "e2b-session.json"),
+      );
+    const resultDeliveryStore =
+      options.resultDeliveryStore ??
+      new FileResultDeliveryStore(prepared.canonicalRepoPath);
     if (preparedState && preparedState.lifecycle !== "running") {
       result = await runProductionLoop({
         ...prepared,
@@ -447,39 +462,49 @@ async function executeAgentRun(
         events,
         hooks: options.hooks,
       });
-      beginShutdown("completed");
-      return { result };
-    }
-
-    const recoveryStore =
-      options.sessionRecoveryStore ??
-      new FileE2bSessionRecoveryStore(
-        path.join(prepared.canonicalRepoPath, ".agent", "e2b-session.json"),
+      const completedDelivery = await loadCompletedResultDelivery(
+        resultDeliveryStore,
       );
+      const recoveryState = await recoveryStore.load();
+      if (completedDelivery) {
+        result = { ...result, delivery: completedDelivery };
+        if (!recoveryState) {
+          beginShutdown("completed");
+          return { result };
+        }
+      } else if (!recoveryState) {
+        throw new AgentRunConfigurationError(
+          "Completed checkpoint has no durable result receipt or recoverable sandbox.",
+        );
+      }
+    }
     session = options.openSession
       ? await options.openSession({
           prepared,
           recoveryStore,
+          resultDeliveryStore,
           templateId,
           signal: options.signal,
         })
       : await openDefaultSession(
           prepared,
           recoveryStore,
+          resultDeliveryStore,
           templateId,
           options.signal,
         );
-
-    result = await runProductionLoop({
-      ...prepared,
-      modelRuntime,
-      session,
-      checkpointStore,
-      maxModelTurns: options.maxModelTurns,
-      signal: options.signal,
-      events,
-      hooks: options.hooks,
-    });
+    if (!result) {
+      result = await runProductionLoop({
+        ...prepared,
+        modelRuntime,
+        session,
+        checkpointStore,
+        maxModelTurns: options.maxModelTurns,
+        signal: options.signal,
+        events,
+        hooks: options.hooks,
+      });
+    }
   } catch (error) {
     runError = error;
   }
@@ -489,6 +514,7 @@ async function executeAgentRun(
   );
   if (session) {
     const cleanupErrors: unknown[] = [];
+    let deliveryFailed = false;
     try {
       const mutation = await session.reconcileActiveMutation();
       if (mutation && checkpointStore) {
@@ -502,10 +528,21 @@ async function executeAgentRun(
     } catch (error) {
       cleanupErrors.push(error);
     }
-    try {
-      await session.close();
-    } catch (error) {
-      cleanupErrors.push(error);
+    if (cleanupErrors.length === 0 && result && !runError) {
+      try {
+        const delivery = await session.deliverResult(prepared.runIdentity);
+        result = { ...result, delivery };
+      } catch (error) {
+        deliveryFailed = true;
+        cleanupErrors.push(error);
+      }
+    }
+    if (!deliveryFailed) {
+      try {
+        await session.close();
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
     }
     cleanupError = cleanupErrors.length === 1
       ? cleanupErrors[0]
@@ -644,6 +681,7 @@ function createConfiguredRuntime(
 async function openDefaultSession(
   prepared: PreparedAgentRun,
   recoveryStore: E2bSessionRecoveryStore,
+  resultDeliveryStore: ResultDeliveryStore,
   templateId: string,
   signal?: AbortSignal,
 ): Promise<E2bTaskSession> {
@@ -652,12 +690,18 @@ async function openDefaultSession(
     store: recoveryStore,
   };
   return (await recoveryStore.load())
-    ? recoverE2bTaskSession({ ...recovery, signal })
+    ? recoverE2bTaskSession({
+        ...recovery,
+        localRepoPath: prepared.canonicalRepoPath,
+        resultDeliveryStore,
+        signal,
+      })
     : createE2bTaskSession({
         localRepoPath: prepared.canonicalRepoPath,
         taskId: `run-${prepared.runIdentity.slice(0, 24)}`,
         templateId,
         recovery,
+        resultDeliveryStore,
         signal,
       });
 }

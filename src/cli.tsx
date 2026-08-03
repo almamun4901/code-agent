@@ -102,6 +102,12 @@ export async function runCli(
   if (result.status === "failed" && result.error) {
     stderr.write(`${result.error.code}: ${result.error.message}\n`);
   }
+  const delivery = result.productionResult?.delivery;
+  if (delivery) {
+    stdout.write(
+      `Result delivered to local branch ${delivery.branch} (${delivery.resultSha.slice(0, 12)})\n`,
+    );
+  }
   return result.exitCode;
 }
 

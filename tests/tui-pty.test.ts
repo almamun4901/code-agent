@@ -6,6 +6,7 @@ import type { ModelTurn } from "../src/model/contracts";
 import { prepareAgentRun } from "../src/runtime/agent-runner";
 import { FileProductionCheckpointStore } from "../src/runtime/checkpoint";
 import { runProductionLoop } from "../src/runtime/production-loop";
+import { FileResultDeliveryStore } from "../src/sandbox/result-delivery";
 import type { ModelToolRequest, ToolResult } from "../src/tools/contracts";
 import {
   createTemporaryRepository,
@@ -202,6 +203,38 @@ async function installCompletedCheckpoint(
       },
     },
   });
+  const resultSha = await git(prepared.canonicalRepoPath, "rev-parse", "HEAD");
+  const branch = `result/${prepared.runIdentity.slice(0, 12)}`;
+  await git(prepared.canonicalRepoPath, "branch", branch, resultSha);
+  await new FileResultDeliveryStore(prepared.canonicalRepoPath).save({
+    version: 1,
+    status: "completed",
+    runIdentity: prepared.runIdentity,
+    canonicalRepoPath: prepared.canonicalRepoPath,
+    baseSha: resultSha,
+    resultSha,
+    branch,
+    bundleSha256: "a".repeat(64),
+    bundleBytes: 1,
+    changedFiles: [],
+    deliveredAt: new Date(0).toISOString(),
+  });
+}
+
+async function git(cwd: string, ...args: string[]): Promise<string> {
+  const child = Bun.spawn(["git", ...args], {
+    cwd,
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  if (exitCode !== 0) throw new Error(`git ${args[0]} failed: ${stderr}`);
+  return stdout.trim();
 }
 
 function plan(

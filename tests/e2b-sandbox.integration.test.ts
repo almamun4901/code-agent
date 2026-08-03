@@ -135,6 +135,37 @@ test.skipIf(!LIVE_ENABLED)(
       });
       expect(applied).toMatchObject({ success: true });
 
+      const shellCreated = await session.client.call({
+        name: "run_shell",
+        input: {
+          command: "printf 'created by runner\\n' > shell-created.txt",
+          cwd: ".",
+          timeoutMs: 5_000,
+        },
+      });
+      expect(shellCreated).toMatchObject({ success: true });
+      const shellPreview = await session.client.call({
+        name: "edit_file",
+        input: {
+          path: "shell-created.txt",
+          mode: "preview",
+          oldText: "created by runner",
+          newText: "edited by agent",
+        },
+      });
+      expect(shellPreview).toMatchObject({ success: true });
+      const shellApplied = await session.client.call({
+        name: "edit_file",
+        input: {
+          path: "shell-created.txt",
+          mode: "apply",
+          oldText: "created by runner",
+          newText: "edited by agent",
+          baseVersion: String(shellPreview.metadata?.baseVersion),
+        },
+      });
+      expect(shellApplied).toMatchObject({ success: true });
+
       const search = await session.client.call({
         name: "ripgrep",
         input: {

@@ -25,15 +25,18 @@ const shaSchema = z.string().regex(/^[a-f0-9]{40,64}$/);
 const resultPathSchema = z.string().min(1).max(4_096);
 
 export const ResultDeliveryReceiptSchema = z.object({
-  version: z.literal(1),
+  version: z.literal(2),
   runIdentity: z.string().regex(/^[a-f0-9]{64}$/),
   canonicalRepoPath: z.string().startsWith("/"),
   baseSha: shaSchema,
   resultSha: shaSchema,
+  baseTreeSha: shaSchema,
+  resultTreeSha: shaSchema,
   branch: z.string().regex(/^result\/[a-f0-9]{12}$/),
   bundleSha256: z.string().regex(/^[a-f0-9]{64}$/),
   bundleBytes: z.number().int().positive().max(MAX_RESULT_BUNDLE_BYTES),
   changedFiles: z.array(resultPathSchema).max(MAX_RESULT_PATHS),
+  diffSummary: z.object({ filesChanged: z.number().int().nonnegative(), insertions: z.number().int().nonnegative(), deletions: z.number().int().nonnegative(), binaryFiles: z.number().int().nonnegative() }).strict(),
   deliveredAt: z.string().datetime(),
 }).strict();
 
@@ -42,16 +45,19 @@ export type ResultDeliveryReceipt = z.infer<
 >;
 
 const resultDeliveryStateSchema = z.object({
-  version: z.literal(1),
+  version: z.literal(2),
   status: z.enum(["exported", "validated", "imported", "completed"]),
   runIdentity: z.string().regex(/^[a-f0-9]{64}$/),
   canonicalRepoPath: z.string().startsWith("/"),
   baseSha: shaSchema,
   resultSha: shaSchema,
+  baseTreeSha: shaSchema.nullable(),
+  resultTreeSha: shaSchema.nullable(),
   branch: z.string().regex(/^result\/[a-f0-9]{12}$/),
   bundleSha256: z.string().regex(/^[a-f0-9]{64}$/),
   bundleBytes: z.number().int().positive().max(MAX_RESULT_BUNDLE_BYTES),
   changedFiles: z.array(resultPathSchema).max(MAX_RESULT_PATHS),
+  diffSummary: z.object({ filesChanged: z.number().int().nonnegative(), insertions: z.number().int().nonnegative(), deletions: z.number().int().nonnegative(), binaryFiles: z.number().int().nonnegative() }).strict().nullable(),
   deliveredAt: z.string().datetime().nullable(),
 }).strict();
 
@@ -246,16 +252,19 @@ export async function deliverResult(
     const bundleSha256 = await sha256(options.artifact.bundle);
     await options.store.writeBundle(options.artifact.bundle);
     state = {
-      version: 1,
+      version: 2,
       status: "exported",
       runIdentity: options.runIdentity,
       canonicalRepoPath: options.canonicalRepoPath,
       baseSha: options.artifact.baseSha,
       resultSha: options.artifact.resultSha,
+      baseTreeSha: null,
+      resultTreeSha: null,
       branch,
       bundleSha256,
       bundleBytes: options.artifact.bundle.byteLength,
       changedFiles: [],
+      diffSummary: null,
       deliveredAt: null,
     };
     await options.beforeTransition?.("exported");
@@ -274,8 +283,8 @@ export async function deliverResult(
 
   if (state.status === "exported") {
     await assertHostReady(state.canonicalRepoPath, state.baseSha);
-    const changedFiles = await validateBundle(state, bundle);
-    state = { ...state, status: "validated", changedFiles };
+    const validation = await validateBundle(state, bundle);
+    state = { ...state, status: "validated", ...validation };
     await options.beforeTransition?.("validated");
     await options.store.save(state);
   }
@@ -310,6 +319,22 @@ export async function loadCompletedResultDelivery(
   if (state?.status !== "completed") return null;
   await assertImportedRef(state);
   return receiptFromState(state);
+}
+
+export async function revalidateResultDeliveryReceipt(receiptInput: ResultDeliveryReceipt): Promise<void> {
+  const receipt = ResultDeliveryReceiptSchema.parse(receiptInput);
+  const ref = await readRef(receipt.canonicalRepoPath, receipt.branch);
+  if (ref !== receipt.resultSha) throw new ResultDeliveryError("Delivered branch no longer matches its receipt.");
+  const baseTree = (await git(receipt.canonicalRepoPath, ["rev-parse", `${receipt.baseSha}^{tree}`])).stdout.trim();
+  const resultTree = (await git(receipt.canonicalRepoPath, ["rev-parse", `${receipt.resultSha}^{tree}`])).stdout.trim();
+  if (baseTree !== receipt.baseTreeSha || resultTree !== receipt.resultTreeSha) {
+    throw new ResultDeliveryError("Delivered Git trees do not match the receipt.");
+  }
+  const changed = (await git(receipt.canonicalRepoPath, ["diff", "--name-only", "-z", receipt.baseSha, receipt.resultSha])).stdout.split("\0").filter(Boolean);
+  const diffSummary = await gitDiffSummary(receipt.canonicalRepoPath, receipt.baseSha, receipt.resultSha, changed.length);
+  if (JSON.stringify(changed) !== JSON.stringify(receipt.changedFiles) || JSON.stringify(diffSummary) !== JSON.stringify(receipt.diffSummary)) {
+    throw new ResultDeliveryError("Delivered diff summary does not match the receipt.");
+  }
 }
 
 function validateArtifactEnvelope(artifact: ResultDeliveryArtifact): void {
@@ -350,7 +375,7 @@ function assertSameDelivery(
 async function validateBundle(
   state: ResultDeliveryState,
   bundle: Uint8Array,
-): Promise<string[]> {
+): Promise<{ changedFiles: string[]; baseTreeSha: string; resultTreeSha: string; diffSummary: ResultDeliveryReceipt["diffSummary"] }> {
   const root = await mkdtemp(path.join(os.tmpdir(), "agent-result-validate-"));
   const bare = path.join(root, "repository.git");
   const bundlePath = path.join(root, "result.bundle");
@@ -431,15 +456,35 @@ async function validateBundle(
         `Result object graph exceeds ${MAX_RESULT_OBJECT_BYTES} bytes.`,
       );
     }
-    return changedFiles;
+    const baseTreeSha = (await git(bare, ["rev-parse", `${state.baseSha}^{tree}`])).stdout.trim();
+    const resultTreeSha = (await git(bare, ["rev-parse", `${state.resultSha}^{tree}`])).stdout.trim();
+    const diffSummary = await gitDiffSummary(bare, state.baseSha, state.resultSha, changedFiles.length);
+    return { changedFiles, baseTreeSha, resultTreeSha, diffSummary };
   } catch (error) {
     if (error instanceof ResultDeliveryError) throw error;
-    throw new ResultDeliveryError("Result bundle validation failed.", {
-      cause: error,
-    });
+    throw new ResultDeliveryError("Result bundle validation failed.", { cause: error });
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+}
+
+async function gitDiffSummary(repositoryPath: string, baseSha: string, resultSha: string, filesChanged: number): Promise<ResultDeliveryReceipt["diffSummary"]> {
+    const numstat = (await git(repositoryPath, ["diff", "--numstat", "-z", baseSha, resultSha])).stdout.split("\0").filter(Boolean);
+    let insertions = 0;
+    let deletions = 0;
+    let binaryFiles = 0;
+    let statEntries = 0;
+    for (const entry of numstat) {
+      const match = /^(\d+|-)\t(\d+|-)\t/.exec(entry);
+      if (!match) continue;
+      statEntries += 1;
+      if (match[1] === "-" || match[2] === "-") binaryFiles += 1;
+      else {
+        insertions += Number.parseInt(match[1]!, 10);
+        deletions += Number.parseInt(match[2]!, 10);
+      }
+    }
+    return { filesChanged, insertions, deletions, binaryFiles: Math.min(binaryFiles, statEntries) };
 }
 
 function validateChangedPath(changedPath: string): void {
@@ -572,6 +617,11 @@ async function assertImportedRef(state: ResultDeliveryState): Promise<void> {
       "Imported result branch does not match the durable delivery state.",
     );
   }
+  if (!state.baseTreeSha || !state.resultTreeSha || !state.diffSummary) {
+    throw new ResultDeliveryError("Completed result delivery is missing tree or diff evidence.");
+  }
+  const tree = (await git(state.canonicalRepoPath, ["rev-parse", `${state.resultSha}^{tree}`])).stdout.trim();
+  if (tree !== state.resultTreeSha) throw new ResultDeliveryError("Imported result tree does not match the durable delivery state.");
 }
 
 async function readRef(
@@ -592,15 +642,18 @@ function receiptFromState(state: ResultDeliveryState): ResultDeliveryReceipt {
     throw new ResultDeliveryError("Result delivery did not reach completion.");
   }
   return ResultDeliveryReceiptSchema.parse({
-    version: 1,
+    version: 2,
     runIdentity: state.runIdentity,
     canonicalRepoPath: state.canonicalRepoPath,
     baseSha: state.baseSha,
     resultSha: state.resultSha,
+    baseTreeSha: state.baseTreeSha,
+    resultTreeSha: state.resultTreeSha,
     branch: state.branch,
     bundleSha256: state.bundleSha256,
     bundleBytes: state.bundleBytes,
     changedFiles: state.changedFiles,
+    diffSummary: state.diffSummary,
     deliveredAt: state.deliveredAt,
   });
 }

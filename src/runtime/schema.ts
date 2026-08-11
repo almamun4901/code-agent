@@ -255,6 +255,23 @@ export const ProductionAgentStateSchema = ProductionAgentStateBaseSchema.superRe
   if (state.lifecycle !== "completed" && state.completion !== null) {
     context.addIssue({ code: "custom", message: "Only completed checkpoints may contain a completion receipt." });
   }
+  if (state.lifecycle === "completed" && state.completion === null && state.legacyCompletionStatus !== "legacy_unverified") {
+    context.addIssue({ code: "custom", message: "Verified completion requires a completion receipt." });
+  }
+  if (state.completion !== null && state.legacyCompletionStatus !== "verified") {
+    context.addIssue({ code: "custom", message: "Completion receipts require verified completion status." });
+  }
+  if (state.completion && (
+    state.completion.runIdentity !== state.runIdentity ||
+    state.completion.auditCursor.sequence !== state.auditCursor.sequence ||
+    state.completion.auditCursor.digest !== state.auditCursor.digest ||
+    state.completion.candidateTree !== state.completion.resultTree
+  )) {
+    context.addIssue({ code: "custom", message: "Completion receipt does not match checkpoint identity, audit cursor, or delivered tree." });
+  }
+  if (state.lifecycle === "finalizing" && !state.plan.every((item) => item.status === "completed")) {
+    context.addIssue({ code: "custom", message: "Finalizing checkpoints require a completed model plan." });
+  }
   if (state.lifecycle === "finalizing" && (state.pendingTurn !== null || state.pendingModelCall !== null)) {
     context.addIssue({ code: "custom", message: "Finalizing checkpoints cannot contain pending model work." });
   }

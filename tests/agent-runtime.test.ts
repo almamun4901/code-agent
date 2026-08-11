@@ -442,12 +442,13 @@ describe("host-side production runner", () => {
   test("reconciles mutations before closing the sandbox", async () => {
     const repo = await repository();
     const session = new FakeSession();
+    const checkpointStore = new MemoryProductionCheckpointStore();
     const result = await runHeadlessAgent({
       repoPath: repo.worktreePath,
       task: "Inspect one file",
       templateId: "template:test",
       approvalMode: "auto",
-      checkpointStore: new MemoryProductionCheckpointStore(),
+      checkpointStore,
       sessionRecoveryStore: new MemoryE2bSessionRecoveryStore(),
       callModel: queuedModel([
         turn(
@@ -461,6 +462,8 @@ describe("host-side production runner", () => {
     });
 
     expect(result.status).toBe("completed");
+    expect(result).toMatchObject({ delivery: { version: 2 }, completion: { version: 1, resultTree: "b".repeat(40) } });
+    expect(await checkpointStore.load()).toMatchObject({ lifecycle: "completed", legacyCompletionStatus: "verified", completion: { resultTree: "b".repeat(40) } });
     expect(session.lifecycle).toEqual(["reconcile", "deliver", "close"]);
   });
 
@@ -482,19 +485,23 @@ describe("host-side production runner", () => {
     });
     const resultDeliveryStore = new MemoryResultDeliveryStore();
     const resultSha = await git(prepared.canonicalRepoPath, "rev-parse", "HEAD");
+    const resultTreeSha = await git(prepared.canonicalRepoPath, "rev-parse", "HEAD^{tree}");
     const branch = `result/${prepared.runIdentity.slice(0, 12)}`;
     await git(prepared.canonicalRepoPath, "branch", branch, resultSha);
     await resultDeliveryStore.save({
-      version: 1,
+      version: 2,
       status: "completed",
       runIdentity: prepared.runIdentity,
       canonicalRepoPath: prepared.canonicalRepoPath,
       baseSha: resultSha,
       resultSha,
+      baseTreeSha: resultTreeSha,
+      resultTreeSha,
       branch,
       bundleSha256: "c".repeat(64),
       bundleBytes: 1,
       changedFiles: ["README.md"],
+      diffSummary: { filesChanged: 1, insertions: 0, deletions: 0, binaryFiles: 0 },
       deliveredAt: new Date(0).toISOString(),
     });
     let opened = false;
@@ -520,6 +527,52 @@ describe("host-side production runner", () => {
       branch: `result/${prepared.runIdentity.slice(0, 12)}`,
       changedFiles: ["README.md"],
     });
+  });
+
+  test("resumes finalization from a completed delivery without another model call", async () => {
+    const repo = await repository();
+    const prepared = await prepareAgentRun(repo.worktreePath, "Resume finalization");
+    const checkpointStore = new MemoryProductionCheckpointStore();
+    const session = new FakeSession(repo.worktreePath);
+    const resultSha = await git(repo.worktreePath, "rev-parse", "HEAD");
+    const resultTreeSha = await git(repo.worktreePath, "rev-parse", "HEAD^{tree}");
+    session.callImpl = async (request) => ({
+      success: true, output: "ok", truncated: false, originalTokenCount: 1, codec: "test",
+      ...(request.name === "run_shell" ? { metadata: { ...verificationMetadata("focused-test"), gitCommitBefore: resultSha, gitCommitAfter: resultSha, gitTreeBefore: resultTreeSha, gitTreeAfter: resultTreeSha } } : {}),
+    });
+    await expect(runProductionLoop({
+      ...prepared,
+      approvalMode: "auto",
+      checkpointStore,
+      session,
+      callModel: queuedModel([
+        turn(plan([["finish", "Finish", "in_progress"]]), action("read", "read_file", { path: "README.md" })),
+        turn(plan([["finish", "Finish", "completed"]])),
+      ]),
+    })).resolves.toMatchObject({ status: "finalizing" });
+
+    const branch = `result/${prepared.runIdentity.slice(0, 12)}`;
+    await git(repo.worktreePath, "branch", branch, resultSha);
+    const resultDeliveryStore = new MemoryResultDeliveryStore();
+    await resultDeliveryStore.save({
+      version: 2, status: "completed", runIdentity: prepared.runIdentity, canonicalRepoPath: repo.worktreePath,
+      baseSha: resultSha, resultSha, baseTreeSha: resultTreeSha, resultTreeSha, branch,
+      bundleSha256: "c".repeat(64), bundleBytes: 1, changedFiles: [],
+      diffSummary: { filesChanged: 0, insertions: 0, deletions: 0, binaryFiles: 0 }, deliveredAt: new Date(0).toISOString(),
+    });
+    let modelCalls = 0;
+    const resumed = await runHeadlessAgent({
+      repoPath: repo.worktreePath,
+      task: prepared.task,
+      approvalMode: "auto",
+      checkpointStore,
+      resultDeliveryStore,
+      sessionRecoveryStore: new MemoryE2bSessionRecoveryStore(),
+      callModel: async () => { modelCalls += 1; throw new Error("must not call model"); },
+      openSession: async () => { throw new Error("must not open sandbox"); },
+    });
+    expect(modelCalls).toBe(0);
+    expect(resumed).toMatchObject({ status: "completed", completion: { resultCommit: resultSha, resultTree: resultTreeSha } });
   });
 
   test("requires an explicit approval mode before opening a fresh headless run", async () => {
@@ -763,6 +816,7 @@ describe("host-side production runner", () => {
   test("keeps the sandbox alive when durable result delivery fails", async () => {
     const repo = await repository();
     const session = new FakeSession();
+    const checkpointStore = new MemoryProductionCheckpointStore();
     session.deliverImpl = async () => {
       throw new Error("delivery interrupted");
     };
@@ -772,7 +826,7 @@ describe("host-side production runner", () => {
       task: "Preserve an undelivered result",
       templateId: "template:test",
       approvalMode: "auto",
-      checkpointStore: new MemoryProductionCheckpointStore(),
+      checkpointStore,
       sessionRecoveryStore: new MemoryE2bSessionRecoveryStore(),
       callModel: queuedModel([
         turn(
@@ -785,6 +839,7 @@ describe("host-side production runner", () => {
     })).rejects.toThrow("delivery interrupted");
 
     expect(session.lifecycle).toEqual(["reconcile", "deliver", "preserve"]);
+    expect(await checkpointStore.load()).toMatchObject({ lifecycle: "finalizing", completion: null });
   });
 
   test("fails cleanup when SessionEnd exceeds its bound", async () => {
@@ -1059,6 +1114,7 @@ describe("production checkpoint", () => {
 });
 
 class FakeSession {
+  constructor(readonly canonicalRepoPath = "/test/repository") {}
   calls: Array<{
     request: ModelToolRequest;
     options: McpToolCallOptions;
@@ -1100,15 +1156,18 @@ class FakeSession {
     this.lifecycle.push("deliver");
     if (this.deliverImpl) return this.deliverImpl();
     return {
-      version: 1 as const,
+      version: 2 as const,
       runIdentity,
-      canonicalRepoPath: "/test/repository",
+      canonicalRepoPath: this.canonicalRepoPath,
       baseSha: "a".repeat(40),
       resultSha: "b".repeat(40),
+      baseTreeSha: "d".repeat(40),
+      resultTreeSha: "b".repeat(40),
       branch: `result/${runIdentity.slice(0, 12)}`,
       bundleSha256: "c".repeat(64),
       bundleBytes: 1,
       changedFiles: [],
+      diffSummary: { filesChanged: 0, insertions: 0, deletions: 0, binaryFiles: 0 },
       deliveredAt: new Date(0).toISOString(),
     };
   }

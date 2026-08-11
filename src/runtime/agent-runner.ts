@@ -16,6 +16,7 @@ import {
 import {
   FileResultDeliveryStore,
   loadCompletedResultDelivery,
+  revalidateResultDeliveryReceipt,
   type ResultDeliveryStore,
 } from "../sandbox/result-delivery";
 import {
@@ -26,6 +27,8 @@ import {
   runProductionLoop,
   prepareProductionLifecycle,
   commitReconciledProductionMutation,
+  completeProductionFinalization,
+  auditJournalForCheckpoint,
   PlanApprovalCancelledError,
   type ProductionLoopResult,
 } from "./production-loop";
@@ -42,7 +45,7 @@ import {
   type AgentEventPublisher,
   type AgentEventSink,
 } from "./events";
-import { FileAuditJournal, type AuditJournal } from "./audit";
+import type { AuditJournal } from "./audit";
 
 const MAX_TASK_BYTES = 32 * 1024;
 const SESSION_END_TIMEOUT_MS = 5_000;
@@ -475,14 +478,13 @@ async function executeAgentRun(
   let runError: unknown;
   let cleanupError: unknown;
   let checkpointStore: ProductionCheckpointStore | undefined;
+  let auditJournal: AuditJournal | undefined;
   try {
     checkpointStore =
       options.checkpointStore ??
       new FileProductionCheckpointStore(prepared.canonicalRepoPath);
     const existing = await checkpointStore.load();
-    const auditJournal = options.auditJournal ?? (checkpointStore instanceof FileProductionCheckpointStore
-      ? new FileAuditJournal(prepared.canonicalRepoPath)
-      : undefined);
+    auditJournal = options.auditJournal ?? auditJournalForCheckpoint(checkpointStore, prepared.canonicalRepoPath);
     if (
       existing &&
       (existing.runIdentity !== prepared.runIdentity ||
@@ -562,14 +564,20 @@ async function executeAgentRun(
       );
       const recoveryState = await recoveryStore.load();
       if (completedDelivery) {
-        result = { ...result, delivery: completedDelivery };
+        if (result.status === "finalizing") {
+          if (!auditJournal) throw new AgentRunConfigurationError("Finalizing checkpoint requires a durable audit journal.");
+          await revalidateResultDeliveryReceipt(completedDelivery);
+          result = await completeProductionFinalization({ checkpointStore, auditJournal, delivery: completedDelivery, events });
+        } else {
+          result = { ...result, delivery: completedDelivery };
+        }
         if (!recoveryState) {
           beginShutdown("completed");
           return { result };
         }
       } else if (!recoveryState) {
         throw new AgentRunConfigurationError(
-          "Completed checkpoint has no durable result receipt or recoverable sandbox.",
+          `${result.status === "finalizing" ? "Finalizing" : "Completed"} checkpoint has no durable result receipt or recoverable sandbox.`,
         );
       }
     }
@@ -626,10 +634,11 @@ async function executeAgentRun(
     } catch (error) {
       cleanupErrors.push(error);
     }
-    if (cleanupErrors.length === 0 && result && !runError) {
+    if (cleanupErrors.length === 0 && result?.status === "finalizing" && !runError) {
       try {
         const delivery = await session.deliverResult(prepared.runIdentity);
-        result = { ...result, delivery };
+        if (!checkpointStore || !auditJournal) throw new AgentRunConfigurationError("Finalization stores are unavailable.");
+        result = await completeProductionFinalization({ checkpointStore, auditJournal, delivery, events });
       } catch (error) {
         deliveryFailed = true;
         cleanupErrors.push(error);

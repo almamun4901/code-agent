@@ -133,6 +133,10 @@ export function reduceAgentEvent(
       };
     case "tool_audited":
       return state;
+    case "verification_updated":
+    case "finalization_started":
+    case "completion_verified":
+      return state;
     case "usage_updated":
       return { ...state, usage: event.usage };
     case "notification":

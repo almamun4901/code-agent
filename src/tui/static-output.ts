@@ -45,6 +45,12 @@ export function formatStaticEvent(event: AgentEvent): string[] {
       ];
     case "tool_audited":
       return [`Tool audited: operation ${event.operationId} · record ${event.auditSequence}`];
+    case "verification_updated":
+      return [`Verification ${event.requirementId}: ${event.status}`];
+    case "finalization_started":
+      return [`Finalization started: tree ${event.candidateTree}`];
+    case "completion_verified":
+      return [`Completion verified: ${event.resultCommit} (${event.resultTree})`];
     case "usage_updated":
       return [
         `Usage: ${event.usage.modelCalls}/${event.usage.maxModelCalls} model calls, ${event.usage.contextTokens}/${event.usage.maxContextTokens} context tokens${event.usage.contextSource === "conservative_local" ? " (estimated)" : ""}, $${(event.usage.projectedCostMicroUsd / 1_000_000).toFixed(2)}/$${(event.usage.maxProjectedCostMicroUsd / 1_000_000).toFixed(2)} projected, ${event.usage.compactions} compactions`,

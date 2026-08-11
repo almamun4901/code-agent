@@ -77,6 +77,17 @@ describe("plan approval schema", () => {
     expect(() => decodeProductionCheckpoint(active)).toThrow(ProductionCheckpointError);
     expect(() => decodeProductionCheckpoint(active)).toThrow("APPROVAL_MIGRATION_REQUIRED");
   });
+
+  test("labels terminal v3 checkpoints unverified and refuses active v3 execution", () => {
+    expect(decodeProductionCheckpoint({ ...preapprovalState(), lifecycle: "completed" })).toMatchObject({ version: 4, lifecycle: "completed", legacyCompletionStatus: "legacy_unverified", completion: null });
+    const approved = proposal();
+    const digest = proposalDigest(approved);
+    const executing = {
+      ...preapprovalState(),
+      approval: { ...createInitialApprovalState("auto"), phase: "executing" as const, currentProposal: approved, proposalDigest: digest, approvedProposalDigest: digest },
+    };
+    expect(() => decodeProductionCheckpoint(executing)).toThrow("COMPLETION_MIGRATION_REQUIRED");
+  });
 });
 
 describe("read-only plan discovery", () => {
@@ -249,7 +260,7 @@ describe("approval decisions", () => {
       checkpointStore: store,
       callModel: turns,
       session: { async call(request: { name: string }) { calls.push(request.name); return success(); } },
-    })).resolves.toMatchObject({ status: "completed" });
+    })).resolves.toMatchObject({ status: "finalizing" });
     expect(calls).toEqual(["read_file", "run_shell"]);
     expect(await store.load()).toMatchObject({ approval: { phase: "executing", mode: "auto", revision: 1 } });
   });
@@ -279,7 +290,7 @@ describe("approval decisions", () => {
         executionTurn([rewritePlan("state", "Persist approval state.", "completed")]),
       ]),
       session: { async call() { return success(); } },
-    })).resolves.toMatchObject({ status: "completed" });
+    })).resolves.toMatchObject({ status: "finalizing" });
     expect(discoveryCalls).toBe(1);
   });
 
@@ -377,7 +388,7 @@ describe("approval decisions", () => {
     };
     await runProductionLoop(options);
     expect(await store.load()).toMatchObject({ approval: { phase: "executing", revision: 2 }, plan: [{ id: "replacement", status: "completed" }] });
-    await expect(runProductionLoop({ ...options, callModel: queue([]) })).resolves.toMatchObject({ status: "completed" });
+    await expect(runProductionLoop({ ...options, callModel: queue([]) })).resolves.toMatchObject({ status: "finalizing" });
   });
 });
 

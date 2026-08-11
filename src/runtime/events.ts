@@ -84,6 +84,20 @@ export type AgentEvent =
       auditDigest: string;
     })
   | (AgentEventBase & {
+      type: "verification_updated";
+      requirementId: string;
+      status: "satisfied" | "failed" | "stale";
+    })
+  | (AgentEventBase & {
+      type: "finalization_started";
+      candidateTree: string;
+    })
+  | (AgentEventBase & {
+      type: "completion_verified";
+      resultCommit: string;
+      resultTree: string;
+    })
+  | (AgentEventBase & {
       type: "usage_updated";
       usage: AgentUsage;
     })

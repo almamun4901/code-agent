@@ -54,6 +54,7 @@ import {
   proposalDigest,
   proposalExecutionPlan,
   protectedProposalDigest,
+  verificationContractDigest,
   type ApprovalMode,
   type ApprovalState,
   type PlanProposal,
@@ -72,7 +73,7 @@ import {
 const MAX_PLAN_TASKS = 20;
 
 export type ProductionLoopResult = {
-  status: "completed";
+  status: "finalizing" | "completed";
   modelTurns: number;
   acceptedTurns: number;
   protocolRetries: number;
@@ -82,6 +83,7 @@ export type ProductionLoopResult = {
   outputTokens: number;
   plan: TodoItem[];
   delivery?: ResultDeliveryReceipt;
+  completion?: NonNullable<ProductionAgentState["completion"]>;
 };
 
 export type ProductionLoopOptions = {
@@ -326,7 +328,7 @@ export async function runProductionLoop(
   if (state.lifecycle === "cancelled") {
     throw new PlanApprovalCancelledError();
   }
-  if (state.lifecycle === "completed") return toResult(state);
+  if (state.lifecycle === "completed" || state.lifecycle === "finalizing") return toResult(state);
   assertRuntimeMatchesPricing(state, runtime);
 
   while (state.lifecycle === "running") {
@@ -1626,7 +1628,7 @@ async function commitPendingTurn(
   }
   const next: ProductionAgentState = {
     ...state,
-    lifecycle: completed ? "completed" : "running",
+    lifecycle: completed ? (state.approval.legacyTerminal ? "completed" : "finalizing") : "running",
     plan: pending.plan,
     transcript: [
       ...state.transcript,
@@ -1638,6 +1640,7 @@ async function commitPendingTurn(
     pendingTurn: null,
     consecutiveInvalidAttempts: 0,
     terminalError: null,
+    legacyCompletionStatus: completed && state.approval.legacyTerminal ? "legacy_unverified" : state.legacyCompletionStatus,
     counters: {
       ...state.counters,
       committedTurns: state.counters.committedTurns + 1,
@@ -1649,14 +1652,31 @@ async function commitPendingTurn(
   if (pending.action && lastToolResult) {
     const request = validateToolCall(pending.action.request);
     const coordinator = new AuditCheckpointCoordinator(auditJournalFor(options), options.checkpointStore);
+    const auditDrafts = [
+      toolAuditDraft(pending.action.operationId, request, lastToolResult, toolDurationMs),
+      ...(request.name === "run_shell" && request.input.verificationRequirementId
+        ? [verificationAuditDraft(pending.action.operationId, request.input.verificationRequirementId, lastToolResult)]
+        : []),
+    ];
     const committed = await coordinator.commit(
       state,
       withStaleEvidence(next, request, lastToolResult),
-      [toolAuditDraft(pending.action.operationId, request, lastToolResult, toolDurationMs)],
-      (committedState, records) => installVerificationEvidence(committedState, request, lastToolResult!, records[0]!),
+      auditDrafts,
+      (committedState, records) => installVerificationEvidence(committedState, request, lastToolResult!, records.at(-1)!),
     );
     Object.assign(next, committed.state);
     options.events?.emit({ type: "tool_audited", operationId: pending.action.operationId, auditSequence: committed.records[0]!.sequence, auditDigest: committed.records[0]!.digest });
+    const updatedEvidence = committed.state.verificationEvidence.find((item) => item.operationId === pending.action!.operationId);
+    if (updatedEvidence) options.events?.emit({ type: "verification_updated", requirementId: updatedEvidence.requirementId, status: updatedEvidence.status });
+  } else if (next.lifecycle === "finalizing") {
+    const candidateTree = completionCandidateTree(next);
+    const committed = await new AuditCheckpointCoordinator(auditJournalFor(options), options.checkpointStore).commit(
+      state,
+      next,
+      [{ type: "finalization_started", operationId: null, payload: { candidateTree } }],
+    );
+    Object.assign(next, committed.state);
+    options.events?.emit({ type: "finalization_started", candidateTree });
   } else {
     await options.checkpointStore.save(next);
   }
@@ -2426,13 +2446,13 @@ function validateRecoveredPendingTurn(state: ProductionAgentState): void {
 }
 
 function toResult(state: ProductionAgentState): ProductionLoopResult {
-  if (state.lifecycle !== "completed") {
+  if (state.lifecycle !== "completed" && state.lifecycle !== "finalizing") {
     throw new ProductionTurnProtocolError(
       "Production loop did not reach a completed state.",
     );
   }
   return {
-    status: "completed",
+    status: state.lifecycle,
     modelTurns: state.counters.modelTurns,
     acceptedTurns: state.counters.committedTurns,
     protocolRetries: state.counters.protocolRetries,
@@ -2441,15 +2461,83 @@ function toResult(state: ProductionAgentState): ProductionLoopResult {
     inputTokens: state.counters.inputTokens,
     outputTokens: state.counters.outputTokens,
     plan: state.plan,
+    ...(state.completion ? { completion: state.completion } : {}),
   };
+}
+
+export async function completeProductionFinalization(options: {
+  checkpointStore: ProductionCheckpointStore;
+  auditJournal: AuditJournal;
+  delivery: ResultDeliveryReceipt;
+  events?: AgentEventPublisher;
+}): Promise<ProductionLoopResult> {
+  const state = await options.checkpointStore.load();
+  if (!state || state.lifecycle !== "finalizing") {
+    throw new ProductionTurnProtocolError("FINALIZATION_STATE_INVALID: completion requires a finalizing checkpoint.");
+  }
+  if (state.pendingTurn || state.pendingModelCall || state.approval.pendingDiscoveryTurn) {
+    throw new ProductionTurnProtocolError("FINALIZATION_PENDING_WORK: finalizing checkpoint retains unresolved work.");
+  }
+  const proposal = state.approval.currentProposal;
+  const approvedDigest = state.approval.approvedProposalDigest;
+  if (!proposal || !approvedDigest || approvedDigest !== state.approval.proposalDigest) {
+    throw new ProductionTurnProtocolError("FINALIZATION_APPROVAL_MISMATCH: approved proposal is unavailable.");
+  }
+  const candidateTree = completionCandidateTree(state);
+  if (options.delivery.runIdentity !== state.runIdentity || options.delivery.resultTreeSha !== candidateTree) {
+    throw new ProductionTurnProtocolError("DELIVERED_TREE_MISMATCH: delivered result does not match the checked candidate tree.");
+  }
+  const deliveryDigest = await sha256Text(JSON.stringify(options.delivery));
+  const completing: ProductionAgentState = {
+    ...state,
+    lifecycle: "completed",
+    legacyCompletionStatus: "verified",
+  };
+  const committed = await new AuditCheckpointCoordinator(options.auditJournal, options.checkpointStore).commit(
+    state,
+    completing,
+    [
+      { type: "delivery_completed", operationId: null, payload: { resultCommit: options.delivery.resultSha, resultTree: options.delivery.resultTreeSha, branch: options.delivery.branch, deliveryReceiptDigest: deliveryDigest } },
+      { type: "completion_verified", operationId: null, payload: { candidateTree, resultCommit: options.delivery.resultSha, resultTree: options.delivery.resultTreeSha } },
+    ],
+    (completed, records) => {
+      completed.completion = {
+        version: 1,
+        runIdentity: state.runIdentity,
+        approvedProposalDigest: approvedDigest,
+        verificationContractDigest: verificationContractDigest(proposal),
+        candidateTree,
+        auditCursor: { sequence: records.at(-1)!.sequence, digest: records.at(-1)!.digest },
+        evidence: proposal.verificationRequirements.map((requirement) => {
+          const evidence = completed.verificationEvidence.find((item) => item.requirementId === requirement.id && item.status === "satisfied");
+          if (!evidence) throw new ProductionTurnProtocolError(`COMPLETION_EVIDENCE_MISSING: ${requirement.id}`);
+          return { requirementId: requirement.id, sequence: evidence.auditSequence, recordDigest: evidence.auditRecordDigest };
+        }),
+        resultDeliveryReceiptDigest: deliveryDigest,
+        resultCommit: options.delivery.resultSha,
+        resultTree: options.delivery.resultTreeSha,
+        completedAt: new Date().toISOString(),
+      };
+    },
+  );
+  options.events?.emit({ type: "completion_verified", resultCommit: options.delivery.resultSha, resultTree: options.delivery.resultTreeSha });
+  return { ...toResult(committed.state), delivery: options.delivery };
+}
+
+function completionCandidateTree(state: ProductionAgentState): string {
+  const trees = new Set(state.verificationEvidence.filter((item) => item.status === "satisfied" && item.candidateTree).map((item) => item.candidateTree!));
+  if (trees.size !== 1) throw new ProductionTurnProtocolError("COMPLETION_EVIDENCE_TREE_MISMATCH: required evidence does not identify one candidate tree.");
+  return [...trees][0]!;
 }
 
 function auditJournalFor(options: ProductionLoopOptions): AuditJournal {
   if (options.auditJournal) return options.auditJournal;
-  if (options.checkpointStore instanceof FileProductionCheckpointStore) {
-    return new FileAuditJournal(options.canonicalRepoPath);
-  }
-  const key = options.checkpointStore as object;
+  return auditJournalForCheckpoint(options.checkpointStore, options.canonicalRepoPath);
+}
+
+export function auditJournalForCheckpoint(checkpointStore: ProductionCheckpointStore, canonicalRepoPath: string): AuditJournal {
+  if (checkpointStore instanceof FileProductionCheckpointStore) return new FileAuditJournal(canonicalRepoPath);
+  const key = checkpointStore as object;
   const existing = memoryAuditJournals.get(key);
   if (existing) return existing;
   const journal = new MemoryAuditJournal();
@@ -2521,6 +2609,26 @@ function toolAuditDraft(
       timedOut: metadata.timedOut === true,
       verificationRequirementId: request.name === "run_shell" ? request.input.verificationRequirementId ?? null : null,
       sensitiveArgumentsDigest: sensitiveDigest,
+    },
+  };
+}
+
+function verificationAuditDraft(
+  operationId: string,
+  requirementId: string,
+  result: NonNullable<ProductionAgentState["lastToolResult"]>,
+) {
+  const metadata = result.metadata ?? {};
+  const satisfied = result.success && metadata.exitCode === 0 && metadata.timedOut !== true && metadata.gitCleanBefore === true && metadata.gitCleanAfter === true && metadata.gitTreeBefore === metadata.gitTreeAfter;
+  return {
+    type: "verification_updated" as const,
+    operationId,
+    payload: {
+      requirementId,
+      success: result.success,
+      errorCode: satisfied ? null : verificationFailureCode(result),
+      exitCode: typeof result.metadata?.exitCode === "number" ? result.metadata.exitCode : null,
+      timedOut: result.metadata?.timedOut === true,
     },
   };
 }

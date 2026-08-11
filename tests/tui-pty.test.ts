@@ -164,6 +164,8 @@ async function installCompletedCheckpoint(
 ): Promise<void> {
   const prepared = await prepareAgentRun(repo.worktreePath, task);
   const store = new FileProductionCheckpointStore(repo.worktreePath);
+  const resultSha = await git(prepared.canonicalRepoPath, "rev-parse", "HEAD");
+  const resultTreeSha = await git(prepared.canonicalRepoPath, "rev-parse", "HEAD^{tree}");
   const turns: ModelTurn[] = [
     {
       content: [{
@@ -227,25 +229,27 @@ async function installCompletedCheckpoint(
           truncated: false,
           originalTokenCount: 1,
           codec: "test",
-          ...(request.name === "run_shell" ? { metadata: { exitCode: 0, timedOut: false, gitCommitBefore: "a".repeat(40), gitTreeBefore: "b".repeat(40), gitCleanBefore: true, gitCommitAfter: "a".repeat(40), gitTreeAfter: "b".repeat(40), gitCleanAfter: true } } : {}),
+          ...(request.name === "run_shell" ? { metadata: { exitCode: 0, timedOut: false, gitCommitBefore: resultSha, gitTreeBefore: resultTreeSha, gitCleanBefore: true, gitCommitAfter: resultSha, gitTreeAfter: resultTreeSha, gitCleanAfter: true } } : {}),
         };
       },
     },
   });
-  const resultSha = await git(prepared.canonicalRepoPath, "rev-parse", "HEAD");
   const branch = `result/${prepared.runIdentity.slice(0, 12)}`;
   await git(prepared.canonicalRepoPath, "branch", branch, resultSha);
   await new FileResultDeliveryStore(prepared.canonicalRepoPath).save({
-    version: 1,
+    version: 2,
     status: "completed",
     runIdentity: prepared.runIdentity,
     canonicalRepoPath: prepared.canonicalRepoPath,
     baseSha: resultSha,
     resultSha,
+    baseTreeSha: resultTreeSha,
+    resultTreeSha,
     branch,
     bundleSha256: "a".repeat(64),
     bundleBytes: 1,
     changedFiles: [],
+    diffSummary: { filesChanged: 0, insertions: 0, deletions: 0, binaryFiles: 0 },
     deliveredAt: new Date(0).toISOString(),
   });
 }

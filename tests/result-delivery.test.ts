@@ -109,10 +109,12 @@ describe("transactional result delivery", () => {
     const receipt = await deliverResult(delivery);
 
     expect(receipt).toMatchObject({
+      version: 2,
       baseSha: originalHead,
       resultSha: result.resultSha,
       branch: "result/aaaaaaaaaaaa",
       changedFiles: ["delivered.txt"],
+      diffSummary: { filesChanged: 1, insertions: 1, deletions: 0, binaryFiles: 0 },
     });
     expect(await git(repository.worktreePath, "branch", "--show-current"))
       .toBe(originalBranch);
@@ -202,16 +204,19 @@ describe("transactional result delivery", () => {
     const store = new FileResultDeliveryStore(repository.worktreePath);
     await store.writeBundle(result.bundle);
     await store.save({
-      version: 1,
+      version: 2,
       status: "exported",
       runIdentity: "b".repeat(64),
       canonicalRepoPath: repository.worktreePath,
       baseSha: result.baseSha,
       resultSha: result.resultSha,
+      baseTreeSha: null,
+      resultTreeSha: null,
       branch: "result/bbbbbbbbbbbb",
       bundleSha256: "c".repeat(64),
       bundleBytes: result.bundle.byteLength,
       changedFiles: [],
+      diffSummary: null,
       deliveredAt: null,
     } satisfies ResultDeliveryState);
 

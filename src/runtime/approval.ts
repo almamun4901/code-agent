@@ -241,6 +241,10 @@ export function protectedProposalDigest(proposal: PlanProposal): string {
   }));
 }
 
+export function verificationContractDigest(proposal: PlanProposal): string {
+  return digest(stableJson(proposal.verificationRequirements));
+}
+
 export function proposalExecutionPlan(proposal: PlanProposal) {
   return proposal.executionPlan.map((task, index) => ({
     ...task,

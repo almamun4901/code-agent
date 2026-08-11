@@ -26,6 +26,12 @@ host lease (mode 0600)             sandbox journal (mode 0600)
 - Cancellation reaches child processes and becomes a terminal `CANCELLED`
   result.
 - Clean close kills the sandbox before clearing the host lease.
+- Approved viewport verification uses the same host operation ID and lease.
+  Recovery cancels its browser/server process group and records a terminal
+  cancelled result instead of inventing or duplicating screenshot evidence.
+- Delivery failure after evidence collection preserves the sandbox and the
+  `finalizing` checkpoint. Restart resumes delivery without replaying a tool or
+  making another model call.
 
 Read-only calls, edit previews, and Git status/diff do not create mutation
 records.

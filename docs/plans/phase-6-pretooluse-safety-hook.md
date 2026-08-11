@@ -36,6 +36,14 @@ Untrusted model request
 - Ordinary worktree content remains mutable and can be deleted. The clean Git
   bundle is the recovery source; protecting normal task files from the task
   itself is not a security claim.
+- Gate 8C browser verification does not widen network authority. The pinned
+  Chromium process may navigate only approved routes on
+  `http://127.0.0.1:<approved-port>` while E2B outbound networking remains
+  disabled. Arbitrary URLs and browser JavaScript are not model inputs.
+- Browser/server processes run through the existing restricted `runner`
+  identity and cancellation wrapper. Screenshots leave the sandbox only after
+  size/hash validation, are revalidated as PNGs on the host, and are written
+  mode 0600 outside the model-controlled result worktree.
 
 ## Implementation units
 

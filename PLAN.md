@@ -116,12 +116,12 @@ transport) until the logic they wrap is already trustworthy.
 | 8   | Remaining hooks + budget  | 6          | All lifecycle extension points and cost ceilings are enforced         | All 8 hook types wired (`PreToolUse`, `PostToolUse`, `SessionStart`, `SessionEnd`, `UserPromptSubmit`, `Notification`, `Stop`, `PreCompact`); 3 ceilings enforced (50 turns, 200k context, $5/task); `PreCompact` fires and summarizes at 150k | 6          |
 | 8A  | Result delivery           | 8          | Completed sandbox work reaches the user without weakening isolation   | A successful run exports a bounded, validated Git result before E2B cleanup and imports it into a new local branch without touching the user's branch or dirty worktree; cleanup waits for a durable host receipt; shell- and typed-tool-created files remain mutually writable | 6–10       |
 | 8B  | Plan approval             | 8A         | The user can correct design and scope before paying for implementation | Read-only discovery produces a proposed design, acceptance criteria, and execution plan; the runtime durably pauses for approve/revise/cancel; mutation tools are unavailable before approval; material replans require approval; an explicit auto-approve mode supports non-interactive evals | 8–14       |
-| 8C  | Completion evidence       | 8B         | Completion is based on durable external evidence, not plan checkmarks | A host-readable inspect/audit view exposes bounded tool arguments, exact error codes, results, and state correlation; completion requires verified repository diff, required command exit codes, and an exported commit receipt; frontend claims require real viewport checks when requested | 6–10       |
+| 8C  | Completion evidence       | 8B         | Completion is based on durable external evidence, not plan checkmarks | A host-readable inspect/audit view exposes bounded tool arguments, exact error codes, results, and state correlation; completion requires verified repository diff, required command exit codes, and an exported commit receipt; frontend claims require real viewport checks when requested | 14–22      |
 | 9   | Telemetry                 | 8C         | Observability is complete, not sampled                                | OTel spans on every model call, tool call, and hook invocation with `gen_ai.*` attributes; exported to self-hosted Langfuse; 100% tool-call span coverage verified by counting; telemetry remains an asynchronous redacted projection of checkpoint/audit truth | 3          |
 | 10  | Eval + PR posting         | all        | The whole system produces the deliverable                             | 30-task SWE-bench Pro Python run vs mini-swe-agent; `eval/results.jsonl` written; successful task opens a real PR via GitHub App with plan + diff summary in the body                                                                          | 6          |
 
 
-Total: ~73–91h against a 35h budget — this is intentional headroom, not a
+Total: ~81–103h against a 35h budget — this is intentional headroom, not a
 target to hit exactly. Steps 2 and 6 are the likeliest to overrun (tool edge
 cases, red-team iteration); the post-Step-8 productization gates were added
 after live dogfooding proved that safe execution alone does not deliver a
@@ -211,6 +211,6 @@ order above.
 | 8 — Remaining hooks + budget  | complete                                              |
 | 8A — Result delivery          | complete                                              |
 | 8B — Plan approval            | complete                                              |
-| 8C — Completion evidence      | not started                                           |
+| 8C — Completion evidence      | implementation complete; acceptance and landing pending |
 | 9 — Telemetry                 | not started                                           |
 | 10 — Eval + PR posting        | not started                                           |

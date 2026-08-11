@@ -7,7 +7,7 @@
 
 ---
 
-## Current state (updated: 2026-08-03)
+## Current state (updated: 2026-08-11)
 
 **Overall:** Steps 0–8A, mutation recovery, the routed provider boundary, and
 the host-side production runner are complete and merged. Successful E2B work
@@ -18,7 +18,10 @@ detached local worktree. Shell-created and typed-tool-edited files are mutually
 writable across the sandbox identities. Gate 8B is complete: implementation,
 review, merged-main offline verification, live interactive revision/restart,
 explicit auto approval, result delivery, cancellation, and cleanup all pass.
-Gate 8C now blocks Steps 9–10 with trusted completion/audit evidence.
+Gate 8C implementation and offline acceptance are complete on
+`feat/completion-evidence`. Live Chromium/E2B acceptance, the external
+dependency advisory query, branch landing, and merged-main reverification are
+still pending; Steps 9–10 remain blocked until those gates finish.
 
 **Step-by-step:**
 
@@ -35,7 +38,7 @@ Gate 8C now blocks Steps 9–10 with trusted completion/audit evidence.
 | 8 — Remaining hooks + budget | complete | Eight bounded hooks, checkpoint-v3 dual ledgers, paid-call reservations, transactional compaction, recovery gates, and budget UI pass on merged `main` |
 | 8A — Result delivery | complete | Bounded Git delivery, durable recovery receipt, safe local result branch, shared artifact ownership, and live dogfood pass on merged `main` |
 | 8B — Plan approval | complete | Durable discovery/approval/reapproval, CLI/TUI controls, migration, recovery, review, merged-main verification, and live interactive/auto E2B acceptance pass |
-| 8C — Completion evidence | not started | Require correlated diff/check/commit evidence and provide durable host inspection |
+| 8C — Completion evidence | acceptance pending | Checkpoint v4, approved checks, audit binding, viewport evidence, finalization, receipt v2, inspection CLI, and terminal UX pass offline; live E2B/template acceptance and landing remain |
 | 9 — Telemetry | not started | — |
 | 10 — Eval + PR posting | not started | — |
 
@@ -57,6 +60,10 @@ Gate 8C now blocks Steps 9–10 with trusted completion/audit evidence.
 - Cost control during *development* (not eval): use a cheap model (Haiku or
   similar) for all iteration on steps 1–9. Reserve the frontier model calls
   for the actual step-10 eval run, to avoid burning budget on debugging.
+- Completion is a checkpoint lifecycle fact, not a model plan claim.
+  Checkpoint v4 moves to `finalizing` only after every approved requirement is
+  bound to one clean Git tree and reaches `completed` only after independently
+  revalidated delivery and a durable receipt. See ADR 0022.
 - tree-sitter: scoping to 2–3 languages actually present in the eval subset
   for v1, not all 17 up front.
 - Model turns are atomic at the trust boundary: validate the complete
@@ -1058,6 +1065,46 @@ Gate 8C now blocks Steps 9–10 with trusted completion/audit evidence.
   should produce the proposed design, acceptance criteria, and execution plan;
   approve/revise/cancel must resume safely, mutation tools must remain denied
   before approval, and non-interactive evals need an explicit auto-approve mode.
+
+### 2026-08-11 — Trusted completion evidence
+
+- What was done: Implemented checkpoint v4, the closed command/viewport
+  verification contract, hash-chained mode-0600 audit journal, exact tool and
+  Git correlation, `running -> finalizing -> completed`, resumable result
+  delivery receipt v2, completion receipts, pinned loopback-only Chromium
+  checks, bounded owner-only screenshots, `agent inspect`, evidence events,
+  TUI drill-down, static output, migration behavior, ADR 0022, and runtime,
+  recovery, security, and operator documentation. The branch is organized as
+  five scoped implementation commits plus this documentation/acceptance unit.
+- What broke / had to be reworked: Review found that screenshot and viewport
+  limits were initially per call rather than per run, remote screenshot reads
+  could allocate before enforcing their limit, remote artifacts accumulated,
+  viewport route/dimensions and candidate Git identities were not fully bound
+  into the audit, normal delivery and legacy inspection paths were incomplete,
+  reconciled mutations could select a different audit journal, and stale TUI
+  state was not emitted or cleared correctly. Each was fixed with focused
+  regression coverage. The E2B template build and `bun audit` advisory query
+  were blocked because they send project metadata/code to external services
+  and require explicit user authorization.
+- Decisions made this session: Treat audit records as a redacted projection
+  while binding every completion-authorizing field; limit all viewport cases
+  and screenshots across the run; stream remote screenshot bytes through a
+  host bound; revalidate delivery on every durable production/inspection path;
+  retain legacy terminal runs only as `legacy_unverified`. See ADR 0022.
+- Current status of the step in progress: Step 8C implementation and offline
+  acceptance pass on `feat/completion-evidence`. Typecheck, the full offline
+  suite, focused runtime/MCP/sandbox/safety suites, template dry-run, diff
+  checks, maximum-audit inspection (6.1 ms), and cold/resumed TUI first paint
+  (maximum 273 ms) pass. Engineering review is clean after fixes. The CSO
+  diff audit reports zero high-confidence findings. Live E2B Chromium,
+  forced-finalization restart, tamper acceptance, dependency advisory lookup,
+  push, merge, and merged-main reverification remain.
+- Next session should start with: After explicit approval for the external E2B
+  template upload and dependency advisory query, build
+  `terminal-coding-agent-tools:completion-evidence-v1`, run all four live 8C
+  scenarios, confirm zero sandboxes, commit the final documentation, push and
+  merge the branch, repeat the complete gates on updated `main`, push `main`,
+  then mark Step 8C complete in `PLAN.md` and this file.
 
 ---
 

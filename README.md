@@ -8,7 +8,8 @@ creation.
 
 ## Current status
 
-Steps 0–8B are complete. Durable plan approval is implemented, reviewed,
+Steps 0–8B are complete. Gate 8C implementation is complete on its feature
+branch and is undergoing final acceptance and landing. Durable plan approval is implemented, reviewed,
 merged, offline-verified, and proven through credentialed live E2B acceptance.
 The deterministic fake loop, live Claude loop with fake tools, six real local
 tools, crash-safe plan persistence, MCP stdio transport,
@@ -26,9 +27,10 @@ Successful sandbox work is now committed, exported as a bounded Git bundle,
 validated against the exact starting commit, and imported into a new local
 `result/<run-id>` branch before E2B cleanup. The checked-out branch, HEAD, and
 worktree are never switched or modified. Read-only discovery now presents a
-structured product/design proposal before any repository mutation. Gate 8C then
-requires completion claims to reference durable verification evidence. Those
-two gates block telemetry and evaluation; GitHub PR delivery remains Step 10.
+structured product/design proposal before any repository mutation. Completion
+now requires approved command or Chromium viewport evidence bound to one clean
+Git tree, a validated result-delivery receipt, and a durable completion receipt.
+Telemetry and evaluation remain Steps 9–10; GitHub PR delivery remains Step 10.
 
 The code currently proves:
 
@@ -43,7 +45,7 @@ The code currently proves:
 - one protocol retry followed by a hard failure;
 - deterministic fake file reads with no host filesystem access;
 - strict Zod TodoWrite and versioned runtime-state schemas;
-- atomic mode-0600 `.agent/state.json` checkpoints with fail-closed recovery;
+- atomic mode-0600 checkpoint-v4 `.agent/state.json` files with fail-closed recovery;
 - transcript, observation, retry, turn, and token continuity across repeated
   `SIGKILL` restarts;
 - terminal protocol failures and cross-field checkpoint corruption rejected
@@ -66,6 +68,16 @@ The code currently proves:
   idempotent local branch creation;
 - result branches that survive E2B cleanup without switching the user's branch
   or accepting a dirty host worktree, protected paths, symlinks, or gitlinks;
+- approved command checks with exact command/directory/timeout matching, clean
+  before/after Git identity capture, and post-check mutation invalidation;
+- bounded loopback-only Chromium viewport checks for visual proposals, with
+  at most 12 cases and 16 MiB of screenshots across the whole run,
+  including navigation, page/console errors, overflow, visible CSS selectors,
+  and owner-only hash-validated PNG evidence;
+- a mode-0600 hash-chained `.agent/audit.jsonl`, correlated terminal records
+  for every committed tool call, resumable `finalizing` delivery, and a
+  completion receipt binding the approved contract, exact check Git/case
+  identities, evidence, delivered commit, and tree;
 - separate `agent` and `runner` identities, immutable runtime ownership,
   protected linked-worktree Git metadata, and a fixed root-owned shell wrapper;
 - component-wise symlink rejection, no-follow file access, controlled shell
@@ -77,7 +89,7 @@ The code currently proves:
   provider-native sequential plan/action turns and actual usage accounting;
 - all eight lifecycle hook boundaries with capability-specific authority,
   bounded execution, and observer isolation;
-- checkpoint-v3 paid-call reservations, dual projected/observed cost ledgers,
+- checkpoint-v4 paid-call reservations, dual projected/observed cost ledgers,
   50-call / 200k-context / $5.00 ceilings, and transactional compaction at
   150k tokens.
 
@@ -96,7 +108,18 @@ interrupted while waiting, rerunning the same task renders the checkpointed
 proposal without another paid model call. Explicit cancellation exits with
 code 130 and produces no result branch. On success, `agent run` prints the new
 local result branch and its commit; the active branch remains untouched.
-Completion-evidence inspection remains pending in Gate 8C.
+Inspect any valid complete or incomplete run, or one exact audited operation,
+without exposing raw tool output:
+
+```sh
+agent inspect /absolute/path/to/repo
+agent inspect /absolute/path/to/repo --json
+agent inspect /absolute/path/to/repo --operation 123e4567-e89b-42d3-a456-426614174000
+```
+
+Valid incomplete runs exit 0. Corrupt or mismatched evidence exits 1, and
+invalid usage exits 2. Pre-8C terminal checkpoints are labeled
+`legacy_unverified`; active pre-8C execution requires a fresh run.
 
 ## Current architecture
 
@@ -160,9 +183,11 @@ src/runtime/agent-runner.ts
     +---- provider-neutral model runtime + recovered E2B session
     +---- lifecycle hooks + durable budget preflight
     +---- transactional context compaction
+    +---- approved command/viewport evidence + hash-chained audit
+    +---- running -> finalizing -> completed delivery recovery
     +---- reconciliation before sandbox cleanup
     +---- bounded Git export + validated result/<run-id> import
-    +---- durable receipt before E2B cleanup
+    +---- completion + delivery receipts before E2B cleanup
 ```
 
 `E2bTaskSession` now uploads an exact clean Git revision, provisions a
@@ -176,7 +201,7 @@ artifacts remain editable by typed tools under the separate `agent` identity.
 On completion, the host validates the sandbox's delta bundle in a temporary
 bare repository, creates a new result branch with `git update-ref`, checkpoints
 the receipt, and only then permits cleanup. The production runner joins that session to the routed
-model and durable version-3 checkpoint. The Ink terminal UI renders committed
+model and durable version-4 checkpoint. The Ink terminal UI renders committed
 plan, tool, lifecycle notice, context, call, compaction, and dual-cost state.
 Later roadmap steps add telemetry and evaluation/PR publication.
 
@@ -262,7 +287,8 @@ record. Its live cases remain opt-in and must be run one at a time.
 The live E2B safety suite also proves shell-create to typed-edit parity and
 end-to-end result delivery: the delivered file remains available through its
 new local branch after the sandbox is gone. Use the immutable
-`terminal-coding-agent-tools:result-delivery-v1` template tag.
+`terminal-coding-agent-tools:completion-evidence-v1` template tag. It pins
+Playwright 1.55.0 and Chromium for approved viewport checks.
 
 `bun run phase1` and `bun run test:integration` send the synthetic Phase 1
 prompt, plan state, and canned tool results to Anthropic. Standard `bun test`
@@ -317,6 +343,9 @@ The authoritative agent instructions and exact sequence are in
 - [`docs/plans/product-delivery-gates.md`](docs/plans/product-delivery-gates.md):
   safe local result delivery, plan approval, completion evidence, and the
   required ordering before telemetry and evaluation.
+- [`docs/decisions/0022-evidence-backed-finalization.md`](docs/decisions/0022-evidence-backed-finalization.md):
+  checkpoint-v4 completion truth, audit, viewport evidence, and resumable
+  finalization rationale.
 - [`docs/plans/mutation-recovery.md`](docs/plans/mutation-recovery.md):
   operation journaling, same-sandbox recovery, cancellation, and acceptance
   evidence.

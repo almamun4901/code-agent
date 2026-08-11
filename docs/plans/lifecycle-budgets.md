@@ -23,7 +23,7 @@ cannot weaken them.
 
 ## Recovery contract
 
-Checkpoint v3 persists model identity and pricing, context estimates, projected
+Checkpoint v4 persists model identity and pricing, context estimates, projected
 and observed cost ledgers, call counters, compaction history, notification
 deduplication, prompt lifecycle, and the sole `pendingModelCall` record.
 
@@ -32,7 +32,14 @@ terminates ambiguously without replay. A durable agent response completes its
 ordinary transition on resume. A durable summary response installs the
 compacted transcript on resume without being treated as an agent turn.
 
-Empty v2 production checkpoints migrate to v3. Non-empty v2 checkpoints fail
+Checkpoint v4 also adds the approved verification contract, audit cursor,
+`finalizing` lifecycle, evidence, and completion receipt. A finalizing run has
+no pending model work; delivery recovery completes without another paid call.
+
+Empty v2 production checkpoints migrate through the supported decoder. Active
+pre-8C v3 execution fails with `COMPLETION_MIGRATION_REQUIRED`; terminal v3
+runs remain inspectable as `legacy_unverified` and are never upgraded to
+verified completion. Non-empty v2 checkpoints fail
 with an actionable error rather than inventing historical model prices.
 
 ## Provider accounting

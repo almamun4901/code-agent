@@ -45,7 +45,8 @@ early.
 ## Command and resume behavior
 
 The package publishes the Bun executable through its `bin` mapping. The
-command validates `run`, repository, and task arguments; resolves the
+command validates `run` or `inspect`, repository, and task/inspection
+arguments; resolves the
 repository path before runtime preparation; and renders `Initializing…`
 before asynchronous validation or network activity.
 
@@ -55,8 +56,19 @@ automatically. Corrupt, incompatible, mismatched, or another-task checkpoints
 fail closed before model or sandbox calls. Step 7 provides no destructive
 fresh-start flag.
 
-TTY output uses Ink at a 30 FPS cap. Non-TTY output writes plain lifecycle
-lines to stdout with no ANSI sequences; diagnostics use stderr.
+TTY output uses Ink at a 30 FPS cap. The status pane reports satisfied/total
+verification, stale or failed requirements, finalization, delivered commit,
+and completion. `j`/`k` select recent audited tools and `d` toggles bounded
+operation, duration, outcome, error/exit code, timeout, and output-digest
+detail. Raw output is unavailable.
+
+Non-TTY output writes plain lifecycle/evidence lines to stdout with no ANSI
+sequences, diagnostics use stderr, and the final line gives the exact
+`agent inspect <repo>` command.
+
+`agent inspect <repo> [--json] [--operation <uuid>]` validates checkpoint,
+audit, screenshot, and delivery bindings. Human output is optimized for local
+diagnosis; versioned redacted JSON is the Step 9 telemetry input.
 
 ## Layout
 

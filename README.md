@@ -8,8 +8,8 @@ creation.
 
 ## Current status
 
-Steps 0–8B are complete. Gate 8C implementation is complete on its feature
-branch and is undergoing final acceptance and landing. Durable plan approval is implemented, reviewed,
+Steps 0–8C are complete. Step 9 telemetry is implemented on its feature branch
+and is undergoing final acceptance and landing. Durable plan approval is implemented, reviewed,
 merged, offline-verified, and proven through credentialed live E2B acceptance.
 The deterministic fake loop, live Claude loop with fake tools, six real local
 tools, crash-safe plan persistence, MCP stdio transport,
@@ -30,7 +30,7 @@ worktree are never switched or modified. Read-only discovery now presents a
 structured product/design proposal before any repository mutation. Completion
 now requires approved command or Chromium viewport evidence bound to one clean
 Git tree, a validated result-delivery receipt, and a durable completion receipt.
-Telemetry and evaluation remain Steps 9–10; GitHub PR delivery remains Step 10.
+Evaluation and GitHub PR delivery remain Step 10.
 
 The code currently proves:
 
@@ -91,7 +91,10 @@ The code currently proves:
   bounded execution, and observer isolation;
 - checkpoint-v4 paid-call reservations, dual projected/observed cost ledgers,
   50-call / 200k-context / $5.00 ceilings, and transactional compaction at
-  150k tokens.
+  150k tokens;
+- always-on, content-free OpenTelemetry spans for each model call, tool call,
+  and lifecycle-hook invocation, with direct asynchronous OTLP/HTTP export to
+  self-hosted Langfuse and bounded failure-isolated shutdown.
 
 Interactive TTY runs render the complete proposal and accept approve, revise,
 or cancel. Revision feedback is durable and material changes return through
@@ -188,6 +191,7 @@ src/runtime/agent-runner.ts
     +---- reconciliation before sandbox cleanup
     +---- bounded Git export + validated result/<run-id> import
     +---- completion + delivery receipts before E2B cleanup
+    +---- redacted OpenTelemetry spans -> self-hosted Langfuse OTLP/HTTP
 ```
 
 `E2bTaskSession` now uploads an exact clean Git revision, provisions a
@@ -203,7 +207,7 @@ bare repository, creates a new result branch with `git update-ref`, checkpoints
 the receipt, and only then permits cleanup. The production runner joins that session to the routed
 model and durable version-4 checkpoint. The Ink terminal UI renders committed
 plan, tool, lifecycle notice, context, call, compaction, and dual-cost state.
-Later roadmap steps add telemetry and evaluation/PR publication.
+The final roadmap step adds evaluation and GitHub PR publication.
 
 ## Setup
 
@@ -213,6 +217,8 @@ Requirements:
 - Git and ripgrep for the complete local tool suite
 - an Anthropic API key only for commands that intentionally call the live API
 - an E2B API key and pinned template ID only for explicit sandbox tests
+- a self-hosted Langfuse base URL and project keys only when trace export is
+  intentionally enabled
 
 ```sh
 bun install
@@ -221,6 +227,23 @@ cp .env.example .env
 
 Add only the API keys needed for explicit live commands to local `.env`. That
 file is ignored and must never be committed.
+
+Telemetry is opt-in and fail-open. Set all four values below to export traces;
+missing or invalid configuration leaves the runtime on its no-op telemetry
+implementation:
+
+```sh
+AGENT_TELEMETRY_ENABLED=1
+LANGFUSE_BASE_URL=https://langfuse.internal.example
+LANGFUSE_PUBLIC_KEY=pk-lf-...
+LANGFUSE_SECRET_KEY=sk-lf-...
+```
+
+The exporter sends span names, stable operation IDs, provider/model identity,
+token counts, safe outcome codes, and timings. It never sends task text,
+prompts, responses, tool arguments/results, commands, repository paths, or raw
+errors. The checkpoint and audit journal remain authoritative if telemetry is
+missing or delayed.
 
 ## Development commands
 

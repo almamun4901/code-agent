@@ -169,7 +169,7 @@ liveTest(
     const checkpointStore = new MemoryProductionCheckpointStore();
     const resultDeliveryStore = new MemoryResultDeliveryStore();
     let approvals = 0;
-    const proposals = [proposalTurn("First approach"), proposalTurn("Revised approach")];
+    const proposals = [proposalTurn("First approach", "approved.txt"), proposalTurn("Revised approach", "approved.txt")];
     try {
       await expect(runHeadlessAgent({
         repoPath: repository.worktreePath,
@@ -199,6 +199,8 @@ liveTest(
           name: "run_shell",
           input: { cwd: ".", command: "printf 'approved\\n' > approved.txt", timeoutMs: 10_000 },
         }),
+        commitTurn("approved.txt"),
+        verificationTurn("approved.txt"),
         executionTurn("completed"),
       ];
       const result = await runHeadlessAgent({
@@ -231,13 +233,15 @@ liveTest(
   async () => {
     const repository = await createTemporaryRepository();
     const turns = [
-      proposalTurn("Automatic approach"),
+      proposalTurn("Automatic approach", "auto-approved.txt"),
       executionTurn("in_progress", {
         type: "tool_use" as const,
         id: "auto-shell",
         name: "run_shell",
         input: { cwd: ".", command: "printf 'auto-approved\\n' > auto-approved.txt", timeoutMs: 10_000 },
       }),
+      commitTurn("auto-approved.txt"),
+      verificationTurn("auto-approved.txt"),
       executionTurn("completed"),
     ];
     try {
@@ -264,7 +268,7 @@ liveTest(
   360_000,
 );
 
-function proposalTurn(approach: string): ModelTurn {
+function proposalTurn(approach: string, artifactPath = "artifact.txt"): ModelTurn {
   return {
     content: [{
       type: "tool_use",
@@ -278,7 +282,7 @@ function proposalTurn(approach: string): ModelTurn {
         includedScope: ["Create the requested text artifact"],
         excludedScope: ["Unrelated repository changes"],
         acceptanceCriteria: [{ id: "artifact", criterion: "The approved artifact exists.", verification: "Inspect the delivered changed files.", verificationRequirementIds: ["artifact-check"] }],
-        verificationRequirements: [{ type: "command", id: "artifact-check", label: "Check artifact", workingDirectory: ".", command: "test -f artifact.txt", timeoutMs: 30_000 }],
+        verificationRequirements: [{ type: "command", id: "artifact-check", label: "Check artifact", workingDirectory: ".", command: `test -f ${artifactPath}`, timeoutMs: 30_000 }],
         assumptions: [],
         unresolvedQuestions: [],
         executionPlan: [{ id: "artifact", description: "Create the approved artifact" }],
@@ -287,6 +291,33 @@ function proposalTurn(approach: string): ModelTurn {
     stopReason: "tool_use",
     usage: { inputTokens: 1, outputTokens: 1 },
   };
+}
+
+function verificationTurn(artifactPath: string): ModelTurn {
+  return executionTurn("in_progress", {
+    type: "tool_use",
+    id: crypto.randomUUID(),
+    name: "run_shell",
+    input: {
+      cwd: ".",
+      command: `test -f ${artifactPath}`,
+      timeoutMs: 30_000,
+      verificationRequirementId: "artifact-check",
+    },
+  });
+}
+
+function commitTurn(artifactPath: string): ModelTurn {
+  return executionTurn("in_progress", {
+    type: "tool_use",
+    id: crypto.randomUUID(),
+    name: "git",
+    input: {
+      subcommand: "commit",
+      addAll: true,
+      message: `test: add ${artifactPath}`,
+    },
+  });
 }
 
 function executionTurn(status: "in_progress" | "completed", action?: ModelTurn["content"][number]): ModelTurn {

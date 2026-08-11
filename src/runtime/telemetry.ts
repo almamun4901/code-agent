@@ -39,6 +39,13 @@ export type CompletedSpan = {
   kind?: "internal" | "client";
 };
 
+export type OtlpTraceExporterOptions = {
+  url: string;
+  headers: Record<string, string>;
+  timeoutMillis: number;
+  concurrencyLimit: number;
+};
+
 export interface RunTelemetry {
   startRun(attributes: TelemetryAttributes): void;
   withSpan<T>(
@@ -180,6 +187,9 @@ export class OpenTelemetryRunTelemetry implements RunTelemetry {
 
 export function createRunTelemetryFromEnvironment(
   environment: NodeJS.ProcessEnv = process.env,
+  dependencies: {
+    createExporter?: (options: OtlpTraceExporterOptions) => SpanExporter;
+  } = {},
 ): RunTelemetry {
   if (environment.AGENT_TELEMETRY_ENABLED !== "1") return noOpTelemetry;
   const baseUrl = safeLangfuseBaseUrl(environment.LANGFUSE_BASE_URL);
@@ -187,8 +197,11 @@ export function createRunTelemetryFromEnvironment(
   const secretKey = boundedCredential(environment.LANGFUSE_SECRET_KEY);
   if (!baseUrl || !publicKey || !secretKey) return noOpTelemetry;
   try {
+    const createExporter = dependencies.createExporter ?? (
+      (options: OtlpTraceExporterOptions) => new OTLPTraceExporter(options)
+    );
     return new OpenTelemetryRunTelemetry({
-      exporter: new OTLPTraceExporter({
+      exporter: createExporter({
         url: `${baseUrl}/api/public/otel/v1/traces`,
         headers: {
           Authorization: `Basic ${Buffer.from(`${publicKey}:${secretKey}`).toString("base64")}`,

@@ -298,6 +298,45 @@ describe("OpenTelemetry projection", () => {
     expect(called).toBe(true);
   });
 
+  test("constructs the enabled Langfuse OTLP request without exporting content", async () => {
+    const exporter = new RetainingInMemorySpanExporter();
+    let exporterOptions: import("../src/runtime/telemetry").OtlpTraceExporterOptions | undefined;
+    const telemetry = createRunTelemetryFromEnvironment({
+      AGENT_TELEMETRY_ENABLED: "1",
+      LANGFUSE_BASE_URL: "https://langfuse.example.test/",
+      LANGFUSE_PUBLIC_KEY: "pk-test",
+      LANGFUSE_SECRET_KEY: "sk-test",
+    }, {
+      createExporter(options) {
+        exporterOptions = options;
+        return exporter;
+      },
+    });
+    telemetry.startRun({
+      "agent.run.id": prepared.runIdentity,
+      "task.text": prepared.task,
+    });
+    await telemetry.withSpan("chat", {
+      "gen_ai.operation.name": "chat",
+      "gen_ai.provider.name": "injected",
+      "gen_ai.request.model": "claude-haiku-4-5",
+    }, async () => {});
+    await telemetry.finishRun("ok");
+
+    expect(exporterOptions).toEqual({
+      url: "https://langfuse.example.test/api/public/otel/v1/traces",
+      headers: {
+        Authorization: `Basic ${Buffer.from("pk-test:sk-test").toString("base64")}`,
+        "x-langfuse-ingestion-version": "4",
+      },
+      timeoutMillis: 2_000,
+      concurrencyLimit: 2,
+    });
+    const spans = exporter.getFinishedSpans();
+    expect(spans.map((span) => span.name).sort()).toEqual(["chat", "invoke_agent"]);
+    expect(JSON.stringify(spans.map((span) => span.attributes))).not.toContain(prepared.task);
+  });
+
   test("bounds batch shutdown even when export completion is delayed", async () => {
     const delayedExporter: SpanExporter = {
       export(_spans, callback) {

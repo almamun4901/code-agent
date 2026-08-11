@@ -539,7 +539,7 @@ class OwnedE2bTaskSession implements E2bTaskSession {
       await this.#sandbox.write(remoteInput, `${JSON.stringify({ remoteRepoPath: this.remoteRepoPath, requirement })}\n`);
       let commandResult: SandboxCommandResult;
       const viewportTimeoutMs = 35_000 + requirement.cases.length * 30_000;
-      const running = this.#sandbox.run(`bun run ${REMOTE_VIEWPORT_VERIFIER} ${remoteInput} ${remoteOutput}`, { cwd: REMOTE_RUNTIME_ROOT, timeoutMs: viewportTimeoutMs });
+      const running = this.#sandbox.run(`PLAYWRIGHT_BROWSERS_PATH=${REMOTE_RUNTIME_ROOT}/ms-playwright bun run ${REMOTE_VIEWPORT_VERIFIER} ${remoteInput} ${remoteOutput}`, { cwd: REMOTE_RUNTIME_ROOT, timeoutMs: viewportTimeoutMs });
       commandResult = signal ? await raceViewportAbort(running, signal, async () => {
         await this.#sandbox.run(`sudo /usr/local/sbin/agent-run-shell --cancel ${this.remoteRepoPath}`, { timeoutMs: 5_000 }).catch(() => undefined);
       }) : await running;

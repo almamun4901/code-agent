@@ -303,6 +303,7 @@ class FakeSandbox implements E2bSandbox {
   killError: unknown;
   killCalls = 0;
   runCalls = 0;
+  viewportCommand = "";
   resultBundle: Uint8Array | undefined;
   resultSha = "";
   viewportResult: "success" | "failure" | "tampered" = "success";
@@ -356,6 +357,7 @@ class FakeSandbox implements E2bSandbox {
       return { exitCode: 0, stderr: "", stdout: `${sha}\n${sha}\n` };
     }
     if (command.includes("viewport-verifier.ts")) {
+      this.viewportCommand = command;
       if (this.viewportResult === "failure") {
         return { exitCode: 0, stderr: "", stdout: JSON.stringify({ success: false, code: "VIEWPORT_SELECTOR_MISSING" }) };
       }
@@ -528,6 +530,7 @@ describe("E2B task session", () => {
     );
 
     expect(result).toMatchObject({ success: true, metadata: { verificationRequirementId: "responsive", gitCleanBefore: true, gitCleanAfter: true } });
+    expect(setup.sandbox.viewportCommand).toStartWith("PLAYWRIGHT_BROWSERS_PATH=/opt/agent/ms-playwright bun run ");
     expect(setup.client.calls).toHaveLength(0);
     const artifact = path.join(setup.repository.worktreePath, ".agent/evidence", `${operationId}-0.png`);
     expect((await stat(artifact)).mode & 0o777).toBe(0o600);

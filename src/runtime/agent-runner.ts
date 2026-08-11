@@ -42,6 +42,7 @@ import {
   type AgentEventPublisher,
   type AgentEventSink,
 } from "./events";
+import { FileAuditJournal, type AuditJournal } from "./audit";
 
 const MAX_TASK_BYTES = 32 * 1024;
 const SESSION_END_TIMEOUT_MS = 5_000;
@@ -69,6 +70,7 @@ type AgentRunBaseOptions = {
   checkpointStore?: ProductionCheckpointStore;
   sessionRecoveryStore?: E2bSessionRecoveryStore;
   resultDeliveryStore?: ResultDeliveryStore;
+  auditJournal?: AuditJournal;
   openSession?: (context: {
     prepared: PreparedAgentRun;
     recoveryStore: E2bSessionRecoveryStore;
@@ -478,6 +480,9 @@ async function executeAgentRun(
       options.checkpointStore ??
       new FileProductionCheckpointStore(prepared.canonicalRepoPath);
     const existing = await checkpointStore.load();
+    const auditJournal = options.auditJournal ?? (checkpointStore instanceof FileProductionCheckpointStore
+      ? new FileAuditJournal(prepared.canonicalRepoPath)
+      : undefined);
     if (
       existing &&
       (existing.runIdentity !== prepared.runIdentity ||
@@ -550,6 +555,7 @@ async function executeAgentRun(
         hooks: options.hooks,
         approvalMode,
         requestApproval: options.requestApproval,
+        ...(auditJournal ? { auditJournal } : {}),
       });
       const completedDelivery = await loadCompletedResultDelivery(
         resultDeliveryStore,
@@ -594,6 +600,7 @@ async function executeAgentRun(
         hooks: options.hooks,
         approvalMode,
         requestApproval: options.requestApproval,
+        ...(auditJournal ? { auditJournal } : {}),
       });
     }
   } catch (error) {

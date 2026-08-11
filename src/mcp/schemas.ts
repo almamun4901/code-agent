@@ -44,6 +44,7 @@ export const runShellInputSchema = z
     cwd: relativePath,
     command: z.string(),
     timeoutMs: z.number().int().optional(),
+    verificationRequirementId: z.string().min(1).max(128).optional(),
   })
   .strict();
 

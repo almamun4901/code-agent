@@ -78,6 +78,12 @@ export type AgentEvent =
       outcome: ToolOutcome;
     })
   | (AgentEventBase & {
+      type: "tool_audited";
+      operationId: string;
+      auditSequence: number;
+      auditDigest: string;
+    })
+  | (AgentEventBase & {
       type: "usage_updated";
       usage: AgentUsage;
     })

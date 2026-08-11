@@ -360,7 +360,7 @@ describe("production lifecycle budgets", () => {
       terminalError: null,
       lastToolResult: null,
     };
-    expect(decodeProductionCheckpoint(legacy)).toMatchObject({ version: 3, counters: { modelCalls: 0 }, cost: { projectedMicroUsd: 0 } });
+    expect(decodeProductionCheckpoint(legacy)).toMatchObject({ version: 4, counters: { modelCalls: 0 }, cost: { projectedMicroUsd: 0 } });
     expect(() => decodeProductionCheckpoint({ ...legacy, counters: { ...legacy.counters, modelTurns: 1 } })).toThrow("pricing cannot be reconstructed");
   });
 });

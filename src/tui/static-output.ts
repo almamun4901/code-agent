@@ -43,6 +43,8 @@ export function formatStaticEvent(event: AgentEvent): string[] {
       return [
         `Tool finished: ${event.outcome} ${Math.round(event.durationMs)}ms`,
       ];
+    case "tool_audited":
+      return [`Tool audited: operation ${event.operationId} · record ${event.auditSequence}`];
     case "usage_updated":
       return [
         `Usage: ${event.usage.modelCalls}/${event.usage.maxModelCalls} model calls, ${event.usage.contextTokens}/${event.usage.maxContextTokens} context tokens${event.usage.contextSource === "conservative_local" ? " (estimated)" : ""}, $${(event.usage.projectedCostMicroUsd / 1_000_000).toFixed(2)}/$${(event.usage.maxProjectedCostMicroUsd / 1_000_000).toFixed(2)} projected, ${event.usage.compactions} compactions`,

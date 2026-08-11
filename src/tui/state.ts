@@ -131,6 +131,8 @@ export function reduceAgentEvent(
           ),
         ),
       };
+    case "tool_audited":
+      return state;
     case "usage_updated":
       return { ...state, usage: event.usage };
     case "notification":

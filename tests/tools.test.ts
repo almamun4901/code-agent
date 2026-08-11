@@ -782,6 +782,26 @@ describe("run_shell", () => {
     expect(timeout.metadata?.timedOut).toBe(true);
   });
 
+  test("captures clean Git identities around an approved verification command", async () => {
+    const repo = await fixture();
+    const result = await dispatch(repo, {
+      name: "run_shell",
+      input: { cwd: ".", command: "git status --short", timeoutMs: 30_000, verificationRequirementId: "clean-status" },
+    });
+    expect(result).toMatchObject({
+      success: true,
+      metadata: {
+        exitCode: 0,
+        timedOut: false,
+        verificationRequirementId: "clean-status",
+        gitCleanBefore: true,
+        gitCleanAfter: true,
+      },
+    });
+    expect(result.metadata?.gitCommitBefore).toBe(result.metadata?.gitCommitAfter);
+    expect(result.metadata?.gitTreeBefore).toBe(result.metadata?.gitTreeAfter);
+  });
+
   test("rejects an invalid cwd and caps large output", async () => {
     const repo = await fixture();
     const invalid = await dispatch(repo, {

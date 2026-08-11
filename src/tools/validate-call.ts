@@ -128,12 +128,13 @@ export function validateToolCall(value: unknown): ModelToolRequest {
     case "run_shell":
       rejectUnknownKeys(
         input,
-        ["cwd", "command", "timeoutMs"],
+        ["cwd", "command", "timeoutMs", "verificationRequirementId"],
         "run_shell input",
       );
       requireString(input, "cwd", { nonEmpty: true });
       requireString(input, "command", { nonEmpty: true });
       optionalInteger(input, "timeoutMs");
+      optionalString(input, "verificationRequirementId");
       break;
     case "git":
       if (

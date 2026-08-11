@@ -46,6 +46,16 @@ describe("plan approval schema", () => {
     expect(PlanProposalSchema.safeParse({ ...proposal(), approach: "unsafe\u202Etext" }).success).toBe(false);
   });
 
+  test("validates verification references, closed bounds, visual evidence, and protected digests", () => {
+    const valid = proposal();
+    expect(PlanProposalSchema.safeParse({ ...valid, acceptanceCriteria: [{ ...valid.acceptanceCriteria[0]!, verificationRequirementIds: ["missing"] }] }).success).toBe(false);
+    expect(PlanProposalSchema.safeParse({ ...valid, verificationRequirements: [...valid.verificationRequirements, { ...valid.verificationRequirements[0] }] }).success).toBe(false);
+    expect(PlanProposalSchema.safeParse({ ...valid, visualDirection: "Responsive application" }).success).toBe(false);
+    const viewport = { type: "viewport" as const, id: "viewport", label: "Responsive page", workingDirectory: ".", serverCommand: "bun run dev", port: 3000, cases: [{ route: "/", width: 375, height: 812, requiredVisibleSelectors: ["main"] }] };
+    expect(PlanProposalSchema.safeParse({ ...valid, visualDirection: "Responsive application", verificationRequirements: [...valid.verificationRequirements, viewport] }).success).toBe(true);
+    expect(protectedProposalDigest(valid)).not.toBe(protectedProposalDigest({ ...valid, verificationRequirements: [{ ...valid.verificationRequirements[0]!, command: "bun test --watch" }] }));
+  });
+
   test("requires a matching digest while awaiting approval", () => {
     const current = proposal();
     expect(ApprovalStateSchema.safeParse({
@@ -163,12 +173,72 @@ describe("read-only plan discovery", () => {
 });
 
 describe("approval decisions", () => {
+  test("rejects checked-off work when approved evidence is missing", async () => {
+    const store = new MemoryProductionCheckpointStore();
+    await expect(runProductionLoop({
+      canonicalRepoPath: "/tmp/approval-missing-evidence",
+      task: "Require evidence",
+      runIdentity: "7".repeat(64),
+      approvalMode: "auto",
+      checkpointStore: store,
+      callModel: queue([
+        discoveryTurn("propose_plan", proposal()),
+        executionTurn([repositoryAction("read", "read_file", { path: "README.md" })]),
+        executionTurn([rewritePlan("state", "Persist approval state.", "completed")]),
+      ]),
+      session: { async call() { return success(); } },
+    })).rejects.toThrow("Unexpected model call");
+    expect(await store.load()).toMatchObject({ lifecycle: "running", counters: { stopRejections: 1 } });
+    expect(JSON.stringify((await store.load())?.transcript)).toContain("approval-check");
+  });
+
+  test("does not dispatch a verification command that differs from its approved contract", async () => {
+    const store = new MemoryProductionCheckpointStore();
+    let calls = 0;
+    await expect(runProductionLoop({
+      canonicalRepoPath: "/tmp/approval-contract-mismatch",
+      task: "Enforce exact check",
+      runIdentity: "6".repeat(64),
+      approvalMode: "auto",
+      checkpointStore: store,
+      callModel: queue([
+        discoveryTurn("propose_plan", proposal()),
+        executionTurn([repositoryAction("read", "read_file", { path: "README.md" })]),
+        executionTurn([repositoryAction("verify", "run_shell", { cwd: ".", command: "bun test --watch", timeoutMs: 30_000, verificationRequirementId: "approval-check" })]),
+      ]),
+      session: { async call() { calls += 1; return success(); } },
+    })).rejects.toThrow("Unexpected model call");
+    expect(calls).toBe(1);
+    expect(await store.load()).toMatchObject({ lastToolResult: { success: false, metadata: { code: "VERIFICATION_CONTRACT_MISMATCH" } } });
+  });
+
+  test("marks valid evidence stale after a later mutation", async () => {
+    const store = new MemoryProductionCheckpointStore();
+    await expect(runProductionLoop({
+      canonicalRepoPath: "/tmp/approval-stale-evidence",
+      task: "Stale evidence",
+      runIdentity: "5".repeat(64),
+      approvalMode: "auto",
+      checkpointStore: store,
+      callModel: queue([
+        discoveryTurn("propose_plan", proposal()),
+        executionTurn([repositoryAction("read", "read_file", { path: "README.md" })]),
+        executionTurn([verificationAction()]),
+        executionTurn([repositoryAction("edit", "edit_file", { path: "README.md", mode: "apply", oldText: "old", newText: "new" })]),
+        executionTurn([rewritePlan("state", "Persist approval state.", "completed")]),
+      ]),
+      session: { async call() { return success(); } },
+    })).rejects.toThrow("Unexpected model call");
+    expect(await store.load()).toMatchObject({ verificationEvidence: [{ requirementId: "approval-check", status: "stale", errorCode: "POST_CHECK_MUTATION" }] });
+  });
+
   test("auto approval durably installs the plan before repository work", async () => {
     const store = new (await import("../src/runtime/checkpoint")).MemoryProductionCheckpointStore();
     const calls: string[] = [];
     const turns = queue([
       discoveryTurn("propose_plan", proposal()),
       executionTurn([repositoryAction("read", "read_file", { path: "README.md" })]),
+      executionTurn([verificationAction()]),
       executionTurn([rewritePlan("state", "Persist approval state.", "completed")]),
     ]);
     await expect(runProductionLoop({
@@ -180,7 +250,7 @@ describe("approval decisions", () => {
       callModel: turns,
       session: { async call(request: { name: string }) { calls.push(request.name); return success(); } },
     })).resolves.toMatchObject({ status: "completed" });
-    expect(calls).toEqual(["read_file"]);
+    expect(calls).toEqual(["read_file", "run_shell"]);
     expect(await store.load()).toMatchObject({ approval: { phase: "executing", mode: "auto", revision: 1 } });
   });
 
@@ -205,6 +275,7 @@ describe("approval decisions", () => {
       checkpointStore: backing,
       callModel: queue([
         executionTurn([repositoryAction("read", "read_file", { path: "README.md" })]),
+        executionTurn([verificationAction()]),
         executionTurn([rewritePlan("state", "Persist approval state.", "completed")]),
       ]),
       session: { async call() { return success(); } },
@@ -237,6 +308,7 @@ describe("approval decisions", () => {
       discoveryTurn("propose_plan", first),
       discoveryTurn("propose_plan", second),
       executionTurn([repositoryAction("read", "read_file", { path: "README.md" })]),
+      executionTurn([verificationAction()]),
       executionTurn([rewritePlan("state", "Persist approval state.", "completed")]),
     ];
     let modelCalls = 0;
@@ -290,6 +362,7 @@ describe("approval decisions", () => {
         repositoryAction("reapprove", "request_reapproval", { proposalJson: JSON.stringify(replacement), reason: "The repository requires replacement scope." }),
       ]),
       executionTurn([repositoryAction("read", "read_file", { path: "README.md" })]),
+      executionTurn([verificationAction("replacement")]),
       executionTurn([rewritePlan("replacement", "Implement replacement scope.", "completed")]),
     ]);
     const store = new (await import("../src/runtime/checkpoint")).MemoryProductionCheckpointStore();
@@ -341,6 +414,10 @@ function queue(turns: ModelTurn[]) {
   };
 }
 
+function verificationAction(_taskId = "state") {
+  return repositoryAction("verify", "run_shell", { cwd: ".", command: "bun test tests/plan-approval.test.ts", timeoutMs: 30_000, verificationRequirementId: "approval-check" });
+}
+
 function executionTurn(content: ModelTurn["content"]): ModelTurn {
   return { content, stopReason: "tool_use", usage: { inputTokens: 10, outputTokens: 5 } };
 }
@@ -354,7 +431,7 @@ function rewritePlan(id: string, description: string, status: "pending" | "in_pr
 }
 
 function success() {
-  return { success: true, output: "ok", truncated: false, originalTokenCount: 1, codec: "test" };
+  return { success: true, output: "ok", truncated: false, originalTokenCount: 1, codec: "test", metadata: { exitCode: 0, timedOut: false, gitCommitBefore: "a".repeat(40), gitTreeBefore: "b".repeat(40), gitCleanBefore: true, gitCommitAfter: "a".repeat(40), gitTreeAfter: "b".repeat(40), gitCleanAfter: true } };
 }
 
 function crashAfterSave(

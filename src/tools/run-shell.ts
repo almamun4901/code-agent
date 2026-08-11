@@ -40,6 +40,7 @@ export async function runShellTool(
     );
   }
 
+  const before = input.verificationRequirementId ? await gitIdentity(repoPath, signal) : null;
   const { command, wrapper } = shellCommand(
     repoPath,
     input.cwd,
@@ -56,6 +57,7 @@ export async function runShellTool(
         }
       : {}),
   });
+  const after = input.verificationRequirementId ? await gitIdentity(repoPath, signal) : null;
   const sections = [
     result.stdout ? `STDOUT\n${result.stdout.trimEnd()}` : "",
     result.stderr ? `STDERR\n${result.stderr.trimEnd()}` : "",
@@ -67,8 +69,27 @@ export async function runShellTool(
       exitCode: result.exitCode,
       timedOut: result.timedOut || result.exitCode === 124,
       cwd: input.cwd,
+      ...(input.verificationRequirementId && before && after ? {
+        verificationRequirementId: input.verificationRequirementId,
+        gitCommitBefore: before.commit,
+        gitTreeBefore: before.tree,
+        gitCleanBefore: before.clean,
+        gitCommitAfter: after.commit,
+        gitTreeAfter: after.tree,
+        gitCleanAfter: after.clean,
+      } : {}),
     },
   };
+}
+
+async function gitIdentity(repoPath: string, signal?: AbortSignal): Promise<{ commit: string; tree: string; clean: boolean }> {
+  const commit = await runProcess(["git", "rev-parse", "HEAD"], repoPath, { timeoutMs: 5_000, env: shellEnvironment(repoPath), signal });
+  const tree = await runProcess(["git", "rev-parse", "HEAD^{tree}"], repoPath, { timeoutMs: 5_000, env: shellEnvironment(repoPath), signal });
+  const status = await runProcess(["git", "status", "--porcelain=v1", "--untracked-files=all"], repoPath, { timeoutMs: 5_000, env: shellEnvironment(repoPath), signal });
+  if (commit.exitCode !== 0 || tree.exitCode !== 0 || status.exitCode !== 0 || commit.timedOut || tree.timedOut || status.timedOut) {
+    throw new ToolExecutionError("Could not capture Git identity for verification.", "VERIFICATION_GIT_IDENTITY_FAILED");
+  }
+  return { commit: commit.stdout.trim(), tree: tree.stdout.trim(), clean: status.stdout.trim().length === 0 };
 }
 
 async function cancelRunnerProcesses(

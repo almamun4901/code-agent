@@ -201,6 +201,11 @@ async function installCompletedCheckpoint(
       usage: { inputTokens: 1, outputTokens: 1 },
     },
     {
+      content: [{ type: "tool_use", id: crypto.randomUUID(), name: "run_shell", input: { cwd: ".", command: "git status --short", timeoutMs: 30_000, verificationRequirementId: "inspect-check" } }],
+      stopReason: "tool_use",
+      usage: { inputTokens: 1, outputTokens: 1 },
+    },
+    {
       content: [plan("Inspect", "completed")],
       stopReason: "tool_use",
       usage: { inputTokens: 1, outputTokens: 1 },
@@ -214,7 +219,7 @@ async function installCompletedCheckpoint(
     callModel: async () => turns[turnIndex++]!,
     session: {
       async call(
-        _request: ModelToolRequest,
+        request: ModelToolRequest,
       ): Promise<ToolResult> {
         return {
           success: true,
@@ -222,6 +227,7 @@ async function installCompletedCheckpoint(
           truncated: false,
           originalTokenCount: 1,
           codec: "test",
+          ...(request.name === "run_shell" ? { metadata: { exitCode: 0, timedOut: false, gitCommitBefore: "a".repeat(40), gitTreeBefore: "b".repeat(40), gitCleanBefore: true, gitCommitAfter: "a".repeat(40), gitTreeAfter: "b".repeat(40), gitCleanAfter: true } } : {}),
         };
       },
     },

@@ -1086,6 +1086,7 @@ class FakeSession {
       truncated: false,
       originalTokenCount: 1,
       codec: "test",
+      ...(request.name === "run_shell" && request.input.verificationRequirementId ? { metadata: verificationMetadata(request.input.verificationRequirementId) } : {}),
     };
   }
 
@@ -1125,6 +1126,8 @@ class FakeSession {
 function queuedModel(turns: ModelTurn[]): CallModel {
   let index = 0;
   let discoveryProposed = false;
+  let pendingCompletion: ModelTurn | undefined;
+  let verificationInjected = false;
   return async (request) => {
     if (!discoveryProposed && request.tools.some((tool) => tool.name === "propose_plan")) {
       discoveryProposed = true;
@@ -1157,10 +1160,29 @@ function queuedModel(turns: ModelTurn[]): CallModel {
         usage: { inputTokens: 1, outputTokens: 1 },
       };
     }
+    if (pendingCompletion) {
+      const completion = pendingCompletion;
+      pendingCompletion = undefined;
+      return completion;
+    }
     const next = turns[index++];
     if (!next) throw new Error("Unexpected model call.");
+    const completes = next.content.some((block) => block.type === "tool_use" && block.name === "rewrite_plan" && typeof block.input === "object" && block.input !== null && "plan" in block.input && Array.isArray(block.input.plan) && block.input.plan.every((item) => typeof item === "object" && item !== null && "status" in item && item.status === "completed"));
+    if (completes && discoveryProposed && !verificationInjected) {
+      verificationInjected = true;
+      pendingCompletion = next;
+      return {
+        content: [{ type: "tool_use", id: crypto.randomUUID(), name: "run_shell", input: { cwd: ".", command: "bun test", timeoutMs: 30_000, verificationRequirementId: "focused-test" } }],
+        stopReason: "tool_use",
+        usage: { inputTokens: 1, outputTokens: 1 },
+      };
+    }
     return next;
   };
+}
+
+function verificationMetadata(requirementId: string) {
+  return { exitCode: 0, timedOut: false, verificationRequirementId: requirementId, gitCommitBefore: "a".repeat(40), gitTreeBefore: "b".repeat(40), gitCleanBefore: true, gitCommitAfter: "a".repeat(40), gitTreeAfter: "b".repeat(40), gitCleanAfter: true };
 }
 
 function turn(

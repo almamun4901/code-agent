@@ -65,12 +65,13 @@ describe("runtime observation events", () => {
       "usage_updated",
       "tool_started",
       "tool_finished",
+      "tool_audited",
       "plan_committed",
       "usage_updated",
       "plan_committed",
     ]);
     expect(observed.map((event) => event.sequence)).toEqual([
-      1, 2, 3, 4, 5, 6, 7,
+      1, 2, 3, 4, 5, 6, 7, 8,
     ]);
     expect(observed.every((event) =>
       !Number.isNaN(Date.parse(event.timestamp))
@@ -82,6 +83,7 @@ describe("runtime observation events", () => {
       });
     expect(observed.find((event) => event.type === "tool_finished"))
       .toMatchObject({ outcome: "succeeded", durationMs: 150 });
+    expect(await store.load()).toMatchObject({ auditCursor: { sequence: 1 }, counters: { toolCalls: 1 } });
   });
 
   test("does not claim a plan commit when durable persistence fails", async () => {

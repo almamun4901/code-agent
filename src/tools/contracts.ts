@@ -34,6 +34,7 @@ export type RunShellInput = {
   cwd: string;
   command: string;
   timeoutMs?: number;
+  verificationRequirementId?: string;
 };
 
 export type GitInput =

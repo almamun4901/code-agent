@@ -127,7 +127,7 @@ const expectedDiscovery = {
     annotations: [true, false, true, false],
   },
   run_shell: {
-    properties: ["command", "cwd", "timeoutMs"],
+    properties: ["command", "cwd", "timeoutMs", "verificationRequirementId"],
     required: ["command", "cwd"],
     annotations: [false, true, false, true],
   },

@@ -24,7 +24,7 @@ import { toolResultWireSchema } from "../mcp/schemas";
 import type { ModelToolRequest } from "../tools/contracts";
 import { isMutatingToolCall } from "../tools/contracts";
 import { validateToolCall } from "../tools/validate-call";
-import type { ProductionCheckpointStore } from "./checkpoint";
+import { FileProductionCheckpointStore, type ProductionCheckpointStore } from "./checkpoint";
 import {
   type AgentEventPublisher,
   safeToolSummary,
@@ -60,6 +60,14 @@ import {
   type RequestPlanApproval,
 } from "./approval";
 import { EMPTY_AUDIT_DIGEST } from "./audit";
+import {
+  AuditCheckpointCoordinator,
+  FileAuditJournal,
+  MemoryAuditJournal,
+  redactedDigest,
+  type AuditJournal,
+  type AuditRecord,
+} from "./audit";
 
 const MAX_PLAN_TASKS = 20;
 
@@ -92,7 +100,10 @@ export type ProductionLoopOptions = {
   budgetLimits?: Partial<BudgetLimits>;
   approvalMode?: ApprovalMode;
   requestApproval?: RequestPlanApproval;
+  auditJournal?: AuditJournal;
 };
+
+const memoryAuditJournals = new WeakMap<object, MemoryAuditJournal>();
 
 export class ProductionTurnProtocolError extends Error {
   constructor(message: string) {
@@ -208,6 +219,7 @@ const RAW_TOOL_DEFINITIONS: ModelToolDefinition[] = [
     cwd: { type: "string" },
     command: { type: "string" },
     timeoutMs: { type: "integer" },
+    verificationRequirementId: { type: "string" },
   }, ["cwd", "command"]),
   toolDefinition("git", "Inspect Git state or create a local commit.", {
     subcommand: {
@@ -292,6 +304,11 @@ export async function runProductionLoop(
   };
   const pricing = pricingFor(runtime.identity);
   let state = await initializeState(options, configuredLimits, pricing);
+  const auditJournal = auditJournalFor(options);
+  const recoveredAudit = await auditJournal.recover(state.auditCursor);
+  if (recoveredAudit.filter((record) => record.type === "tool_terminal").length !== state.counters.toolCalls) {
+    throw new ProductionTurnProtocolError("AUDIT_TOOL_COUNT_MISMATCH: committed tool calls do not match terminal audit records.");
+  }
   state = await configureApprovalMode(state, options);
   validateRecoveredState(state, options);
   options.events?.emit({
@@ -748,6 +765,8 @@ async function commitPendingDiscoveryTurn(
   }
   const results: ToolResultBlock[] = [];
   let toolIncrement = 0;
+  let committedDiscoveryResult: ProductionAgentState["lastToolResult"] = null;
+  let discoveryDurationMs = 0;
   if (pending.action) {
     const request = validateToolCall(pending.action.request);
     if (isMutatingToolCall(request)) {
@@ -759,13 +778,19 @@ async function commitPendingDiscoveryTurn(
     options.events?.emit({ type: "tool_started", operationId: pending.action.operationId, toolName: request.name, summary: safeToolSummary(request) });
     let result;
     try {
-      result = await options.session.call(request, options.signal ? { signal: options.signal } : {});
-      options.events?.emit({ type: "tool_finished", operationId: pending.action.operationId, durationMs: Math.max(0, now() - startedAt), outcome: toolOutcome(result) });
+      result = await options.session.call(request, { operationId: pending.action.operationId, ...(options.signal ? { signal: options.signal } : {}) });
+      discoveryDurationMs = Math.max(0, now() - startedAt);
+      options.events?.emit({ type: "tool_finished", operationId: pending.action.operationId, durationMs: discoveryDurationMs, outcome: toolOutcome(result) });
     } catch (error) {
       options.events?.emit({ type: "tool_finished", operationId: pending.action.operationId, durationMs: Math.max(0, now() - startedAt), outcome: options.signal?.aborted || isAbortError(error) ? "cancelled" : "failed" });
       throw error;
     }
     results.push({ type: "tool_result", toolUseId: pending.action.toolUseId, content: JSON.stringify(result), isError: !result.success });
+    const { metadata: discoveryMetadata, ...discoveryWithoutMetadata } = result;
+    committedDiscoveryResult = {
+      ...discoveryWithoutMetadata,
+      ...(discoveryMetadata ? { metadata: Object.fromEntries(Object.entries(discoveryMetadata).filter((entry): entry is [string, string | number | boolean | null] => entry[1] !== undefined)) } : {}),
+    };
     toolIncrement = 1;
   } else if (pending.proposal && pending.proposalToolId) {
     results.push({ type: "tool_result", toolUseId: pending.proposalToolId, content: JSON.stringify({ accepted: true, awaitingApproval: true }) });
@@ -800,7 +825,18 @@ async function commitPendingDiscoveryTurn(
       toolCalls: state.counters.toolCalls + toolIncrement,
     },
   };
-  await options.checkpointStore.save(next);
+  if (pending.action && committedDiscoveryResult) {
+    const request = validateToolCall(pending.action.request);
+    const committed = await new AuditCheckpointCoordinator(auditJournalFor(options), options.checkpointStore).commit(
+      state,
+      next,
+      [toolAuditDraft(pending.action.operationId, request, committedDiscoveryResult, discoveryDurationMs)],
+    );
+    Object.assign(next, committed.state);
+    options.events?.emit({ type: "tool_audited", operationId: pending.action.operationId, auditSequence: committed.records[0]!.sequence, auditDigest: committed.records[0]!.digest });
+  } else {
+    await options.checkpointStore.save(next);
+  }
   return next;
 }
 
@@ -1417,10 +1453,13 @@ async function commitPendingTurn(
     });
     let rawResult;
     try {
-      rawResult = await options.session.call(request, {
-        operationId: pending.action.operationId,
-        ...(options.signal ? { signal: options.signal } : {}),
-      });
+      const contractError = verificationContractError(state, request);
+      rawResult = contractError
+        ? failedToolResult(contractError.code, contractError.message)
+        : await options.session.call(request, {
+            operationId: pending.action.operationId,
+            ...(options.signal ? { signal: options.signal } : {}),
+          });
       toolDurationMs = Math.max(0, now() - startedAt);
       options.events?.emit({
         type: "tool_finished",
@@ -1560,6 +1599,31 @@ async function commitPendingTurn(
       throw error;
     }
   }
+  if (completed) {
+    const missingRequirementIds = completionEvidenceMissing(state);
+    if (missingRequirementIds.length > 0) {
+      const reason = `Completion evidence is missing, failed, or stale for: ${missingRequirementIds.join(", ")}.`;
+      const rejected: ProductionAgentState = {
+        ...state,
+        lifecycle: "running",
+        transcript: [
+          ...state.transcript,
+          { role: "assistant", content: pending.assistantContent },
+          { role: "user", content: [{ type: "tool_result", toolUseId: pending.planToolId!, content: JSON.stringify({ accepted: false, code: "COMPLETION_EVIDENCE_MISSING", reason, requirementIds: missingRequirementIds }), isError: true }] },
+        ],
+        pendingTurn: null,
+        consecutiveInvalidAttempts: 0,
+        counters: {
+          ...state.counters,
+          committedTurns: state.counters.committedTurns + 1,
+          stopRejections: state.counters.stopRejections + 1,
+        },
+      };
+      await options.checkpointStore.save(rejected);
+      await notify(rejected, options, { kind: "lifecycle", code: "COMPLETION_EVIDENCE_MISSING", title: "Completion evidence required", message: reason });
+      return rejected;
+    }
+  }
   const next: ProductionAgentState = {
     ...state,
     lifecycle: completed ? "completed" : "running",
@@ -1582,7 +1646,20 @@ async function commitPendingTurn(
         state.counters.planRewrites + (pending.planToolId ? 1 : 0),
     },
   };
-  await options.checkpointStore.save(next);
+  if (pending.action && lastToolResult) {
+    const request = validateToolCall(pending.action.request);
+    const coordinator = new AuditCheckpointCoordinator(auditJournalFor(options), options.checkpointStore);
+    const committed = await coordinator.commit(
+      state,
+      withStaleEvidence(next, request, lastToolResult),
+      [toolAuditDraft(pending.action.operationId, request, lastToolResult, toolDurationMs)],
+      (committedState, records) => installVerificationEvidence(committedState, request, lastToolResult!, records[0]!),
+    );
+    Object.assign(next, committed.state);
+    options.events?.emit({ type: "tool_audited", operationId: pending.action.operationId, auditSequence: committed.records[0]!.sequence, auditDigest: committed.records[0]!.digest });
+  } else {
+    await options.checkpointStore.save(next);
+  }
   if (pending.action && postToolName && options.hooks) {
     const warnings = await options.hooks.runObservers("PostToolUse", {
       operationId: pending.action.operationId,
@@ -2273,7 +2350,7 @@ function isRejectedStopResult(content: string): boolean {
   try {
     const decoded: unknown = JSON.parse(content);
     return typeof decoded === "object" && decoded !== null && !Array.isArray(decoded) &&
-      Object.keys(decoded).every((key) => ["accepted", "code", "reason"].includes(key)) &&
+      Object.keys(decoded).every((key) => ["accepted", "code", "reason", "requirementIds"].includes(key)) &&
       "accepted" in decoded && decoded.accepted === false &&
       "code" in decoded && typeof decoded.code === "string" &&
       "reason" in decoded && typeof decoded.reason === "string";
@@ -2365,6 +2442,168 @@ function toResult(state: ProductionAgentState): ProductionLoopResult {
     outputTokens: state.counters.outputTokens,
     plan: state.plan,
   };
+}
+
+function auditJournalFor(options: ProductionLoopOptions): AuditJournal {
+  if (options.auditJournal) return options.auditJournal;
+  if (options.checkpointStore instanceof FileProductionCheckpointStore) {
+    return new FileAuditJournal(options.canonicalRepoPath);
+  }
+  const key = options.checkpointStore as object;
+  const existing = memoryAuditJournals.get(key);
+  if (existing) return existing;
+  const journal = new MemoryAuditJournal();
+  memoryAuditJournals.set(key, journal);
+  return journal;
+}
+
+function verificationContractError(
+  state: ProductionAgentState,
+  request: ModelToolRequest,
+): { code: string; message: string } | null {
+  if (request.name !== "run_shell" || !request.input.verificationRequirementId) return null;
+  const proposal = state.approval.currentProposal;
+  const requirement = proposal?.verificationRequirements.find((item) => item.id === request.input.verificationRequirementId);
+  if (!proposal || state.approval.approvedProposalDigest !== state.approval.proposalDigest || !requirement || requirement.type !== "command") {
+    return { code: "VERIFICATION_REQUIREMENT_INVALID", message: `Verification requirement "${request.input.verificationRequirementId}" is not an approved command requirement.` };
+  }
+  if (
+    request.input.command !== requirement.command ||
+    request.input.cwd !== requirement.workingDirectory ||
+    request.input.timeoutMs !== requirement.timeoutMs
+  ) {
+    return { code: "VERIFICATION_CONTRACT_MISMATCH", message: `Verification requirement "${requirement.id}" must use its exact approved command, working directory, and timeout.` };
+  }
+  return null;
+}
+
+function failedToolResult(code: string, message: string): NonNullable<ProductionAgentState["lastToolResult"]> {
+  return {
+    success: false,
+    output: message,
+    truncated: false,
+    originalTokenCount: 0,
+    codec: "runtime",
+    metadata: { code, exitCode: null, timedOut: false },
+  };
+}
+
+function toolAuditDraft(
+  operationId: string,
+  request: ModelToolRequest,
+  result: NonNullable<ProductionAgentState["lastToolResult"]>,
+  durationMs: number,
+) {
+  const metadata = result.metadata ?? {};
+  const sensitiveDigest = request.name === "run_shell"
+    ? redactedDigest(request.input.command)
+    : request.name === "ripgrep"
+      ? redactedDigest(request.input.pattern)
+      : request.name === "edit_file"
+        ? redactedDigest(`${request.input.oldText ?? ""}\u0000${request.input.newText}`)
+        : request.name === "git" && request.input.subcommand === "commit"
+          ? redactedDigest(request.input.message)
+          : null;
+  return {
+    type: "tool_terminal" as const,
+    operationId,
+    payload: {
+      toolName: request.name,
+      summary: safeToolSummary(request),
+      durationMs,
+      success: result.success,
+      outputDigest: redactedDigest(result.output),
+      outputBytes: new TextEncoder().encode(result.output).byteLength,
+      outputTokens: result.originalTokenCount,
+      truncated: result.truncated,
+      errorCode: typeof metadata.code === "string" ? metadata.code : null,
+      exitCode: typeof metadata.exitCode === "number" ? metadata.exitCode : null,
+      timedOut: metadata.timedOut === true,
+      verificationRequirementId: request.name === "run_shell" ? request.input.verificationRequirementId ?? null : null,
+      sensitiveArgumentsDigest: sensitiveDigest,
+    },
+  };
+}
+
+function withStaleEvidence(
+  state: ProductionAgentState,
+  request: ModelToolRequest,
+  result: NonNullable<ProductionAgentState["lastToolResult"]>,
+): ProductionAgentState {
+  const metadata = result.metadata ?? {};
+  const verifiedUnchangedTree = request.name === "run_shell" && !!request.input.verificationRequirementId &&
+    result.success && metadata.exitCode === 0 && metadata.timedOut !== true &&
+    metadata.gitCleanBefore === true && metadata.gitCleanAfter === true &&
+    metadata.gitCommitBefore === metadata.gitCommitAfter && metadata.gitTreeBefore === metadata.gitTreeAfter;
+  if (!isMutatingToolCall(request) || verifiedUnchangedTree) return state;
+  return {
+    ...state,
+    verificationEvidence: state.verificationEvidence.map((evidence) => evidence.status === "satisfied"
+      ? { ...evidence, status: "stale" as const, errorCode: "POST_CHECK_MUTATION" }
+      : evidence),
+  };
+}
+
+function installVerificationEvidence(
+  state: ProductionAgentState,
+  request: ModelToolRequest,
+  result: NonNullable<ProductionAgentState["lastToolResult"]>,
+  record: AuditRecord,
+): void {
+  if (request.name !== "run_shell" || !request.input.verificationRequirementId) return;
+  if (!state.approval.approvedProposalDigest) return;
+  const metadata = result.metadata ?? {};
+  const commitBefore = typeof metadata.gitCommitBefore === "string" ? metadata.gitCommitBefore : null;
+  const commitAfter = typeof metadata.gitCommitAfter === "string" ? metadata.gitCommitAfter : null;
+  const treeBefore = typeof metadata.gitTreeBefore === "string" ? metadata.gitTreeBefore : null;
+  const treeAfter = typeof metadata.gitTreeAfter === "string" ? metadata.gitTreeAfter : null;
+  const exitCode = typeof metadata.exitCode === "number" ? metadata.exitCode : null;
+  const timedOut = metadata.timedOut === true;
+  const satisfied = result.success && exitCode === 0 && !timedOut && metadata.gitCleanBefore === true && metadata.gitCleanAfter === true && commitBefore === commitAfter && treeBefore === treeAfter;
+  const evidence = {
+    requirementId: request.input.verificationRequirementId,
+    operationId: record.operationId!,
+    auditSequence: record.sequence,
+    auditRecordDigest: record.digest,
+    proposalDigest: state.approval.approvedProposalDigest!,
+    candidateCommit: commitAfter,
+    candidateTree: treeAfter,
+    status: satisfied ? "satisfied" as const : "failed" as const,
+    errorCode: satisfied ? null : verificationFailureCode(result),
+    exitCode,
+    timedOut,
+    screenshots: [],
+  };
+  state.verificationEvidence = [
+    ...state.verificationEvidence.filter((item) => item.requirementId !== evidence.requirementId),
+    evidence,
+  ];
+}
+
+function verificationFailureCode(result: NonNullable<ProductionAgentState["lastToolResult"]>): string {
+  const metadata = result.metadata ?? {};
+  if (typeof metadata.code === "string") return metadata.code;
+  if (metadata.timedOut === true) return "VERIFICATION_TIMEOUT";
+  if (metadata.exitCode !== 0) return "VERIFICATION_EXIT_NONZERO";
+  if (metadata.gitCleanBefore !== true || metadata.gitCleanAfter !== true) return "VERIFICATION_DIRTY_TREE";
+  if (metadata.gitTreeBefore !== metadata.gitTreeAfter) return "VERIFICATION_TREE_CHANGED";
+  return "VERIFICATION_FAILED";
+}
+
+function completionEvidenceMissing(state: ProductionAgentState): string[] {
+  if (state.approval.legacyTerminal) return [];
+  const proposal = state.approval.currentProposal;
+  if (!proposal || !state.approval.approvedProposalDigest) return ["approved-proposal"];
+  const satisfying = proposal.verificationRequirements.map((requirement) => ({
+    requirement,
+    evidence: state.verificationEvidence.find((item) => item.requirementId === requirement.id),
+  }));
+  const missing = satisfying.filter(({ evidence }) =>
+    !evidence || evidence.status !== "satisfied" || evidence.proposalDigest !== state.approval.approvedProposalDigest || !evidence.candidateTree,
+  ).map(({ requirement }) => requirement.id);
+  const trees = new Set(satisfying.flatMap(({ evidence }) => evidence?.status === "satisfied" && evidence.candidateTree ? [evidence.candidateTree] : []));
+  if (trees.size > 1) return [...new Set([...missing, ...satisfying.map(({ requirement }) => requirement.id)])];
+  return missing;
 }
 
 function countCompleted(plan: TodoItem[]): number {

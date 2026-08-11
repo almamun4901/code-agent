@@ -211,6 +211,6 @@ order above.
 | 8 — Remaining hooks + budget  | complete                                              |
 | 8A — Result delivery          | complete                                              |
 | 8B — Plan approval            | complete                                              |
-| 8C — Completion evidence      | implementation complete; acceptance and landing pending |
-| 9 — Telemetry                 | not started                                           |
+| 8C — Completion evidence      | complete                                              |
+| 9 — Telemetry                 | in progress                                           |
 | 10 — Eval + PR posting        | not started                                           |

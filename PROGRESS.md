@@ -18,10 +18,11 @@ detached local worktree. Shell-created and typed-tool-edited files are mutually
 writable across the sandbox identities. Gate 8B is complete: implementation,
 review, merged-main offline verification, live interactive revision/restart,
 explicit auto approval, result delivery, cancellation, and cleanup all pass.
-Gate 8C implementation and offline acceptance are complete on
-`feat/completion-evidence`. Live Chromium/E2B acceptance, the external
-dependency advisory query, branch landing, and merged-main reverification are
-still pending; Steps 9–10 remain blocked until those gates finish.
+Gate 8C is complete and merged. Trusted audit/checkpoint evidence, exact Git
+delivery receipts, resumable finalization, and real Chromium viewport checks
+passed their offline and live gates. The merged `main` passed typecheck, 306
+offline tests, manual preflight, fake-loop recovery, dependency audit, and diff
+checks. Step 9 telemetry is now the active roadmap step.
 
 **Step-by-step:**
 
@@ -38,8 +39,8 @@ still pending; Steps 9–10 remain blocked until those gates finish.
 | 8 — Remaining hooks + budget | complete | Eight bounded hooks, checkpoint-v3 dual ledgers, paid-call reservations, transactional compaction, recovery gates, and budget UI pass on merged `main` |
 | 8A — Result delivery | complete | Bounded Git delivery, durable recovery receipt, safe local result branch, shared artifact ownership, and live dogfood pass on merged `main` |
 | 8B — Plan approval | complete | Durable discovery/approval/reapproval, CLI/TUI controls, migration, recovery, review, merged-main verification, and live interactive/auto E2B acceptance pass |
-| 8C — Completion evidence | acceptance pending | Checkpoint v4, approved checks, audit binding, viewport evidence, finalization, receipt v2, inspection CLI, and terminal UX pass offline; live E2B/template acceptance and landing remain |
-| 9 — Telemetry | not started | — |
+| 8C — Completion evidence | complete | Checkpoint v4, approved checks, audit binding, real viewport evidence, resumable finalization, receipt v2, inspection CLI, review, live acceptance, and merged-main verification pass |
+| 9 — Telemetry | in progress | Direct redacted OpenTelemetry export to self-hosted Langfuse is next |
 | 10 — Eval + PR posting | not started | — |
 
 ---
@@ -158,7 +159,7 @@ still pending; Steps 9–10 remain blocked until those gates finish.
   and deny mutation tools until approval.
 - [x] Make shell-created task files group-writable so typed `edit_file` can
   apply its preview under the separate `agent` identity.
-- [ ] Require completion receipts for delivered diff/commit and command exit
+- [x] Require completion receipts for delivered diff/commit and command exit
   codes; add real viewport evidence for frontend responsiveness claims.
 - [ ] Confirm SWE-bench Pro Python subset is actually pullable and that a
   single task's environment reproduces cleanly — not yet dry-run.
@@ -1102,11 +1103,13 @@ still pending; Steps 9–10 remain blocked until those gates finish.
   zero-sandbox cleanup check now pass. The live viewport run exposed that E2B
   template environment declarations do not reach commands; the verifier now
   binds the pinned Playwright browser path explicitly. `bun audit` reports no
-  vulnerabilities after bounded dependency updates. Push, merge, and
-  merged-main reverification remain.
-- Next session should start with: Push and merge `feat/completion-evidence`,
-  repeat the complete gates on updated `main`, push `main`, then mark Step 8C
-  complete in `PLAN.md` and this file before creating the fresh Step 9 branch.
+  vulnerabilities after bounded dependency updates. The reviewed branch was
+  pushed, fast-forwarded into updated `main`, and pushed only after merged-main
+  typecheck, 306 offline tests, manual preflight, fake-loop recovery, dependency
+  audit, and diff checks passed.
+- Next session should start with: Create a fresh Step 9 branch from updated
+  `main`, record the direct OTLP/Langfuse telemetry decision, then implement
+  redacted spans for every model call, tool call, and lifecycle hook invocation.
 
 ---
 

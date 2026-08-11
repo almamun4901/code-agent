@@ -1094,17 +1094,19 @@ still pending; Steps 9–10 remain blocked until those gates finish.
 - Current status of the step in progress: Step 8C implementation and offline
   acceptance pass on `feat/completion-evidence`. Typecheck, the full offline
   suite, focused runtime/MCP/sandbox/safety suites, template dry-run, diff
-  checks, maximum-audit inspection (6.1 ms), and cold/resumed TUI first paint
+  checks, maximum-audit inspection (8.8 ms), and cold/resumed TUI first paint
   (maximum 273 ms) pass. Engineering review is clean after fixes. The CSO
-  diff audit reports zero high-confidence findings. Live E2B Chromium,
-  forced-finalization restart, tamper acceptance, dependency advisory lookup,
-  push, merge, and merged-main reverification remain.
-- Next session should start with: After explicit approval for the external E2B
-  template upload and dependency advisory query, build
-  `terminal-coding-agent-tools:completion-evidence-v1`, run all four live 8C
-  scenarios, confirm zero sandboxes, commit the final documentation, push and
-  merge the branch, repeat the complete gates on updated `main`, push `main`,
-  then mark Step 8C complete in `PLAN.md` and this file.
+  diff audit reports zero high-confidence findings. The authorized template
+  build, real Chromium viewport check, live interactive and automatic delivery
+  flows, forced-finalization resume, tamper rejection, dependency audit, and
+  zero-sandbox cleanup check now pass. The live viewport run exposed that E2B
+  template environment declarations do not reach commands; the verifier now
+  binds the pinned Playwright browser path explicitly. `bun audit` reports no
+  vulnerabilities after bounded dependency updates. Push, merge, and
+  merged-main reverification remain.
+- Next session should start with: Push and merge `feat/completion-evidence`,
+  repeat the complete gates on updated `main`, push `main`, then mark Step 8C
+  complete in `PLAN.md` and this file before creating the fresh Step 9 branch.
 
 ---
 

@@ -48,7 +48,7 @@ import {
   LifecycleHooks,
   type LifecycleBudgetSnapshot,
 } from "./lifecycle";
-import type { ResultDeliveryReceipt } from "../sandbox/result-delivery";
+import { resultDeliveryReceiptDigest, revalidateResultDeliveryReceipt, type ResultDeliveryReceipt } from "../sandbox/result-delivery";
 import {
   PlanProposalSchema,
   ApprovalDecisionSchema,
@@ -510,6 +510,7 @@ export async function prepareProductionLifecycle(options: {
 
 export async function commitReconciledProductionMutation(options: {
   checkpointStore: ProductionCheckpointStore;
+  auditJournal?: AuditJournal;
   mutation: MutationRecord;
   hooks?: LifecycleHooks;
   events?: AgentEventPublisher;
@@ -533,6 +534,7 @@ export async function commitReconciledProductionMutation(options: {
     checkpointStore: options.checkpointStore,
     hooks: options.hooks,
     events: options.events,
+    ...(options.auditJournal ? { auditJournal: options.auditJournal } : {}),
   });
   return true;
 }
@@ -1668,7 +1670,7 @@ async function commitPendingTurn(
     const auditDrafts = [
       toolAuditDraft(pending.action.operationId, request, lastToolResult, toolDurationMs),
       ...(verificationRequirementId
-        ? [verificationAuditDraft(pending.action.operationId, verificationRequirementId, lastToolResult)]
+        ? [verificationAuditDraft(state, pending.action.operationId, verificationRequirementId, lastToolResult)]
         : []),
     ];
     const committed = await coordinator.commit(
@@ -1679,6 +1681,12 @@ async function commitPendingTurn(
     );
     Object.assign(next, committed.state);
     options.events?.emit(toolAuditedEvent(committed.records[0]!));
+    for (const evidence of committed.state.verificationEvidence) {
+      const previous = state.verificationEvidence.find((item) => item.requirementId === evidence.requirementId);
+      if (previous?.status !== evidence.status && evidence.status === "stale") {
+        options.events?.emit({ type: "verification_updated", requirementId: evidence.requirementId, status: evidence.status });
+      }
+    }
     const updatedEvidence = committed.state.verificationEvidence.find((item) => item.operationId === pending.action!.operationId);
     if (updatedEvidence) options.events?.emit({ type: "verification_updated", requirementId: updatedEvidence.requirementId, status: updatedEvidence.status });
   } else if (next.lifecycle === "finalizing") {
@@ -2500,12 +2508,17 @@ export async function completeProductionFinalization(options: {
   if (!proposal || !approvedDigest || approvedDigest !== state.approval.proposalDigest) {
     throw new ProductionTurnProtocolError("FINALIZATION_APPROVAL_MISMATCH: approved proposal is unavailable.");
   }
+  const records = await options.auditJournal.recover(state.auditCursor);
+  validateFinalizationAudit(state, records);
   const candidateTree = completionCandidateTree(state);
   await revalidateViewportEvidenceFiles(state);
+  if (options.checkpointStore instanceof FileProductionCheckpointStore) {
+    await revalidateResultDeliveryReceipt(options.delivery);
+  }
   if (options.delivery.runIdentity !== state.runIdentity || options.delivery.resultTreeSha !== candidateTree) {
     throw new ProductionTurnProtocolError("DELIVERED_TREE_MISMATCH: delivered result does not match the checked candidate tree.");
   }
-  const deliveryDigest = await sha256Text(JSON.stringify(options.delivery));
+  const deliveryDigest = await resultDeliveryReceiptDigest(options.delivery);
   const completing: ProductionAgentState = {
     ...state,
     lifecycle: "completed",
@@ -2540,6 +2553,21 @@ export async function completeProductionFinalization(options: {
   );
   options.events?.emit({ type: "completion_verified", resultCommit: options.delivery.resultSha, resultTree: options.delivery.resultTreeSha });
   return { ...toResult(committed.state), delivery: options.delivery };
+}
+
+function validateFinalizationAudit(state: ProductionAgentState, records: AuditRecord[]): void {
+  const terminal = records.filter((record) => record.type === "tool_terminal");
+  if (terminal.length !== state.counters.toolCalls) {
+    throw new ProductionTurnProtocolError("AUDIT_TOOL_COUNT_MISMATCH: committed tool calls do not match terminal audit records.");
+  }
+  const bySequence = new Map(records.map((record) => [record.sequence, record]));
+  for (const evidence of state.verificationEvidence.filter((item) => item.status === "satisfied")) {
+    const verification = bySequence.get(evidence.auditSequence);
+    const tool = terminal.find((record) => record.operationId === evidence.operationId);
+    if (!verification || evidence.proposalDigest !== state.approval.approvedProposalDigest || verification.digest !== evidence.auditRecordDigest || verification.type !== "verification_updated" || verification.operationId !== evidence.operationId || verification.approvedProposalDigest !== evidence.proposalDigest || verification.payload.requirementId !== evidence.requirementId || verification.payload.satisfied !== true || verification.payload.exitCode !== 0 || verification.payload.timedOut === true || verification.payload.gitCleanBefore !== true || verification.payload.gitCleanAfter !== true || verification.payload.gitCommitBefore !== evidence.candidateCommit || verification.payload.gitCommitAfter !== evidence.candidateCommit || verification.payload.gitTreeBefore !== evidence.candidateTree || verification.payload.gitTreeAfter !== evidence.candidateTree || JSON.stringify(verification.payload.screenshotHashes ?? []) !== JSON.stringify(evidence.screenshots.map((item) => item.sha256)) || JSON.stringify(verification.payload.screenshotPaths ?? []) !== JSON.stringify(evidence.screenshots.map((item) => item.path)) || JSON.stringify(verification.payload.screenshotRoutes ?? []) !== JSON.stringify(evidence.screenshots.map((item) => item.route)) || JSON.stringify(verification.payload.screenshotWidths ?? []) !== JSON.stringify(evidence.screenshots.map((item) => item.width)) || JSON.stringify(verification.payload.screenshotHeights ?? []) !== JSON.stringify(evidence.screenshots.map((item) => item.height)) || !tool || tool.payload.verificationRequirementId !== evidence.requirementId) {
+      throw new ProductionTurnProtocolError(`COMPLETION_EVIDENCE_AUDIT_MISMATCH: ${evidence.requirementId}`);
+    }
+  }
 }
 
 function completionCandidateTree(state: ProductionAgentState): string {
@@ -2674,24 +2702,42 @@ function toolAuditDraft(
 }
 
 function verificationAuditDraft(
+  state: ProductionAgentState,
   operationId: string,
   requirementId: string,
   result: NonNullable<ProductionAgentState["lastToolResult"]>,
 ) {
   const metadata = result.metadata ?? {};
-  const satisfied = result.success && metadata.exitCode === 0 && metadata.timedOut !== true && metadata.gitCleanBefore === true && metadata.gitCleanAfter === true && metadata.gitTreeBefore === metadata.gitTreeAfter;
+  let satisfied = result.success && metadata.exitCode === 0 && metadata.timedOut !== true && metadata.gitCleanBefore === true && metadata.gitCleanAfter === true && metadata.gitCommitBefore === metadata.gitCommitAfter && metadata.gitTreeBefore === metadata.gitTreeAfter;
   const screenshots = parseViewportManifest(metadata.viewportManifest);
+  const viewport = approvedViewportRequirement(state, requirementId);
+  if (viewport) {
+    satisfied = satisfied && screenshots.length === viewport.cases.length && screenshots.every((screenshot, index) => {
+      const approved = viewport.cases[index];
+      return !!approved && screenshot.route === approved.route && screenshot.width === approved.width && screenshot.height === approved.height;
+    });
+  }
   return {
     type: "verification_updated" as const,
     operationId,
     payload: {
       requirementId,
       success: result.success,
-      errorCode: satisfied ? null : verificationFailureCode(result),
+      satisfied,
+      errorCode: satisfied ? null : viewport && screenshots.length > 0 && result.success ? "VIEWPORT_CASE_MISMATCH" : verificationFailureCode(result),
       exitCode: typeof result.metadata?.exitCode === "number" ? result.metadata.exitCode : null,
       timedOut: result.metadata?.timedOut === true,
       screenshotHashes: screenshots.map((item) => item.sha256),
       screenshotPaths: screenshots.map((item) => item.path),
+      screenshotRoutes: screenshots.map((item) => item.route),
+      screenshotWidths: screenshots.map((item) => item.width),
+      screenshotHeights: screenshots.map((item) => item.height),
+      gitCommitBefore: typeof metadata.gitCommitBefore === "string" ? metadata.gitCommitBefore : null,
+      gitCommitAfter: typeof metadata.gitCommitAfter === "string" ? metadata.gitCommitAfter : null,
+      gitTreeBefore: typeof metadata.gitTreeBefore === "string" ? metadata.gitTreeBefore : null,
+      gitTreeAfter: typeof metadata.gitTreeAfter === "string" ? metadata.gitTreeAfter : null,
+      gitCleanBefore: metadata.gitCleanBefore === true,
+      gitCleanAfter: metadata.gitCleanAfter === true,
     },
   };
 }
@@ -2737,7 +2783,10 @@ function installVerificationEvidence(
   if (request.name === "verify_viewport" && typeof metadata.viewportManifest === "string") {
     screenshots = parseViewportManifest(metadata.viewportManifest);
     const requirement = approvedViewportRequirement(state, requirementId);
-    satisfied = satisfied && !!requirement && screenshots.length === requirement.cases.length;
+    satisfied = satisfied && !!requirement && screenshots.length === requirement.cases.length && screenshots.every((screenshot, index) => {
+      const approved = requirement.cases[index];
+      return !!approved && screenshot.route === approved.route && screenshot.width === approved.width && screenshot.height === approved.height;
+    });
   } else if (request.name === "verify_viewport") {
     satisfied = false;
   }
@@ -2750,7 +2799,13 @@ function installVerificationEvidence(
     candidateCommit: commitAfter,
     candidateTree: treeAfter,
     status: satisfied ? "satisfied" as const : "failed" as const,
-    errorCode: satisfied ? null : request.name === "verify_viewport" && screenshots.length === 0 ? "VIEWPORT_SCREENSHOT_MISSING" : verificationFailureCode(result),
+    errorCode: satisfied
+      ? null
+      : request.name === "verify_viewport" && screenshots.length === 0 && result.success
+        ? "VIEWPORT_SCREENSHOT_MISSING"
+        : request.name === "verify_viewport" && screenshots.length > 0
+          ? "VIEWPORT_CASE_MISMATCH"
+          : verificationFailureCode(result),
     exitCode,
     timedOut,
     screenshots,

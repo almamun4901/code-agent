@@ -3,8 +3,9 @@ import { z } from "zod";
 import { FileAuditJournal, type AuditRecord } from "./audit";
 import { FileProductionCheckpointStore } from "./checkpoint";
 import type { ProductionAgentState } from "./schema";
-import { FileResultDeliveryStore, loadCompletedResultDelivery } from "../sandbox/result-delivery";
+import { FileResultDeliveryStore, loadCompletedResultDelivery, resultDeliveryReceiptDigest, revalidateResultDeliveryReceipt } from "../sandbox/result-delivery";
 import { revalidateViewportEvidenceFiles } from "./evidence-files";
+import { verificationContractDigest } from "./approval";
 
 const operationIdSchema = z.string().uuid();
 
@@ -88,11 +89,17 @@ export async function inspectRepository(repositoryPath: string, operationId?: st
   let delivery = null;
   try {
     delivery = await loadCompletedResultDelivery(new FileResultDeliveryStore(canonical));
+    if (delivery) await revalidateResultDeliveryReceipt(delivery);
   } catch (error) {
+    if (state.legacyCompletionStatus === "legacy_unverified") delivery = null;
+    else
     throw new InspectionError("DELIVERY_INTEGRITY_FAILED", error instanceof Error ? error.message : "Delivered Git receipt is invalid.", { cause: error });
   }
   if (state.completion && (!delivery || delivery.resultSha !== state.completion.resultCommit || delivery.resultTreeSha !== state.completion.resultTree)) {
     throw new InspectionError("COMPLETION_DELIVERY_MISMATCH", "Completion receipt does not match the independently validated delivery receipt.");
+  }
+  if (state.completion && delivery && await resultDeliveryReceiptDigest(delivery) !== state.completion.resultDeliveryReceiptDigest) {
+    throw new InspectionError("COMPLETION_DELIVERY_MISMATCH", "Completion receipt does not bind the independently validated delivery receipt.");
   }
   const tools = terminalTools.map(toolProjection);
   const selectedTools = operationId ? tools.filter((tool) => tool.operationId === operationId) : tools;
@@ -136,13 +143,19 @@ export async function inspectRepository(repositoryPath: string, operationId?: st
 
 function validateCompletionBindings(state: ProductionAgentState, records: AuditRecord[]): void {
   if (!state.completion) return;
+  const proposal = state.approval.currentProposal;
+  if (!proposal || state.completion.approvedProposalDigest !== state.approval.approvedProposalDigest || state.completion.verificationContractDigest !== verificationContractDigest(proposal)) {
+    throw new InspectionError("COMPLETION_CONTRACT_MISMATCH", "Completion receipt does not bind the approved verification contract.");
+  }
   const bySequence = new Map(records.map((record) => [record.sequence, record]));
   if (state.completion.auditCursor.sequence !== state.auditCursor.sequence || state.completion.auditCursor.digest !== state.auditCursor.digest) {
     throw new InspectionError("COMPLETION_AUDIT_MISMATCH", "Completion receipt does not bind the checkpoint audit cursor.");
   }
   for (const evidence of state.completion.evidence) {
     const record = bySequence.get(evidence.sequence);
-    if (!record || record.digest !== evidence.recordDigest || record.type !== "verification_updated") {
+    const tool = records.find((candidate) => candidate.type === "tool_terminal" && candidate.operationId === record?.operationId);
+    const installed = state.verificationEvidence.find((candidate) => candidate.requirementId === evidence.requirementId && candidate.auditSequence === evidence.sequence);
+    if (!record || !installed || installed.status !== "satisfied" || installed.proposalDigest !== state.approval.approvedProposalDigest || record.digest !== evidence.recordDigest || record.type !== "verification_updated" || record.approvedProposalDigest !== installed.proposalDigest || record.payload.requirementId !== evidence.requirementId || record.payload.satisfied !== true || record.payload.exitCode !== 0 || record.payload.timedOut === true || record.payload.gitCleanBefore !== true || record.payload.gitCleanAfter !== true || record.payload.gitCommitBefore !== installed.candidateCommit || record.payload.gitCommitAfter !== installed.candidateCommit || record.payload.gitTreeBefore !== installed.candidateTree || record.payload.gitTreeAfter !== installed.candidateTree || JSON.stringify(record.payload.screenshotHashes ?? []) !== JSON.stringify(installed.screenshots.map((item) => item.sha256)) || JSON.stringify(record.payload.screenshotPaths ?? []) !== JSON.stringify(installed.screenshots.map((item) => item.path)) || JSON.stringify(record.payload.screenshotRoutes ?? []) !== JSON.stringify(installed.screenshots.map((item) => item.route)) || JSON.stringify(record.payload.screenshotWidths ?? []) !== JSON.stringify(installed.screenshots.map((item) => item.width)) || JSON.stringify(record.payload.screenshotHeights ?? []) !== JSON.stringify(installed.screenshots.map((item) => item.height)) || !tool || tool.payload.verificationRequirementId !== evidence.requirementId) {
       throw new InspectionError("COMPLETION_EVIDENCE_MISMATCH", `Completion evidence for ${evidence.requirementId} does not match the audit journal.`);
     }
   }

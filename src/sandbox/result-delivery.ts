@@ -44,6 +44,21 @@ export type ResultDeliveryReceipt = z.infer<
   typeof ResultDeliveryReceiptSchema
 >;
 
+export async function resultDeliveryReceiptDigest(receipt: ResultDeliveryReceipt): Promise<string> {
+  const validated = ResultDeliveryReceiptSchema.parse(receipt);
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(stableJson(validated)));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    const object = value as Record<string, unknown>;
+    return `{${Object.keys(object).sort().map((key) => `${JSON.stringify(key)}:${stableJson(object[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
 const resultDeliveryStateSchema = z.object({
   version: z.literal(2),
   status: z.enum(["exported", "validated", "imported", "completed"]),

@@ -15,6 +15,7 @@ import {
   MemoryResultDeliveryStore,
   ResultDeliveryError,
   deliverResult,
+  revalidateResultDeliveryReceipt,
   type ResultDeliveryArtifact,
   type ResultDeliveryState,
 } from "../src/sandbox/result-delivery";
@@ -223,5 +224,17 @@ describe("transactional result delivery", () => {
     expect((await stat(store.statePath)).mode & 0o777).toBe(0o600);
     expect((await stat(store.bundlePath)).mode & 0o777).toBe(0o600);
     expect((await stat(store.directory)).mode & 0o777).toBe(0o700);
+  });
+
+  test("independently rejects tampered delivery identities and diff summaries", async () => {
+    const repository = await fixture();
+    const result = await artifact(repository);
+    const receipt = await deliverResult(options(repository, result));
+    await expect(revalidateResultDeliveryReceipt(receipt)).resolves.toBeUndefined();
+    await expect(revalidateResultDeliveryReceipt({ ...receipt, baseTreeSha: "f".repeat(40) })).rejects.toThrow("Git trees");
+    await expect(revalidateResultDeliveryReceipt({ ...receipt, changedFiles: ["forged.txt"] })).rejects.toThrow("diff summary");
+    await expect(revalidateResultDeliveryReceipt({ ...receipt, diffSummary: { ...receipt.diffSummary, insertions: receipt.diffSummary.insertions + 1 } })).rejects.toThrow("diff summary");
+    await git(repository.worktreePath, "update-ref", `refs/heads/${receipt.branch}`, receipt.baseSha);
+    await expect(revalidateResultDeliveryReceipt(receipt)).rejects.toThrow("branch no longer matches");
   });
 });

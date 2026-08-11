@@ -199,6 +199,8 @@ export class AuditCheckpointCoordinator {
     }
     const after = structuredClone(afterInput);
     let previousDigest = before.auditCursor.digest;
+    const stateDigestBefore = productionStateDigest(before);
+    const stateDigestAfter = productionStateDigest(after);
     const records = drafts.map((draft, index) => {
       const unsigned = {
         schemaVersion: 1 as const,
@@ -208,8 +210,8 @@ export class AuditCheckpointCoordinator {
         previousDigest,
         operationId: draft.operationId,
         approvedProposalDigest: before.approval.approvedProposalDigest,
-        stateDigestBefore: productionStateDigest(before),
-        stateDigestAfter: productionStateDigest(after),
+        stateDigestBefore,
+        stateDigestAfter,
         type: draft.type,
         payload: draft.payload,
       };
@@ -222,6 +224,7 @@ export class AuditCheckpointCoordinator {
     const validated = ProductionAgentStateSchema.parse(after);
     // audit append -> fsync -> checkpoint save -> fsync checkpoint + directory
     // The checkpoint cursor is the commit point; recovery truncates an orphan audit tail.
+    await this.journal.recover(before.auditCursor);
     await this.journal.append(records);
     await this.checkpoints.save(validated);
     return { state: validated, records };

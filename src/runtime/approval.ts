@@ -97,6 +97,10 @@ export const PlanProposalSchema = z.object({
   if (proposal.visualDirection !== "not_applicable" && !proposal.verificationRequirements.some((item) => item.type === "viewport")) {
     context.addIssue({ code: "custom", path: ["verificationRequirements"], message: "Visual proposals require at least one viewport verification requirement." });
   }
+  const viewportCases = proposal.verificationRequirements.reduce((total, requirement) => total + (requirement.type === "viewport" ? requirement.cases.length : 0), 0);
+  if (viewportCases > 12) {
+    context.addIssue({ code: "custom", path: ["verificationRequirements"], message: "A run may contain at most 12 viewport cases across all requirements." });
+  }
   if (utf8Bytes(proposal) > 8 * 1024) {
     context.addIssue({ code: "custom", message: "Plan proposal exceeds 8 KiB." });
   }

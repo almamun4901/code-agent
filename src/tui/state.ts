@@ -156,7 +156,8 @@ export function reduceAgentEvent(
       return { ...state, tools: state.tools.map((tool) => tool.operationId === event.operationId ? { ...tool, auditSequence: event.auditSequence, auditDigest: event.auditDigest, ...(event.detail ? { detail: event.detail } : {}) } : tool) };
     case "verification_updated": {
       const statuses = { ...state.evidence.statuses, [event.requirementId]: event.status };
-      return { ...state, evidence: { ...state.evidence, statuses, latestProblem: event.status === "satisfied" ? state.evidence.latestProblem : `${event.requirementId}: ${event.status}` } };
+      const currentProblem = Object.entries(statuses).find(([, status]) => status !== "satisfied");
+      return { ...state, evidence: { ...state.evidence, statuses, latestProblem: currentProblem ? `${currentProblem[0]}: ${currentProblem[1]}` : undefined } };
     }
     case "finalization_started":
       return { ...state, status: "finalizing", evidence: { ...state.evidence, candidateTree: event.candidateTree } };

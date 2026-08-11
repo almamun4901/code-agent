@@ -55,6 +55,10 @@ describe("plan approval schema", () => {
     expect(PlanProposalSchema.safeParse({ ...valid, visualDirection: "Responsive application", verificationRequirements: [...valid.verificationRequirements, viewport] }).success).toBe(true);
     expect(protectedProposalDigest(valid)).not.toBe(protectedProposalDigest({ ...valid, verificationRequirements: [{ ...valid.verificationRequirements[0]!, command: "bun test --watch" }] }));
     expect(PlanProposalSchema.safeParse({ ...valid, visualDirection: "Responsive", verificationRequirements: [{ ...viewport, cases: [{ ...viewport.cases[0]!, route: "https://example.com" }] }] }).success).toBe(false);
+    expect(PlanProposalSchema.safeParse({ ...valid, visualDirection: "Responsive", acceptanceCriteria: [{ ...valid.acceptanceCriteria[0]!, verificationRequirementIds: ["first"] }], verificationRequirements: [
+      { ...viewport, id: "first", cases: Array.from({ length: 7 }, (_, index) => ({ ...viewport.cases[0]!, route: `/first-${index}` })) },
+      { ...viewport, id: "second", cases: Array.from({ length: 6 }, (_, index) => ({ ...viewport.cases[0]!, route: `/second-${index}` })) },
+    ] }).success).toBe(false);
   });
 
   test("requires a matching digest while awaiting approval", () => {
@@ -209,6 +213,42 @@ describe("approval decisions", () => {
     })).resolves.toMatchObject({ status: "finalizing" });
     expect(sessionCalls).toEqual(["read_file", "verify_viewport"]);
     expect(await store.load()).toMatchObject({ verificationEvidence: [{ requirementId: "responsive-page", status: "satisfied", screenshots: [{ path: ".agent/evidence/proof.png", width: 375, height: 812 }] }] });
+  });
+
+  test("rejects viewport evidence that does not match the approved route and dimensions", async () => {
+    const store = new MemoryProductionCheckpointStore();
+    await expect(runProductionLoop({
+      canonicalRepoPath: "/tmp/approval-viewport-mismatch",
+      task: "Verify frontend",
+      runIdentity: "3".repeat(64),
+      approvalMode: "auto",
+      checkpointStore: store,
+      callModel: queue([
+        discoveryTurn("propose_plan", viewportProposal()),
+        executionTurn([repositoryAction("viewport", "verify_viewport", { verificationRequirementId: "responsive-page" })]),
+      ]),
+      session: { async call() {
+        return { ...success(), metadata: { ...success().metadata, verificationRequirementId: "responsive-page", viewportManifest: JSON.stringify([{ path: ".agent/evidence/proof.png", sha256: "c".repeat(64), bytes: 100, width: 1280, height: 720, route: "/wrong" }]) } };
+      } },
+    })).rejects.toThrow("Unexpected model call");
+    expect(await store.load()).toMatchObject({ verificationEvidence: [{ requirementId: "responsive-page", status: "failed", errorCode: "VIEWPORT_CASE_MISMATCH" }] });
+  });
+
+  test("does not treat a structurally successful nonzero shell result as evidence", async () => {
+    const store = new MemoryProductionCheckpointStore();
+    await expect(runProductionLoop({
+      canonicalRepoPath: "/tmp/approval-nonzero",
+      task: "Verify command",
+      runIdentity: "2".repeat(64),
+      approvalMode: "auto",
+      checkpointStore: store,
+      callModel: queue([
+        discoveryTurn("propose_plan", proposal()),
+        executionTurn([verificationAction()]),
+      ]),
+      session: { async call() { return { ...success(), metadata: { ...success().metadata, exitCode: 1 } }; } },
+    })).rejects.toThrow("Unexpected model call");
+    expect(await store.load()).toMatchObject({ verificationEvidence: [{ requirementId: "approval-check", status: "failed", errorCode: "VERIFICATION_EXIT_NONZERO", exitCode: 1 }] });
   });
 
   test("rejects checked-off work when approved evidence is missing", async () => {

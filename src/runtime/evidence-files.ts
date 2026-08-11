@@ -10,19 +10,32 @@ export class EvidenceArtifactError extends Error {
 }
 
 export async function revalidateViewportEvidenceFiles(state: ProductionAgentState): Promise<void> {
+  const agentRoot = path.resolve(state.canonicalRepoPath, ".agent");
   const evidenceRoot = path.resolve(state.canonicalRepoPath, ".agent/evidence");
-  for (const evidence of state.verificationEvidence.filter((item) => item.status === "satisfied")) {
+  const satisfiedEvidence = state.verificationEvidence.filter((item) => item.status === "satisfied" && item.screenshots.length > 0);
+  if (satisfiedEvidence.length === 0) return;
+  await requireProtectedDirectory(agentRoot);
+  await requireProtectedDirectory(evidenceRoot);
+  for (const evidence of satisfiedEvidence) {
     for (const screenshot of evidence.screenshots) {
       const target = path.resolve(state.canonicalRepoPath, screenshot.path);
       if (!target.startsWith(`${evidenceRoot}${path.sep}`)) throw new EvidenceArtifactError("VIEWPORT_SCREENSHOT_PATH_MISMATCH", "Screenshot escaped the evidence directory.");
       let stats;
       try { stats = await lstat(target); } catch { throw new EvidenceArtifactError("VIEWPORT_SCREENSHOT_MISSING", screenshot.path); }
-      if (stats.isSymbolicLink() || !stats.isFile() || stats.size !== screenshot.bytes) throw new EvidenceArtifactError("VIEWPORT_SCREENSHOT_INTEGRITY_FAILED", screenshot.path);
+      if (stats.isSymbolicLink() || !stats.isFile() || stats.size !== screenshot.bytes || (stats.mode & 0o777) !== 0o600) throw new EvidenceArtifactError("VIEWPORT_SCREENSHOT_INTEGRITY_FAILED", screenshot.path);
       const bytes = new Uint8Array(await readFile(target));
       if (await sha256(bytes) !== screenshot.sha256 || !validPngStructure(bytes, screenshot.width, screenshot.height)) {
         throw new EvidenceArtifactError("VIEWPORT_SCREENSHOT_INTEGRITY_FAILED", screenshot.path);
       }
     }
+  }
+}
+
+async function requireProtectedDirectory(directory: string): Promise<void> {
+  let stats;
+  try { stats = await lstat(directory); } catch { throw new EvidenceArtifactError("VIEWPORT_SCREENSHOT_MISSING", directory); }
+  if (stats.isSymbolicLink() || !stats.isDirectory()) {
+    throw new EvidenceArtifactError("VIEWPORT_SCREENSHOT_INTEGRITY_FAILED", directory);
   }
 }
 

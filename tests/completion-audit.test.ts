@@ -9,6 +9,9 @@ import {
   redactedDigest,
   type AuditRecord,
 } from "../src/runtime/audit";
+import { FileProductionCheckpointStore } from "../src/runtime/checkpoint";
+import { runProductionLoop } from "../src/runtime/production-loop";
+import type { ModelTurn } from "../src/model/contracts";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -69,6 +72,54 @@ describe("completion audit journal", () => {
     const digest = redactedDigest(secret);
     expect(digest).toMatch(/^sha256:[a-f0-9]{64}$/);
     expect(digest).not.toContain(secret);
+  });
+
+  test("keeps sensitive discovery, mutation, command, output, and commit text out of the durable journal", async () => {
+    const repo = await temporaryRepo();
+    const sentinels = {
+      pattern: "SEARCH_PATTERN_SENTINEL_8C",
+      edit: "EDIT_BODY_SENTINEL_8C",
+      command: "COMMAND_SENTINEL_8C",
+      commit: "COMMIT_MESSAGE_SENTINEL_8C",
+      output: "TOOL_OUTPUT_SENTINEL_8C",
+      prompt: "PROMPT_SENTINEL_8C",
+    };
+    const proposal = {
+      approach: "Exercise redacted audit projection.", productDirection: "Trusted evidence.", visualDirection: "not_applicable" as const,
+      technologyChoices: [], includedScope: ["Audit redaction"], excludedScope: [], assumptions: [], unresolvedQuestions: [],
+      acceptanceCriteria: [{ id: "redacted", criterion: "Audit is redacted.", verification: "Run approved command.", verificationRequirementIds: ["check"] }],
+      verificationRequirements: [{ type: "command" as const, id: "check", label: "Redaction check", workingDirectory: ".", command: sentinels.command, timeoutMs: 30_000 }],
+      executionPlan: [{ id: "work", description: "Exercise audit projection." }],
+    };
+    const action = (id: string, name: string, input: unknown): ModelTurn => ({ content: [
+      { type: "tool_use", id: `${id}-plan`, name: "rewrite_plan", input: { plan: [{ id: "work", description: "Exercise audit projection.", status: "in_progress" }] } },
+      { type: "tool_use", id, name, input },
+    ], stopReason: "tool_use", usage: { inputTokens: 1, outputTokens: 1 } });
+    const turns: ModelTurn[] = [
+      { content: [{ type: "tool_use", id: "search", name: "ripgrep", input: { pattern: sentinels.pattern, path: "." } }], stopReason: "tool_use", usage: { inputTokens: 1, outputTokens: 1 } },
+      { content: [{ type: "tool_use", id: "proposal", name: "propose_plan", input: proposal }], stopReason: "tool_use", usage: { inputTokens: 1, outputTokens: 1 } },
+      action("edit", "edit_file", { path: "proof.txt", mode: "apply", oldText: null, newText: sentinels.edit }),
+      action("commit", "git", { subcommand: "commit", message: sentinels.commit, addAll: true }),
+      action("verify", "run_shell", { cwd: ".", command: sentinels.command, timeoutMs: 30_000, verificationRequirementId: "check" }),
+      { content: [{ type: "tool_use", id: "done", name: "rewrite_plan", input: { plan: [{ id: "work", description: "Exercise audit projection.", status: "completed" }] } }], stopReason: "tool_use", usage: { inputTokens: 1, outputTokens: 1 } },
+    ];
+    await runProductionLoop({
+      canonicalRepoPath: repo,
+      task: sentinels.prompt,
+      runIdentity: "8".repeat(64),
+      approvalMode: "auto",
+      checkpointStore: new FileProductionCheckpointStore(repo),
+      callModel: async () => turns.shift()!,
+      session: { async call(request) {
+        const metadata = request.name === "run_shell" ? { exitCode: 0, timedOut: false, gitCommitBefore: "a".repeat(40), gitCommitAfter: "a".repeat(40), gitTreeBefore: "b".repeat(40), gitTreeAfter: "b".repeat(40), gitCleanBefore: true, gitCleanAfter: true } : undefined;
+        return { success: true, output: sentinels.output, truncated: false, originalTokenCount: 3, codec: "test", ...(metadata ? { metadata } : {}) };
+      } },
+    });
+    const journalText = await readFile(join(repo, ".agent", "audit.jsonl"), "utf8");
+    for (const sentinel of Object.values(sentinels)) expect(journalText).not.toContain(sentinel);
+    expect(journalText).toContain("sensitiveArgumentsDigest");
+    expect(journalText).toContain("outputDigest");
+    expect(journalText).toContain('"exitCode":0');
   });
 
   test("inspects the maximum committed journal in under 500ms", async () => {

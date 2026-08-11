@@ -8,6 +8,7 @@ import {
   createAgentTemplate,
   templateBuildOutput,
 } from "../src/sandbox/template";
+import { isApprovedViewportUrl, validateViewportProcessPaths } from "../src/sandbox/viewport-verifier";
 import {
   readLiveE2bConfig,
   toolStdout,
@@ -151,5 +152,17 @@ describe("E2B runtime template", () => {
     expect(
       toolStdout('STDERR\nTraceback source: print("NETWORK_REACHED")'),
     ).toBe("");
+  });
+
+  test("restricts verifier paths and browser traffic to the approved loopback origin", () => {
+    const id = "123e4567-e89b-42d3-a456-426614174000";
+    expect(() => validateViewportProcessPaths(`/tmp/agent-viewport-${id}.json`, `/tmp/agent-viewport-${id}`)).not.toThrow();
+    expect(() => validateViewportProcessPaths(`/tmp/agent-viewport-${id}.json`, `/tmp/agent-viewport-${id}/../escape`)).toThrow("VIEWPORT_INVALID_PATH");
+    expect(() => validateViewportProcessPaths(`/tmp/agent-viewport-${id}.json`, "/tmp/agent-viewport-123e4567-e89b-42d3-a456-426614174001")).toThrow("VIEWPORT_INVALID_PATH");
+    expect(isApprovedViewportUrl("http://127.0.0.1:3000/app.js", 3000)).toBe(true);
+    expect(isApprovedViewportUrl("http://localhost:3000/", 3000)).toBe(false);
+    expect(isApprovedViewportUrl("https://127.0.0.1:3000/", 3000)).toBe(false);
+    expect(isApprovedViewportUrl("http://127.0.0.1:4000/", 3000)).toBe(false);
+    expect(isApprovedViewportUrl("https://example.com/", 3000)).toBe(false);
   });
 });

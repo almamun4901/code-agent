@@ -629,6 +629,7 @@ async function executeAgentRun(
           mutation,
           hooks: options.hooks,
           events,
+          ...(auditJournal ? { auditJournal } : {}),
         });
       }
     } catch (error) {

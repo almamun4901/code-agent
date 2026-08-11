@@ -1,5 +1,5 @@
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
-import { chmod, lstat, mkdir, open, readFile, rename, unlink } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readFile, readdir, rename, unlink } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Sandbox } from "e2b";
@@ -124,6 +124,8 @@ export type E2bSandbox = {
   write(path: string, data: string | ArrayBuffer): Promise<void>;
   readText(path: string): Promise<string>;
   readBytes(path: string): Promise<Uint8Array>;
+  readStream(path: string): Promise<ReadableStream<Uint8Array>>;
+  remove(path: string): Promise<void>;
   run(
     command: string,
     options?: { cwd?: string; timeoutMs?: number },
@@ -156,6 +158,8 @@ function sandboxAdapter(sandbox: Sandbox): E2bSandbox {
     },
     readText: (remotePath) => sandbox.files.read(remotePath),
     readBytes: (remotePath) => sandbox.files.read(remotePath, { format: "bytes" }),
+    readStream: (remotePath) => sandbox.files.read(remotePath, { format: "stream" }),
+    remove: (remotePath) => sandbox.files.remove(remotePath),
     async run(command, options = {}) {
       return sandbox.commands.run(command, options);
     },
@@ -531,55 +535,68 @@ class OwnedE2bTaskSession implements E2bTaskSession {
     const before = await this.#remoteGitIdentity();
     const remoteInput = `/tmp/agent-viewport-${operationId}.json`;
     const remoteOutput = `/tmp/agent-viewport-${operationId}`;
-    await this.#sandbox.write(remoteInput, `${JSON.stringify({ remoteRepoPath: this.remoteRepoPath, requirement })}\n`);
-    let commandResult: SandboxCommandResult;
     try {
-      const running = this.#sandbox.run(`bun run ${REMOTE_VIEWPORT_VERIFIER} ${remoteInput} ${remoteOutput}`, { cwd: REMOTE_RUNTIME_ROOT, timeoutMs: 35_000 });
+      await this.#sandbox.write(remoteInput, `${JSON.stringify({ remoteRepoPath: this.remoteRepoPath, requirement })}\n`);
+      let commandResult: SandboxCommandResult;
+      const viewportTimeoutMs = 35_000 + requirement.cases.length * 30_000;
+      const running = this.#sandbox.run(`bun run ${REMOTE_VIEWPORT_VERIFIER} ${remoteInput} ${remoteOutput}`, { cwd: REMOTE_RUNTIME_ROOT, timeoutMs: viewportTimeoutMs });
       commandResult = signal ? await raceViewportAbort(running, signal, async () => {
         await this.#sandbox.run(`sudo /usr/local/sbin/agent-run-shell --cancel ${this.remoteRepoPath}`, { timeoutMs: 5_000 }).catch(() => undefined);
       }) : await running;
+      const after = await this.#remoteGitIdentity();
+      let manifest: z.infer<typeof viewportManifestSchema>;
+      try { manifest = viewportManifestSchema.parse(JSON.parse(commandResult.stdout.trim())); }
+      catch { return viewportToolFailure("VIEWPORT_RESULT_INVALID", before, after); }
+      if (commandResult.exitCode !== 0 || !manifest.success) return viewportToolFailure(manifest.code ?? "VIEWPORT_FAILED", before, after);
+      const screenshots = [];
+      const targets = (manifest.screenshots ?? []).map((_, index) => `.agent/evidence/${operationId}-${index}.png`);
+      let totalBytes = 0;
+      const written: string[] = [];
+      try {
+        totalBytes = await viewportEvidenceBytes(this.#localRepoPath, targets);
+        for (const [index, item] of (manifest.screenshots ?? []).entries()) {
+          if (item.file !== `${remoteOutput}/case-${index}.png`) throw new E2bTaskSessionError("VIEWPORT_SCREENSHOT_INTEGRITY_FAILED");
+          const bytes = await readBoundedBytes(await this.#sandbox.readStream(item.file), MAX_VIEWPORT_SCREENSHOT_BYTES);
+          totalBytes += bytes.byteLength;
+          if (bytes.byteLength !== item.bytes || totalBytes > MAX_VIEWPORT_SCREENSHOT_TOTAL_BYTES || await sha256(bytes) !== item.sha256) {
+            throw new E2bTaskSessionError("VIEWPORT_SCREENSHOT_INTEGRITY_FAILED");
+          }
+          validateViewportPng(bytes, item.width, item.height);
+          const relativePath = targets[index]!;
+          await atomicEvidenceWrite(this.#localRepoPath, relativePath, bytes);
+          written.push(path.join(this.#localRepoPath, relativePath));
+          screenshots.push({ path: relativePath, sha256: item.sha256, bytes: item.bytes, width: item.width, height: item.height, route: item.route });
+        }
+      } catch {
+        await Promise.all(written.map((target) => unlink(target).catch(() => undefined)));
+        return viewportToolFailure(totalBytes > MAX_VIEWPORT_SCREENSHOT_TOTAL_BYTES ? "VIEWPORT_SCREENSHOT_BUDGET_EXCEEDED" : "VIEWPORT_SCREENSHOT_INTEGRITY_FAILED", before, after);
+      }
+      return {
+        success: true,
+        output: `Viewport verification satisfied ${screenshots.length} case${screenshots.length === 1 ? "" : "s"}.`,
+        truncated: false,
+        originalTokenCount: 12,
+        codec: "viewport",
+        metadata: {
+          verificationRequirementId: requirementId,
+          viewportManifest: JSON.stringify(screenshots),
+          exitCode: commandResult.exitCode,
+          timedOut: false,
+          gitCommitBefore: before.commit,
+          gitTreeBefore: before.tree,
+          gitCleanBefore: before.clean,
+          gitCommitAfter: after.commit,
+          gitTreeAfter: after.tree,
+          gitCleanAfter: after.clean,
+        },
+      };
     } catch (error) {
       await this.#sandbox.run(`sudo /usr/local/sbin/agent-run-shell --cancel ${this.remoteRepoPath}`, { timeoutMs: 5_000 }).catch(() => undefined);
       if (signal?.aborted) throw error;
       return viewportToolFailure("VIEWPORT_PROCESS_FAILED");
+    } finally {
+      await Promise.all([this.#sandbox.remove(remoteInput).catch(() => undefined), this.#sandbox.remove(remoteOutput).catch(() => undefined)]);
     }
-    const after = await this.#remoteGitIdentity();
-    let manifest: z.infer<typeof viewportManifestSchema>;
-    try { manifest = viewportManifestSchema.parse(JSON.parse(commandResult.stdout.trim())); }
-    catch { return viewportToolFailure("VIEWPORT_RESULT_INVALID", before, after); }
-    if (commandResult.exitCode !== 0 || !manifest.success) return viewportToolFailure(manifest.code ?? "VIEWPORT_FAILED", before, after);
-    const screenshots = [];
-    let totalBytes = 0;
-    for (const [index, item] of (manifest.screenshots ?? []).entries()) {
-      const bytes = await this.#sandbox.readBytes(item.file);
-      totalBytes += bytes.byteLength;
-      if (bytes.byteLength !== item.bytes || bytes.byteLength > MAX_VIEWPORT_SCREENSHOT_BYTES || totalBytes > MAX_VIEWPORT_SCREENSHOT_TOTAL_BYTES || await sha256(bytes) !== item.sha256) {
-        return viewportToolFailure("VIEWPORT_SCREENSHOT_INTEGRITY_FAILED", before, after);
-      }
-      validateViewportPng(bytes, item.width, item.height);
-      const relativePath = `.agent/evidence/${operationId}-${index}.png`;
-      await atomicEvidenceWrite(this.#localRepoPath, relativePath, bytes);
-      screenshots.push({ path: relativePath, sha256: item.sha256, bytes: item.bytes, width: item.width, height: item.height, route: item.route });
-    }
-    return {
-      success: true,
-      output: `Viewport verification satisfied ${screenshots.length} case${screenshots.length === 1 ? "" : "s"}.`,
-      truncated: false,
-      originalTokenCount: 12,
-      codec: "viewport",
-      metadata: {
-        verificationRequirementId: requirementId,
-        viewportManifest: JSON.stringify(screenshots),
-        exitCode: commandResult.exitCode,
-        timedOut: false,
-        gitCommitBefore: before.commit,
-        gitTreeBefore: before.tree,
-        gitCleanBefore: before.clean,
-        gitCommitAfter: after.commit,
-        gitTreeAfter: after.tree,
-        gitCleanAfter: after.clean,
-      },
-    };
   }
 
   async #remoteGitIdentity(): Promise<{ commit: string; tree: string; clean: boolean }> {
@@ -1286,6 +1303,51 @@ export async function atomicEvidenceWrite(repositoryPath: string, relativePath: 
     await unlink(temporary).catch(() => {});
     throw error;
   }
+}
+
+export async function viewportEvidenceBytes(repositoryPath: string, replacementPaths: string[] = []): Promise<number> {
+  const directory = path.join(repositoryPath, ".agent", "evidence");
+  try {
+    const stats = await lstat(directory);
+    if (stats.isSymbolicLink() || !stats.isDirectory()) throw new E2bTaskSessionError("Refusing unsafe viewport evidence directory.");
+  } catch (error) {
+    if (isMissingError(error)) return 0;
+    throw error;
+  }
+  const replacements = new Set(replacementPaths.map((item) => path.resolve(repositoryPath, item)));
+  let total = 0;
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const target = path.join(directory, entry.name);
+    if (replacements.has(target)) continue;
+    if (entry.isSymbolicLink() || !entry.isFile()) throw new E2bTaskSessionError("Refusing unsafe viewport evidence entry.");
+    total += (await lstat(target)).size;
+    if (total > MAX_VIEWPORT_SCREENSHOT_TOTAL_BYTES) throw new E2bTaskSessionError("VIEWPORT_SCREENSHOT_BUDGET_EXCEEDED");
+  }
+  return total;
+}
+
+export async function readBoundedBytes(stream: ReadableStream<Uint8Array>, maximumBytes: number): Promise<Uint8Array> {
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maximumBytes) {
+        await reader.cancel("VIEWPORT_SCREENSHOT_TOO_LARGE");
+        throw new E2bTaskSessionError("VIEWPORT_SCREENSHOT_TOO_LARGE");
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const combined = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) { combined.set(chunk, offset); offset += chunk.byteLength; }
+  return combined;
 }
 
 async function safeDirectory(directory: string): Promise<void> {

@@ -12,7 +12,8 @@ type Screenshot = { file: string; sha256: string; bytes: number; width: number; 
 
 async function main(): Promise<void> {
   const [inputPath, outputDirectory] = process.argv.slice(2);
-  if (!inputPath || !outputDirectory || !outputDirectory.startsWith("/tmp/agent-viewport-")) throw new Error("VIEWPORT_INVALID_PATH");
+  if (!inputPath || !outputDirectory) throw new Error("VIEWPORT_INVALID_PATH");
+  validateViewportProcessPaths(inputPath, outputDirectory);
   const raw: unknown = JSON.parse(await readFile(inputPath, "utf8"));
   if (!raw || typeof raw !== "object" || !("remoteRepoPath" in raw) || typeof raw.remoteRepoPath !== "string" || !("requirement" in raw)) throw new Error("VIEWPORT_INVALID_INPUT");
   if (!raw.remoteRepoPath.startsWith("/workspace/tasks/")) throw new Error("VIEWPORT_INVALID_REPOSITORY");
@@ -29,6 +30,10 @@ async function main(): Promise<void> {
     let totalBytes = 0;
     for (const [index, viewportCase] of requirement.cases.entries()) {
       const page = await browser.newPage({ viewport: { width: viewportCase.width, height: viewportCase.height } });
+      await page.route("**/*", async (route) => {
+        if (isApprovedViewportUrl(route.request().url(), requirement.port)) await route.continue();
+        else await route.abort("blockedbyclient");
+      });
       const pageErrors: string[] = [];
       const consoleErrors: string[] = [];
       page.on("pageerror", () => pageErrors.push("pageerror"));
@@ -63,6 +68,21 @@ async function main(): Promise<void> {
   }
 }
 
+export function validateViewportProcessPaths(inputPath: string, outputDirectory: string): void {
+  const input = /^\/tmp\/agent-viewport-([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.json$/i.exec(inputPath);
+  const output = /^\/tmp\/agent-viewport-([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i.exec(outputDirectory);
+  if (!input || !output || input[1]!.toLowerCase() !== output[1]!.toLowerCase()) throw new Error("VIEWPORT_INVALID_PATH");
+}
+
+export function isApprovedViewportUrl(value: string, port: number): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" && url.hostname === "127.0.0.1" && url.port === String(port) && url.username === "" && url.password === "";
+  } catch {
+    return false;
+  }
+}
+
 async function waitForPort(port: number, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -82,4 +102,4 @@ function canConnect(port: number): Promise<boolean> {
   });
 }
 
-await main();
+if (import.meta.main) await main();

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { lstat, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, rm, stat, symlink, truncate, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,6 +12,8 @@ import {
   createE2bTaskSession,
   recoverE2bTaskSession,
   atomicEvidenceWrite,
+  readBoundedBytes,
+  viewportEvidenceBytes,
   validateViewportPng,
   type E2bSandbox,
   type E2bSandboxFactory,
@@ -78,6 +80,37 @@ describe("viewport screenshot delivery", () => {
     await symlink(outside, path.join(root, ".agent/evidence"));
     await expect(atomicEvidenceWrite(root, ".agent/evidence/proof.png", structuralPng(375, 812))).rejects.toThrow("unsafe viewport evidence directory");
     await expect(atomicEvidenceWrite(root, "../proof.png", structuralPng(375, 812))).rejects.toThrow("path is invalid");
+  });
+
+  test("enforces the screenshot budget across the whole run while allowing exact replacements", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "viewport-evidence-budget-"));
+    temporaryRoots.push(root);
+    const existing = path.join(root, ".agent/evidence/existing.png");
+    await mkdir(path.dirname(existing), { recursive: true });
+    await writeFile(existing, Uint8Array.from([1]));
+    await truncate(existing, 16 * 1024 * 1024 + 1);
+    await expect(viewportEvidenceBytes(root)).rejects.toThrow("VIEWPORT_SCREENSHOT_BUDGET_EXCEEDED");
+    expect(await viewportEvidenceBytes(root, [".agent/evidence/existing.png"])).toBe(0);
+  });
+
+  test("rejects unsafe evidence entries", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "viewport-evidence-entry-"));
+    const outside = await mkdtemp(path.join(os.tmpdir(), "viewport-evidence-entry-outside-"));
+    temporaryRoots.push(root, outside);
+    await mkdir(path.join(root, ".agent/evidence"), { recursive: true });
+    await symlink(path.join(outside, "proof.png"), path.join(root, ".agent/evidence/proof.png"));
+    await expect(viewportEvidenceBytes(root)).rejects.toThrow("unsafe viewport evidence entry");
+  });
+
+  test("stops reading remote screenshot bytes at the configured limit", async () => {
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(4));
+        controller.enqueue(new Uint8Array(5));
+        controller.close();
+      },
+    });
+    await expect(readBoundedBytes(stream, 8)).rejects.toThrow("VIEWPORT_SCREENSHOT_TOO_LARGE");
   });
 });
 
@@ -297,6 +330,15 @@ class FakeSandbox implements E2bSandbox {
       throw new Error(`Unexpected byte path: ${remotePath}`);
     }
     return new Uint8Array(value);
+  }
+
+  async readStream(remotePath: string): Promise<ReadableStream<Uint8Array>> {
+    const bytes = await this.readBytes(remotePath);
+    return new ReadableStream({ start(controller) { controller.enqueue(bytes); controller.close(); } });
+  }
+
+  async remove(remotePath: string): Promise<void> {
+    for (const key of [...this.writes.keys()]) if (key === remotePath || key.startsWith(`${remotePath}/`)) this.writes.delete(key);
   }
 
   async run(command = "") {

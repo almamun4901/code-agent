@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { ModelTurn } from "../src/model/contracts";
 import { FileProductionCheckpointStore } from "../src/runtime/checkpoint";
@@ -10,6 +10,8 @@ import { runProductionLoop } from "../src/runtime/production-loop";
 import { completeProductionFinalization } from "../src/runtime/production-loop";
 import { FileAuditJournal } from "../src/runtime/audit";
 import { createTemporaryRepository, type TemporaryRepository } from "./support/temp-repo";
+import { FileResultDeliveryStore } from "../src/sandbox/result-delivery";
+import { revalidateViewportEvidenceFiles } from "../src/runtime/evidence-files";
 
 const repositories: TemporaryRepository[] = [];
 afterEach(async () => Promise.all(repositories.splice(0).map((repo) => repo.cleanup())));
@@ -36,6 +38,8 @@ describe("completion inspection", () => {
     const store = new FileProductionCheckpointStore(second.repo.worktreePath);
     const state = (await store.load())!;
     await store.save({ ...state, lifecycle: "completed", approval: createLegacyTerminalApprovalState(), legacyCompletionStatus: "legacy_unverified", completion: null });
+    const legacyDeliveryStore = new FileResultDeliveryStore(second.repo.worktreePath);
+    await writeFile(legacyDeliveryStore.statePath, `${JSON.stringify({ version: 1, status: "completed", runIdentity: state.runIdentity, canonicalRepoPath: second.repo.worktreePath, baseSha: state.verificationEvidence[0]!.candidateCommit, resultSha: state.verificationEvidence[0]!.candidateCommit, branch: `result/${state.runIdentity.slice(0, 12)}`, bundleSha256: "a".repeat(64), bundleBytes: 1, changedFiles: [], deliveredAt: new Date().toISOString() })}\n`, { mode: 0o600 });
     const legacy = await inspectRepository(second.repo.worktreePath);
     expect(legacy.run.completionStatus).toBe("legacy_unverified");
     expect(legacy.blockedReason).toBe("legacy_unverified");
@@ -49,16 +53,73 @@ describe("completion inspection", () => {
     await mkdir(path.dirname(screenshotPath), { recursive: true });
     const png = structuralPng(375, 812);
     await Bun.write(screenshotPath, png);
-    await store.save({ ...state, verificationEvidence: state.verificationEvidence.map((item) => ({ ...item, screenshots: [{ path: ".agent/evidence/proof.png", sha256: createHash("sha256").update(png).digest("hex"), bytes: png.byteLength, width: 375, height: 812, route: "/" }] })) });
+    const withBoundScreenshot = withScreenshot(state, png);
+    await store.save(withBoundScreenshot);
     await Bun.write(screenshotPath, Uint8Array.from([1, 2, 3]));
+    await expect(revalidateViewportEvidenceFiles(withBoundScreenshot)).rejects.toThrow("VIEWPORT_SCREENSHOT_INTEGRITY_FAILED");
+    expect((await store.load())?.lifecycle).toBe("finalizing");
+  });
+
+  test("blocks finalization when satisfied evidence loses its terminal-tool correlation", async () => {
+    const { repo } = await finalizingFixture();
+    const store = new FileProductionCheckpointStore(repo.worktreePath);
+    const state = (await store.load())!;
+    await store.save({ ...state, verificationEvidence: state.verificationEvidence.map((item) => ({ ...item, operationId: crypto.randomUUID() })) });
     await expect(completeProductionFinalization({
       checkpointStore: store,
       auditJournal: new FileAuditJournal(repo.worktreePath),
-      delivery: { version: 2, runIdentity: state.runIdentity, canonicalRepoPath: repo.worktreePath, baseSha: state.verificationEvidence[0]!.candidateCommit!, resultSha: state.verificationEvidence[0]!.candidateCommit!, baseTreeSha: state.verificationEvidence[0]!.candidateTree!, resultTreeSha: state.verificationEvidence[0]!.candidateTree!, branch: `result/${state.runIdentity.slice(0, 12)}`, bundleSha256: "a".repeat(64), bundleBytes: 1, changedFiles: [], diffSummary: { filesChanged: 0, insertions: 0, deletions: 0, binaryFiles: 0 }, deliveredAt: new Date().toISOString() },
-    })).rejects.toThrow("VIEWPORT_SCREENSHOT_INTEGRITY_FAILED");
-    expect((await store.load())?.lifecycle).toBe("finalizing");
+      delivery: deliveryFor(state, repo.worktreePath),
+    })).rejects.toThrow("COMPLETION_EVIDENCE_AUDIT_MISMATCH");
+  });
+
+  test("blocks finalization when checkpoint evidence substitutes an unaudited candidate tree", async () => {
+    const { repo } = await finalizingFixture();
+    const store = new FileProductionCheckpointStore(repo.worktreePath);
+    const state = (await store.load())!;
+    const forgedTree = "f".repeat(40);
+    const forged = { ...state, verificationEvidence: state.verificationEvidence.map((item) => ({ ...item, candidateTree: forgedTree })) };
+    await store.save(forged);
+    await expect(completeProductionFinalization({
+      checkpointStore: store,
+      auditJournal: new FileAuditJournal(repo.worktreePath),
+      delivery: { ...deliveryFor(state, repo.worktreePath), resultTreeSha: forgedTree },
+    })).rejects.toThrow("COMPLETION_EVIDENCE_AUDIT_MISMATCH");
+  });
+
+  test("rejects screenshot parent symlinks and non-owner-only files", async () => {
+    const first = await finalizingFixture();
+    const firstStore = new FileProductionCheckpointStore(first.repo.worktreePath);
+    const firstState = (await firstStore.load())!;
+    const outside = path.join(first.repo.worktreePath, ".agent/outside");
+    await mkdir(outside);
+    const png = structuralPng(375, 812);
+    await writeFile(path.join(outside, "proof.png"), png, { mode: 0o600 });
+    await mkdir(path.join(first.repo.worktreePath, ".agent"), { recursive: true });
+    await symlink(outside, path.join(first.repo.worktreePath, ".agent/evidence"));
+    const firstWithScreenshot = withScreenshot(firstState, png);
+    await firstStore.save(firstWithScreenshot);
+    await expect(revalidateViewportEvidenceFiles(firstWithScreenshot)).rejects.toThrow("VIEWPORT_SCREENSHOT_INTEGRITY_FAILED");
+
+    const second = await finalizingFixture();
+    const secondStore = new FileProductionCheckpointStore(second.repo.worktreePath);
+    const secondState = (await secondStore.load())!;
+    const screenshotPath = path.join(second.repo.worktreePath, ".agent/evidence/proof.png");
+    await mkdir(path.dirname(screenshotPath), { recursive: true });
+    await writeFile(screenshotPath, png, { mode: 0o600 });
+    await chmod(screenshotPath, 0o644);
+    const secondWithScreenshot = withScreenshot(secondState, png);
+    await secondStore.save(secondWithScreenshot);
+    await expect(revalidateViewportEvidenceFiles(secondWithScreenshot)).rejects.toThrow("VIEWPORT_SCREENSHOT_INTEGRITY_FAILED");
   });
 });
+
+function withScreenshot(state: NonNullable<Awaited<ReturnType<FileProductionCheckpointStore["load"]>>>, png: Uint8Array) {
+  return { ...state, verificationEvidence: state.verificationEvidence.map((item) => ({ ...item, screenshots: [{ path: ".agent/evidence/proof.png", sha256: createHash("sha256").update(png).digest("hex"), bytes: png.byteLength, width: 375, height: 812, route: "/" }] })) };
+}
+
+function deliveryFor(state: NonNullable<Awaited<ReturnType<FileProductionCheckpointStore["load"]>>>, repoPath: string) {
+  return { version: 2 as const, runIdentity: state.runIdentity, canonicalRepoPath: repoPath, baseSha: state.verificationEvidence[0]!.candidateCommit!, resultSha: state.verificationEvidence[0]!.candidateCommit!, baseTreeSha: state.verificationEvidence[0]!.candidateTree!, resultTreeSha: state.verificationEvidence[0]!.candidateTree!, branch: `result/${state.runIdentity.slice(0, 12)}`, bundleSha256: "a".repeat(64), bundleBytes: 1, changedFiles: [], diffSummary: { filesChanged: 0, insertions: 0, deletions: 0, binaryFiles: 0 }, deliveredAt: new Date().toISOString() };
+}
 
 async function finalizingFixture(): Promise<{ repo: TemporaryRepository; operationId: string }> {
   const repo = await createTemporaryRepository();

@@ -61,6 +61,50 @@ function shellQuote(value: string): string {
 }
 
 test.skipIf(!LIVE_ENABLED)(
+  "approved responsive viewports run in real Chromium and deliver screenshots",
+  async () => {
+    const repository = await createTemporaryRepository();
+    const recovery = new MemoryE2bSessionRecoveryStore();
+    let session: Awaited<ReturnType<typeof createE2bTaskSession>> | undefined;
+    try {
+      session = await createE2bTaskSession({
+        localRepoPath: repository.worktreePath,
+        taskId: "viewport-live",
+        templateId,
+        recovery: { runIdentity: "viewport-live", store: recovery },
+      });
+      const requirement = {
+        type: "viewport" as const,
+        id: "responsive-page",
+        label: "Responsive page",
+        workingDirectory: ".",
+        serverCommand: "bun -e 'Bun.serve({port:3000,fetch(){return new Response(\"<!doctype html><meta name=viewport content=width=device-width><main style=max-width:100%>Ready</main>\",{headers:{\"content-type\":\"text/html\"}})}});await new Promise(()=>{})'",
+        port: 3000,
+        cases: [
+          { route: "/", width: 375, height: 812, requiredVisibleSelectors: ["main"] },
+          { route: "/", width: 1280, height: 720, requiredVisibleSelectors: ["main"] },
+        ],
+      };
+      const result = await session.call(
+        { name: "verify_viewport", input: { verificationRequirementId: requirement.id } },
+        { operationId: crypto.randomUUID(), viewportRequirement: requirement },
+      );
+      expect(result).toMatchObject({ success: true, metadata: { exitCode: 0, timedOut: false, gitCleanBefore: true, gitCleanAfter: true } });
+      const screenshots = JSON.parse(String(result.metadata?.viewportManifest)) as Array<{ path: string; sha256: string; width: number; height: number }>;
+      expect(screenshots.map(({ width, height }) => [width, height])).toEqual([[375, 812], [1280, 720]]);
+      for (const screenshot of screenshots) {
+        expect(screenshot.sha256).toMatch(/^[a-f0-9]{64}$/);
+        expect(await Bun.file(path.join(repository.worktreePath, screenshot.path)).exists()).toBe(true);
+      }
+    } finally {
+      await session?.close().catch(() => undefined);
+      await repository.cleanup();
+    }
+  },
+  120_000,
+);
+
+test.skipIf(!LIVE_ENABLED)(
   "all six tools execute in E2B and cannot observe a host sentinel",
   async () => {
     const repository = await createTemporaryRepository();

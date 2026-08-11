@@ -30,7 +30,8 @@ hooks.
 ## Transport and failure behavior
 
 - Export uses OTLP/HTTP directly to self-hosted Langfuse with ingestion version
-  4 and HTTP Basic project authentication.
+  4 and HTTP Basic project authentication. HTTPS is required except for literal
+  loopback addresses used by local acceptance.
 - Sampling is always on. Export is batched asynchronously with a bounded queue.
 - Final shutdown is bounded to two seconds and all exporter failures are
   ignored by run control flow.
@@ -38,7 +39,8 @@ hooks.
   no-op implementation.
 - The E2B MCP server returns only bounded PreToolUse index/duration/outcome
   observations in result `_meta`; they are excluded from the persisted
-  `ToolResult` and converted to host spans under the active tool call.
+  `ToolResult` and converted to host spans under the active tool call. Invalid
+  observation metadata is dropped without changing the authoritative result.
 
 ## Acceptance
 

@@ -32,6 +32,7 @@ import {
   type ProductionLoopOptions,
 } from "../src/runtime/production-loop";
 import type { ProductionAgentState } from "../src/runtime/schema";
+import type { RunTelemetry, TelemetryOutcome } from "../src/runtime/telemetry";
 import { createLegacyExecutionApprovalState } from "./support/approval";
 import type {
   ModelToolRequest,
@@ -880,6 +881,17 @@ describe("host-side production runner", () => {
       throw new Error("reconcile failed");
     };
     let endContext: SessionEndContext | undefined;
+    let telemetryOutcome: TelemetryOutcome | undefined;
+    const telemetry: RunTelemetry = {
+      startRun() {},
+      async withSpan(_name, _attributes, operation) {
+        return operation({ setAttributes() {}, setOutcome() {} });
+      },
+      recordCompletedSpan() {},
+      async finishRun(outcome) {
+        telemetryOutcome = outcome;
+      },
+    };
     const observed: AgentEvent[] = [];
     const controller = startAgentRun({
       repoPath: repo.worktreePath,
@@ -897,6 +909,7 @@ describe("host-side production runner", () => {
       openSession: async () =>
         session as unknown as E2bTaskSession,
       eventSink: (event) => observed.push(event),
+      telemetry,
       sessionEnd(context) {
         endContext = context;
       },
@@ -915,6 +928,7 @@ describe("host-side production runner", () => {
     });
     expect(observed.find((event) => event.type === "run_finished"))
       .toMatchObject({ reason: "completed", cleanup: "failed" });
+    expect(telemetryOutcome).toBe("error");
   });
 
   test("aggregates reconciliation and close failures before SessionEnd", async () => {

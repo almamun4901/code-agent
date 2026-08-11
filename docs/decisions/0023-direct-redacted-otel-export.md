@@ -17,7 +17,9 @@ Create spans manually at the model transport, tool dispatch, and lifecycle-hook
 boundaries. Export them with the OpenTelemetry OTLP/HTTP exporter directly to a
 self-hosted Langfuse `/api/public/otel/v1/traces` endpoint, using always-on SDK
 sampling and a bounded batch processor. Telemetry accepts only a closed
-attribute allowlist and is disabled unless explicitly configured.
+attribute allowlist and is disabled unless explicitly configured. Each run owns
+a non-global tracer provider and local async context, so sequential or embedded
+runs cannot replace the process-wide OpenTelemetry provider.
 
 ## Alternatives considered
 
@@ -36,7 +38,10 @@ The implementation is small, provider-neutral, and testable by comparing span
 counts with checkpoint model calls and audit tool records. Sandbox PreToolUse
 reports only hook index, duration, and outcome through MCP result metadata; the
 host creates the span while commands, paths, arguments, results, and raw errors
-remain excluded. Export and shutdown failures cannot change a run result.
+remain excluded. Invalid observation metadata is dropped, string attributes use
+closed value sets, and remote HTTP endpoints are rejected so Basic credentials
+cannot cross the network in cleartext. Export and shutdown failures cannot
+change a run result.
 
 Operators must provide a self-hosted Langfuse URL and project keys. Direct
 export has no collector-side retry or routing layer; the SDK's bounded batch

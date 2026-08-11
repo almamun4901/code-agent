@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 import {
   McpResultValidationError,
   McpToolClient,
+  PRE_TOOL_USE_OBSERVATIONS_META_KEY,
 } from "../src/mcp/client";
 import { createMcpToolServer } from "../src/mcp/server";
 import { parseWorktreeBoundary } from "../src/mcp/stdio-server";
@@ -588,6 +589,54 @@ describe("MCP stdio lifecycle", () => {
       { index: 1, outcome: "allow" },
     ]);
     expect(observations.every(({ durationMs }) => Number.isFinite(durationMs) && durationMs >= 0)).toBe(true);
+  });
+
+  test("drops malformed PreToolUse metadata without changing a valid tool result", async () => {
+    const invalidValues = [
+      "not-an-array",
+      [{ index: 0, durationMs: -1, outcome: "allow" }],
+      [{ index: 0, durationMs: 1, outcome: "unknown" }],
+      [{ index: 1, durationMs: 1, outcome: "allow" }],
+      Array.from({ length: 3 }, (_, index) => ({ index, durationMs: 1, outcome: "allow" })),
+    ];
+
+    for (const invalid of invalidValues) {
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      const server = new Server(
+        { name: "malformed-telemetry-test", version: "0.1.0" },
+        { capabilities: { tools: {} } },
+      );
+      server.setRequestHandler(CallToolRequestSchema, async () => ({
+        content: [{
+          type: "text" as const,
+          text: JSON.stringify({
+            success: true,
+            output: "valid",
+            truncated: false,
+            originalTokenCount: 1,
+            codec: "test",
+          }),
+        }],
+        isError: false,
+        _meta: { [PRE_TOOL_USE_OBSERVATIONS_META_KEY]: invalid },
+      }));
+      await server.connect(serverTransport);
+      const client = await McpToolClient.connect(clientTransport);
+      mcpClients.push(client);
+      const observations: unknown[] = [];
+
+      await expect(client.call({
+        name: "read_file",
+        input: { path: "unused" },
+      }, {
+        observePreToolUse(observation) {
+          observations.push(observation);
+        },
+      })).resolves.toMatchObject({ success: true, output: "valid" });
+      expect(observations).toEqual([]);
+      await client.close();
+      mcpClients.splice(mcpClients.indexOf(client), 1);
+    }
   });
 
   test("serializes concurrent tool execution within one server session", async () => {

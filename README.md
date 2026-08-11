@@ -239,8 +239,11 @@ LANGFUSE_PUBLIC_KEY=pk-lf-...
 LANGFUSE_SECRET_KEY=sk-lf-...
 ```
 
+The base URL must use HTTPS. Plain HTTP is accepted only for literal loopback
+addresses such as `127.0.0.1` or `::1` during local self-hosted testing.
+
 The exporter sends span names, stable operation IDs, provider/model identity,
-token counts, safe outcome codes, and timings. It never sends task text,
+token counts, coarse outcome categories, and timings. It never sends task text,
 prompts, responses, tool arguments/results, commands, repository paths, or raw
 errors. The checkpoint and audit journal remain authoritative if telemetry is
 missing or delayed.

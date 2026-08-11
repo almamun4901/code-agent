@@ -394,11 +394,13 @@ export function startAgentRun(
       };
     }
 
-    telemetryOutcome = reason === "completed"
-      ? "ok"
-      : reason === "cancelled"
-        ? "cancelled"
-        : "error";
+    telemetryOutcome = cleanup === "failed"
+      ? "error"
+      : reason === "completed"
+        ? "ok"
+        : reason === "cancelled"
+          ? "cancelled"
+          : "error";
     return finishResult(
       events,
       context,

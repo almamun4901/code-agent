@@ -21,7 +21,7 @@ import {
 import type { E2bTaskSession } from "../sandbox/e2b-session";
 import type { MutationRecord } from "../tools/mutation-journal";
 import { toolResultWireSchema } from "../mcp/schemas";
-import type { ModelToolRequest, PreToolUseObservation } from "../tools/contracts";
+import type { ModelToolRequest, PreToolUseObservation, ToolResult } from "../tools/contracts";
 import { isMutatingToolCall } from "../tools/contracts";
 import { validateToolCall } from "../tools/validate-call";
 import { FileProductionCheckpointStore, type ProductionCheckpointStore } from "./checkpoint";
@@ -72,7 +72,7 @@ import {
   type AuditRecord,
 } from "./audit";
 import { revalidateViewportEvidenceFiles } from "./evidence-files";
-import { noOpTelemetry, type RunTelemetry } from "./telemetry";
+import { noOpTelemetry, type RunTelemetry, type TelemetryOutcome } from "./telemetry";
 
 const MAX_PLAN_TASKS = 20;
 
@@ -808,10 +808,11 @@ async function commitPendingDiscoveryTurn(
         span.setAttributes({
           "agent.tool.success": toolResult.success,
           "agent.tool.outcome": toolOutcome(toolResult),
-          ...(typeof toolResult.metadata?.code === "string"
-            ? { "error.type": toolResult.metadata.code }
+          ...(telemetryToolErrorType(toolResult)
+            ? { "error.type": telemetryToolErrorType(toolResult) }
             : {}),
         });
+        span.setOutcome(telemetryToolOutcome(toolResult));
         return toolResult;
       }, { kind: "client" });
       discoveryDurationMs = Math.max(0, now() - startedAt);
@@ -1122,7 +1123,9 @@ async function reserveAndCall(
         options.signal ? { signal: options.signal } : undefined,
       );
       span.setAttributes({
-        "gen_ai.response.model": response.actualIdentity?.model ?? runtime.identity.model,
+        ...(sameIdentity(response.actualIdentity ?? runtime.identity, runtime.identity)
+          ? { "gen_ai.response.model": response.actualIdentity?.model ?? runtime.identity.model }
+          : {}),
         "gen_ai.usage.input_tokens": response.usage.inputTokens,
         "gen_ai.usage.output_tokens": response.usage.outputTokens,
       });
@@ -1524,10 +1527,11 @@ async function commitPendingTurn(
         span.setAttributes({
           "agent.tool.success": result.success,
           "agent.tool.outcome": toolOutcome(result),
-          ...(typeof result.metadata?.code === "string"
-            ? { "error.type": result.metadata.code }
+          ...(telemetryToolErrorType(result)
+            ? { "error.type": telemetryToolErrorType(result) }
             : {}),
         });
+        span.setOutcome(telemetryToolOutcome(result));
         return result;
       }, { kind: "client" });
       toolDurationMs = Math.max(0, now() - startedAt);
@@ -1794,6 +1798,25 @@ function recordRemotePreToolUse(
       "agent.hook.outcome": observation.outcome,
     },
   });
+}
+
+function telemetryToolOutcome(result: ToolResult): TelemetryOutcome {
+  const outcome = toolOutcome(result);
+  return outcome === "succeeded"
+    ? "ok"
+    : outcome === "cancelled"
+      ? "cancelled"
+      : "error";
+}
+
+function telemetryToolErrorType(
+  result: ToolResult,
+): "TOOL_ERROR" | "TOOL_DENIED" | "TOOL_CANCELLED" | undefined {
+  if (result.success) return undefined;
+  const outcome = toolOutcome(result);
+  if (outcome === "denied") return "TOOL_DENIED";
+  if (outcome === "cancelled") return "TOOL_CANCELLED";
+  return "TOOL_ERROR";
 }
 
 function isAbortError(error: unknown): boolean {

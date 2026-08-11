@@ -106,14 +106,9 @@ export class McpToolClient {
     }
 
     const observations = result._meta?.[PRE_TOOL_USE_OBSERVATIONS_META_KEY];
-    if (observations !== undefined) {
-      if (!Array.isArray(observations)) {
-        throw new McpResultValidationError("MCP PreToolUse observations must be an array.");
-      }
-      for (const observation of observations) {
-        if (!isPreToolUseObservation(observation)) {
-          throw new McpResultValidationError("MCP PreToolUse observation is invalid.");
-        }
+    const parsedObservations = parsePreToolUseObservations(observations);
+    if (parsedObservations) {
+      for (const observation of parsedObservations) {
         try {
           options.observePreToolUse?.(observation);
         } catch {
@@ -137,11 +132,26 @@ export class McpToolClient {
   }
 }
 
+function parsePreToolUseObservations(
+  value: unknown,
+): PreToolUseObservation[] | undefined {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 2) return undefined;
+  const observations: PreToolUseObservation[] = [];
+  for (const [expectedIndex, observation] of value.entries()) {
+    if (!isPreToolUseObservation(observation) || observation.index !== expectedIndex) {
+      return undefined;
+    }
+    observations.push(observation);
+  }
+  return observations;
+}
+
 function isPreToolUseObservation(value: unknown): value is PreToolUseObservation {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const observation = value as Record<string, unknown>;
   return Object.keys(observation).length === 3 &&
-    Number.isInteger(observation.index) && Number(observation.index) >= 0 &&
-    typeof observation.durationMs === "number" && Number.isFinite(observation.durationMs) && observation.durationMs >= 0 &&
+    Number.isInteger(observation.index) && (observation.index === 0 || observation.index === 1) &&
+    typeof observation.durationMs === "number" && Number.isFinite(observation.durationMs) && observation.durationMs >= 0 && observation.durationMs <= MCP_TOOL_TIMEOUT_MS &&
     (observation.outcome === "allow" || observation.outcome === "deny" || observation.outcome === "failed" || observation.outcome === "cancelled");
 }

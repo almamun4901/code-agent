@@ -41,7 +41,7 @@
     "e2b": "2.14.1",
     "gpt-tokenizer": "3.4.0",
     "ink": "7.1.1",
-    "playwright": "1.55.0",
+    "playwright": "1.55.1",
     "react": "19.2.8",
     "tree-sitter-wasms": "0.1.13",
     "web-tree-sitter": "0.20.8",
@@ -52,5 +52,10 @@
     "@types/react": "19.2.14",
     "ink-testing-library": "4.0.0",
     "typescript": "^5.9.3"
+  },
+  "overrides": {
+    "brace-expansion": "5.0.9",
+    "fast-uri": "3.1.5",
+    "hono": "4.12.34"
   }
 }

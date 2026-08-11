@@ -1,5 +1,6 @@
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
-import { readFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readFile, rename, unlink } from "node:fs/promises";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Sandbox } from "e2b";
 import { z } from "zod";
@@ -40,6 +41,7 @@ import type {
   E2bSessionRecoveryState,
   E2bSessionRecoveryStore,
 } from "./session-recovery";
+import type { ViewportVerificationRequirement } from "../runtime/approval";
 
 const DEFAULT_TIMEOUT_MS = 900_000;
 const MIN_TIMEOUT_MS = 60_000;
@@ -52,6 +54,9 @@ const REMOTE_CONFIG_PATH = "/tmp/provision-task.json";
 const REMOTE_RESULT_BUNDLE_PATH = "/tmp/terminal-agent-result.bundle";
 const REMOTE_TASKS_ROOT = "/workspace/tasks";
 const REMOTE_RUNTIME_ROOT = "/opt/agent";
+const REMOTE_VIEWPORT_VERIFIER = `${REMOTE_RUNTIME_ROOT}/src/sandbox/viewport-verifier.ts`;
+const MAX_VIEWPORT_SCREENSHOT_BYTES = 2 * 1024 * 1024;
+const MAX_VIEWPORT_SCREENSHOT_TOTAL_BYTES = 16 * 1024 * 1024;
 export const REMOTE_MUTATION_JOURNAL_PATH =
   "/tmp/terminal-agent-mutation-journal.json";
 function serverCommand(worktreeRoot: string): string {
@@ -202,13 +207,23 @@ export type E2bTaskSession = {
   readonly recoveredMutation: MutationRecord | null;
   call(
     request: ModelToolRequest,
-    options?: McpToolCallOptions,
+    options?: ViewportToolCallOptions,
   ): Promise<ToolResult>;
   reconcileActiveMutation(timeoutMs?: number): Promise<MutationRecord | null>;
   deliverResult(runIdentity: string): Promise<ResultDeliveryReceipt>;
   preserveForRecovery(): Promise<void>;
   close(): Promise<void>;
 };
+
+export type ViewportToolCallOptions = McpToolCallOptions & {
+  viewportRequirement?: ViewportVerificationRequirement;
+};
+
+const viewportManifestSchema = z.object({
+  success: z.boolean(),
+  code: z.string().min(1).max(64).optional(),
+  screenshots: z.array(z.object({ file: z.string().startsWith("/tmp/agent-viewport-"), sha256: z.string().regex(/^[a-f0-9]{64}$/), bytes: z.number().int().positive().max(MAX_VIEWPORT_SCREENSHOT_BYTES), width: z.number().int(), height: z.number().int(), route: z.string() }).strict()).max(12).optional(),
+}).strict();
 
 export class E2bTaskSessionError extends Error {
   constructor(message: string, options: { cause?: unknown } = {}) {
@@ -288,7 +303,7 @@ class OwnedE2bTaskSession implements E2bTaskSession {
 
   async call(
     request: ModelToolRequest,
-    options: McpToolCallOptions = {},
+    options: ViewportToolCallOptions = {},
   ): Promise<ToolResult> {
     this.#assertOpen();
     const operation = async () => this.#call(request, options);
@@ -329,6 +344,12 @@ class OwnedE2bTaskSession implements E2bTaskSession {
     if (!state.activeMutation) return null;
     if (state.activeMutation.status === "completed") {
       return state.activeMutation;
+    }
+    if (state.activeMutation.toolName === "verify_viewport") {
+      await this.#sandbox.run(`sudo /usr/local/sbin/agent-run-shell --cancel ${this.remoteRepoPath}`, { timeoutMs: 5_000 }).catch(() => undefined);
+      const cancelled = cancelledBeforeRemoteExecution(state.activeMutation);
+      await this.#recovery.store.save({ ...state, activeMutation: cancelled });
+      return cancelled;
     }
     const earlierRequestsDrained = await this.#drainEarlierRequests();
     const completed = await reconcileRemoteMutation(
@@ -442,7 +463,7 @@ class OwnedE2bTaskSession implements E2bTaskSession {
 
   async #call(
     request: ModelToolRequest,
-    options: McpToolCallOptions,
+    options: ViewportToolCallOptions,
   ): Promise<ToolResult> {
     if (!isMutatingToolCall(request) || !this.#recovery) {
       return this.client.call(request, options);
@@ -483,10 +504,9 @@ class OwnedE2bTaskSession implements E2bTaskSession {
       result: null,
     };
     await this.#recovery.store.save({ ...current, activeMutation });
-    const result = await this.client.call(request, {
-      ...options,
-      operationId,
-    });
+    const result = request.name === "verify_viewport"
+      ? await this.#verifyViewport(request.input.verificationRequirementId, options.viewportRequirement, operationId, options.signal)
+      : await this.client.call(request, { operationId, ...(options.signal ? { signal: options.signal } : {}) });
     await this.#recovery.store.save({
       ...current,
       activeMutation: {
@@ -497,6 +517,76 @@ class OwnedE2bTaskSession implements E2bTaskSession {
       },
     });
     return result;
+  }
+
+  async #verifyViewport(
+    requirementId: string,
+    requirement: ViewportVerificationRequirement | undefined,
+    operationId: string,
+    signal?: AbortSignal,
+  ): Promise<ToolResult> {
+    if (!requirement || requirement.type !== "viewport" || requirement.id !== requirementId) {
+      return viewportToolFailure("VIEWPORT_CONTRACT_REQUIRED");
+    }
+    const before = await this.#remoteGitIdentity();
+    const remoteInput = `/tmp/agent-viewport-${operationId}.json`;
+    const remoteOutput = `/tmp/agent-viewport-${operationId}`;
+    await this.#sandbox.write(remoteInput, `${JSON.stringify({ remoteRepoPath: this.remoteRepoPath, requirement })}\n`);
+    let commandResult: SandboxCommandResult;
+    try {
+      const running = this.#sandbox.run(`bun run ${REMOTE_VIEWPORT_VERIFIER} ${remoteInput} ${remoteOutput}`, { cwd: REMOTE_RUNTIME_ROOT, timeoutMs: 35_000 });
+      commandResult = signal ? await raceViewportAbort(running, signal, async () => {
+        await this.#sandbox.run(`sudo /usr/local/sbin/agent-run-shell --cancel ${this.remoteRepoPath}`, { timeoutMs: 5_000 }).catch(() => undefined);
+      }) : await running;
+    } catch (error) {
+      await this.#sandbox.run(`sudo /usr/local/sbin/agent-run-shell --cancel ${this.remoteRepoPath}`, { timeoutMs: 5_000 }).catch(() => undefined);
+      if (signal?.aborted) throw error;
+      return viewportToolFailure("VIEWPORT_PROCESS_FAILED");
+    }
+    const after = await this.#remoteGitIdentity();
+    let manifest: z.infer<typeof viewportManifestSchema>;
+    try { manifest = viewportManifestSchema.parse(JSON.parse(commandResult.stdout.trim())); }
+    catch { return viewportToolFailure("VIEWPORT_RESULT_INVALID", before, after); }
+    if (commandResult.exitCode !== 0 || !manifest.success) return viewportToolFailure(manifest.code ?? "VIEWPORT_FAILED", before, after);
+    const screenshots = [];
+    let totalBytes = 0;
+    for (const [index, item] of (manifest.screenshots ?? []).entries()) {
+      const bytes = await this.#sandbox.readBytes(item.file);
+      totalBytes += bytes.byteLength;
+      if (bytes.byteLength !== item.bytes || bytes.byteLength > MAX_VIEWPORT_SCREENSHOT_BYTES || totalBytes > MAX_VIEWPORT_SCREENSHOT_TOTAL_BYTES || await sha256(bytes) !== item.sha256) {
+        return viewportToolFailure("VIEWPORT_SCREENSHOT_INTEGRITY_FAILED", before, after);
+      }
+      validateViewportPng(bytes, item.width, item.height);
+      const relativePath = `.agent/evidence/${operationId}-${index}.png`;
+      await atomicEvidenceWrite(this.#localRepoPath, relativePath, bytes);
+      screenshots.push({ path: relativePath, sha256: item.sha256, bytes: item.bytes, width: item.width, height: item.height, route: item.route });
+    }
+    return {
+      success: true,
+      output: `Viewport verification satisfied ${screenshots.length} case${screenshots.length === 1 ? "" : "s"}.`,
+      truncated: false,
+      originalTokenCount: 12,
+      codec: "viewport",
+      metadata: {
+        verificationRequirementId: requirementId,
+        viewportManifest: JSON.stringify(screenshots),
+        exitCode: commandResult.exitCode,
+        timedOut: false,
+        gitCommitBefore: before.commit,
+        gitTreeBefore: before.tree,
+        gitCleanBefore: before.clean,
+        gitCommitAfter: after.commit,
+        gitTreeAfter: after.tree,
+        gitCleanAfter: after.clean,
+      },
+    };
+  }
+
+  async #remoteGitIdentity(): Promise<{ commit: string; tree: string; clean: boolean }> {
+    const result = await this.#sandbox.run(`git -C ${this.remoteRepoPath} rev-parse HEAD && git -C ${this.remoteRepoPath} rev-parse 'HEAD^{tree}' && git -C ${this.remoteRepoPath} status --porcelain=v1 --untracked-files=all`, { timeoutMs: 5_000 });
+    const lines = result.stdout.split("\n");
+    if (result.exitCode !== 0 || !lines[0] || !lines[1]) throw new E2bTaskSessionError("Could not capture viewport Git identity.");
+    return { commit: lines[0].trim(), tree: lines[1].trim(), clean: lines.slice(2).join("\n").trim().length === 0 };
   }
 
   async #requiredRecoveryState(): Promise<E2bSessionRecoveryState> {
@@ -1117,6 +1207,105 @@ function cancelledBeforeRemoteExecution(
       metadata: { code: "CANCELLED" },
     },
   };
+}
+
+function viewportToolFailure(
+  code: string,
+  before?: { commit: string; tree: string; clean: boolean },
+  after?: { commit: string; tree: string; clean: boolean },
+): ToolResult {
+  return {
+    success: false,
+    output: `Viewport verification failed (${code}).`,
+    truncated: false,
+    originalTokenCount: 8,
+    codec: "viewport",
+    metadata: {
+      code,
+      exitCode: null,
+      timedOut: code.includes("TIMEOUT"),
+      ...(before ? { gitCommitBefore: before.commit, gitTreeBefore: before.tree, gitCleanBefore: before.clean } : {}),
+      ...(after ? { gitCommitAfter: after.commit, gitTreeAfter: after.tree, gitCleanAfter: after.clean } : {}),
+    },
+  };
+}
+
+async function raceViewportAbort<T>(promise: Promise<T>, signal: AbortSignal, onAbort: () => Promise<void>): Promise<T> {
+  if (signal.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError");
+  return new Promise<T>((resolve, reject) => {
+    const aborted = () => { void onAbort().finally(() => reject(signal.reason ?? new DOMException("Aborted", "AbortError"))); };
+    signal.addEventListener("abort", aborted, { once: true });
+    void promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", aborted));
+  });
+}
+
+export function validateViewportPng(bytes: Uint8Array, width: number, height: number): void {
+  const signature = [137, 80, 78, 71, 13, 10, 26, 10];
+  if (bytes.byteLength < 33 || !signature.every((value, index) => bytes[index] === value) || new TextDecoder().decode(bytes.slice(12, 16)) !== "IHDR") {
+    throw new E2bTaskSessionError("Viewport screenshot is not a valid PNG.");
+  }
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (view.getUint32(16) !== width || view.getUint32(20) !== height) throw new E2bTaskSessionError("Viewport screenshot dimensions do not match its manifest.");
+  let offset = 8;
+  let sawIdat = false;
+  let sawIend = false;
+  while (offset + 12 <= bytes.byteLength) {
+    const length = view.getUint32(offset);
+    if (length > bytes.byteLength - offset - 12) throw new E2bTaskSessionError("Viewport PNG contains a truncated chunk.");
+    const type = new TextDecoder().decode(bytes.slice(offset + 4, offset + 8));
+    if (type === "IDAT") sawIdat = true;
+    if (type === "IEND") { sawIend = length === 0 && offset + 12 === bytes.byteLength; break; }
+    offset += 12 + length;
+  }
+  if (!sawIdat || !sawIend) throw new E2bTaskSessionError("Viewport PNG is missing required image chunks.");
+}
+
+export async function atomicEvidenceWrite(repositoryPath: string, relativePath: string, bytes: Uint8Array): Promise<void> {
+  if (!relativePath.startsWith(".agent/evidence/") || relativePath.includes("..") || relativePath.includes("\\")) throw new E2bTaskSessionError("Viewport evidence path is invalid.");
+  const agentDirectory = path.join(repositoryPath, ".agent");
+  const directory = path.join(agentDirectory, "evidence");
+  await safeDirectory(agentDirectory);
+  await safeDirectory(directory);
+  const target = path.join(repositoryPath, relativePath);
+  if (!target.startsWith(`${directory}${path.sep}`)) throw new E2bTaskSessionError("Viewport evidence path escaped its protected directory.");
+  try { if ((await lstat(target)).isSymbolicLink()) throw new E2bTaskSessionError("Refusing symlinked viewport evidence path."); } catch (error) { if (!isMissingError(error)) throw error; }
+  const temporary = `${target}.tmp-${process.pid}-${crypto.randomUUID()}`;
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    handle = await open(temporary, "wx", 0o600);
+    await handle.writeFile(bytes);
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
+    await chmod(temporary, 0o600);
+    await rename(temporary, target);
+    const parent = await open(directory, "r");
+    try { await parent.sync(); } finally { await parent.close(); }
+  } catch (error) {
+    await handle?.close().catch(() => {});
+    await unlink(temporary).catch(() => {});
+    throw error;
+  }
+}
+
+async function safeDirectory(directory: string): Promise<void> {
+  try {
+    const stats = await lstat(directory);
+    if (stats.isSymbolicLink() || !stats.isDirectory()) throw new E2bTaskSessionError("Refusing unsafe viewport evidence directory.");
+  } catch (error) {
+    if (!isMissingError(error)) throw error;
+    await mkdir(directory, { mode: 0o700 });
+  }
+  await chmod(directory, 0o700);
+}
+
+async function sha256(bytes: Uint8Array): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", Uint8Array.from(bytes).buffer);
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function isMissingError(error: unknown): boolean {
+  return !!error && typeof error === "object" && "code" in error && error.code === "ENOENT";
 }
 
 export type { JSONRPCMessage };

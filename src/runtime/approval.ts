@@ -40,7 +40,10 @@ const viewportCaseSchema = z.object({
   ),
   width: z.number().int().min(320).max(2_560),
   height: z.number().int().min(480).max(1_600),
-  requiredVisibleSelectors: z.array(boundedText(512)).max(10),
+  requiredVisibleSelectors: z.array(boundedText(512).refine(
+    (value) => !/^(?:xpath|text|id|data-testid|data-test-id|_react|_vue)=/i.test(value) && !value.includes(">>"),
+    "Viewport selectors must use CSS syntax, not Playwright selector engines.",
+  )).max(10),
 }).strict();
 export const ViewportVerificationRequirementSchema = verificationRequirementBaseSchema.extend({
   type: z.literal("viewport"),

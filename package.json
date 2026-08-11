@@ -41,6 +41,7 @@
     "e2b": "2.14.1",
     "gpt-tokenizer": "3.4.0",
     "ink": "7.1.1",
+    "playwright": "1.55.0",
     "react": "19.2.8",
     "tree-sitter-wasms": "0.1.13",
     "web-tree-sitter": "0.20.8",

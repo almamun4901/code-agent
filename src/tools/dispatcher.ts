@@ -33,6 +33,8 @@ async function execute(
       return treeSitterSymbolsTool(call.input);
     case "run_shell":
       return runShellTool(call.input, signal);
+    case "verify_viewport":
+      throw new ToolExecutionError("Viewport verification is available only through an approved production contract.", "VIEWPORT_CONTRACT_REQUIRED");
     case "git":
       return gitTool(call.input, signal);
     default:

@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { RUNTIME_MANIFEST_PATH } from "./runtime-manifest";
 
 export const DEFAULT_E2B_TEMPLATE_NAME =
-  "terminal-coding-agent-tools:result-delivery-v1";
+  "terminal-coding-agent-tools:completion-evidence-v1";
 export const E2B_RUNTIME_ROOT = "/opt/agent";
 export const E2B_SHELL_WRAPPER = "/usr/local/sbin/agent-run-shell";
 
@@ -62,6 +62,7 @@ export function createAgentTemplate() {
     )
     .setWorkdir(E2B_RUNTIME_ROOT)
     .runCmd("bun install --frozen-lockfile --production")
+    .runCmd(`PLAYWRIGHT_BROWSERS_PATH=${E2B_RUNTIME_ROOT}/ms-playwright bunx playwright install --with-deps chromium`)
     .runCmd(
       `bun run src/sandbox/runtime-manifest.ts ${E2B_RUNTIME_ROOT} ${RUNTIME_MANIFEST_PATH}`,
     )
@@ -69,6 +70,7 @@ export function createAgentTemplate() {
       "bun --version",
       "git --version",
       "rg --version",
+      `PLAYWRIGHT_BROWSERS_PATH=${E2B_RUNTIME_ROOT}/ms-playwright bunx playwright --version`,
       "test -f node_modules/tree-sitter-wasms/out/tree-sitter-python.wasm",
       "test -f node_modules/tree-sitter-wasms/out/tree-sitter-typescript.wasm",
     ])
@@ -79,6 +81,7 @@ export function createAgentTemplate() {
     .setEnvs({
       AGENT_SHELL_WRAPPER: E2B_SHELL_WRAPPER,
       AGENT_TASK_GROUP: "task",
+      PLAYWRIGHT_BROWSERS_PATH: `${E2B_RUNTIME_ROOT}/ms-playwright`,
     })
     .setUser("agent");
 }

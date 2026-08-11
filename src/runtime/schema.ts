@@ -26,7 +26,7 @@ const toolResultSchema = z.object({
 }).strict();
 
 const modelToolRequestSchema = z.object({
-  name: z.enum(["read_file", "edit_file", "ripgrep", "tree_sitter_symbols", "run_shell", "git"]),
+  name: z.enum(["read_file", "edit_file", "ripgrep", "tree_sitter_symbols", "run_shell", "verify_viewport", "git"]),
   input: z.record(z.string(), z.unknown()),
 }).strict();
 
@@ -112,7 +112,7 @@ export const AuditCursorSchema = z.object({
   digest: z.string().regex(/^[a-f0-9]{64}$/),
 }).strict();
 
-const screenshotEvidenceSchema = z.object({
+export const ScreenshotEvidenceSchema = z.object({
   path: z.string().min(1).max(1_024),
   sha256: z.string().regex(/^[a-f0-9]{64}$/),
   bytes: z.number().int().positive().max(2 * 1024 * 1024),
@@ -133,7 +133,7 @@ export const VerificationEvidenceSchema = z.object({
   errorCode: z.string().min(1).max(64).nullable(),
   exitCode: z.number().int().nullable(),
   timedOut: z.boolean(),
-  screenshots: z.array(screenshotEvidenceSchema).max(12),
+  screenshots: z.array(ScreenshotEvidenceSchema).max(12),
 }).strict();
 
 export const CompletionReceiptSchema = z.object({

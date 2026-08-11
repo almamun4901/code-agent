@@ -9,6 +9,8 @@ import type {
   ToolResultBlock,
   ToolUseBlock,
 } from "../model/contracts";
+import { lstat, readFile } from "node:fs/promises";
+import path from "node:path";
 import {
   catalogCostMicroUsd,
   createInjectedModelRuntime,
@@ -38,6 +40,7 @@ import type {
 import {
   CompactionSummarySchema,
   DEFAULT_BUDGET_LIMITS,
+  ScreenshotEvidenceSchema,
   type CompactionSummary,
   type BudgetLimits,
 } from "./schema";
@@ -223,6 +226,9 @@ const RAW_TOOL_DEFINITIONS: ModelToolDefinition[] = [
     timeoutMs: { type: "integer" },
     verificationRequirementId: { type: "string" },
   }, ["cwd", "command"]),
+  toolDefinition("verify_viewport", "Verify an approved viewport requirement in pinned Chromium.", {
+    verificationRequirementId: { type: "string" },
+  }, ["verificationRequirementId"]),
   toolDefinition("git", "Inspect Git state or create a local commit.", {
     subcommand: {
       type: "string",
@@ -1460,6 +1466,7 @@ async function commitPendingTurn(
         ? failedToolResult(contractError.code, contractError.message)
         : await options.session.call(request, {
             operationId: pending.action.operationId,
+            ...(request.name === "verify_viewport" ? { viewportRequirement: approvedViewportRequirement(state, request.input.verificationRequirementId) } : {}),
             ...(options.signal ? { signal: options.signal } : {}),
           });
       toolDurationMs = Math.max(0, now() - startedAt);
@@ -1652,10 +1659,15 @@ async function commitPendingTurn(
   if (pending.action && lastToolResult) {
     const request = validateToolCall(pending.action.request);
     const coordinator = new AuditCheckpointCoordinator(auditJournalFor(options), options.checkpointStore);
+    const verificationRequirementId = request.name === "verify_viewport"
+      ? request.input.verificationRequirementId
+      : request.name === "run_shell"
+        ? request.input.verificationRequirementId
+        : undefined;
     const auditDrafts = [
       toolAuditDraft(pending.action.operationId, request, lastToolResult, toolDurationMs),
-      ...(request.name === "run_shell" && request.input.verificationRequirementId
-        ? [verificationAuditDraft(pending.action.operationId, request.input.verificationRequirementId, lastToolResult)]
+      ...(verificationRequirementId
+        ? [verificationAuditDraft(pending.action.operationId, verificationRequirementId, lastToolResult)]
         : []),
     ];
     const committed = await coordinator.commit(
@@ -1896,7 +1908,9 @@ function createModelRequest(state: ProductionAgentState): ModelRequest {
   return {
     system: SYSTEM_PROMPT,
     messages: state.transcript,
-    tools: TOOL_DEFINITIONS,
+    tools: state.approval.currentProposal?.verificationRequirements.some((item) => item.type === "viewport")
+      ? TOOL_DEFINITIONS
+      : TOOL_DEFINITIONS.filter((tool) => tool.name !== "verify_viewport"),
     maxTokens: 4_096,
   };
 }
@@ -2484,6 +2498,7 @@ export async function completeProductionFinalization(options: {
     throw new ProductionTurnProtocolError("FINALIZATION_APPROVAL_MISMATCH: approved proposal is unavailable.");
   }
   const candidateTree = completionCandidateTree(state);
+  await revalidateViewportEvidence(state);
   if (options.delivery.runIdentity !== state.runIdentity || options.delivery.resultTreeSha !== candidateTree) {
     throw new ProductionTurnProtocolError("DELIVERED_TREE_MISMATCH: delivered result does not match the checked candidate tree.");
   }
@@ -2524,6 +2539,52 @@ export async function completeProductionFinalization(options: {
   return { ...toResult(committed.state), delivery: options.delivery };
 }
 
+async function revalidateViewportEvidence(state: ProductionAgentState): Promise<void> {
+  const evidenceRoot = path.resolve(state.canonicalRepoPath, ".agent/evidence");
+  for (const evidence of state.verificationEvidence.filter((item) => item.status === "satisfied")) {
+    for (const screenshot of evidence.screenshots) {
+      const target = path.resolve(state.canonicalRepoPath, screenshot.path);
+      if (!target.startsWith(`${evidenceRoot}${path.sep}`)) {
+        throw new ProductionTurnProtocolError("VIEWPORT_SCREENSHOT_PATH_MISMATCH: screenshot escaped the evidence directory.");
+      }
+      let stats;
+      try { stats = await lstat(target); } catch {
+        throw new ProductionTurnProtocolError(`VIEWPORT_SCREENSHOT_MISSING: ${screenshot.path}`);
+      }
+      if (stats.isSymbolicLink() || !stats.isFile() || stats.size !== screenshot.bytes) {
+        throw new ProductionTurnProtocolError(`VIEWPORT_SCREENSHOT_INTEGRITY_FAILED: ${screenshot.path}`);
+      }
+      const bytes = new Uint8Array(await readFile(target));
+      if (await sha256Bytes(bytes) !== screenshot.sha256 || !validPngStructure(bytes, screenshot.width, screenshot.height)) {
+        throw new ProductionTurnProtocolError(`VIEWPORT_SCREENSHOT_INTEGRITY_FAILED: ${screenshot.path}`);
+      }
+    }
+  }
+}
+
+async function sha256Bytes(bytes: Uint8Array): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", Uint8Array.from(bytes).buffer);
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function validPngStructure(bytes: Uint8Array, width: number, height: number): boolean {
+  const signature = [137, 80, 78, 71, 13, 10, 26, 10];
+  if (bytes.byteLength < 33 || !signature.every((value, index) => bytes[index] === value)) return false;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (new TextDecoder().decode(bytes.slice(12, 16)) !== "IHDR" || view.getUint32(16) !== width || view.getUint32(20) !== height) return false;
+  let offset = 8;
+  let sawIdat = false;
+  while (offset + 12 <= bytes.byteLength) {
+    const length = view.getUint32(offset);
+    if (length > bytes.byteLength - offset - 12) return false;
+    const type = new TextDecoder().decode(bytes.slice(offset + 4, offset + 8));
+    if (type === "IDAT") sawIdat = true;
+    if (type === "IEND") return sawIdat && length === 0 && offset + 12 === bytes.byteLength;
+    offset += length + 12;
+  }
+  return false;
+}
+
 function completionCandidateTree(state: ProductionAgentState): string {
   const trees = new Set(state.verificationEvidence.filter((item) => item.status === "satisfied" && item.candidateTree).map((item) => item.candidateTree!));
   if (trees.size !== 1) throw new ProductionTurnProtocolError("COMPLETION_EVIDENCE_TREE_MISMATCH: required evidence does not identify one candidate tree.");
@@ -2549,9 +2610,15 @@ function verificationContractError(
   state: ProductionAgentState,
   request: ModelToolRequest,
 ): { code: string; message: string } | null {
-  if (request.name !== "run_shell" || !request.input.verificationRequirementId) return null;
+  if (request.name !== "run_shell" && request.name !== "verify_viewport") return null;
   const proposal = state.approval.currentProposal;
   const requirement = proposal?.verificationRequirements.find((item) => item.id === request.input.verificationRequirementId);
+  if (request.name === "verify_viewport") {
+    if (!proposal || state.approval.approvedProposalDigest !== state.approval.proposalDigest || !requirement || requirement.type !== "viewport") {
+      return { code: "VERIFICATION_REQUIREMENT_INVALID", message: `Verification requirement "${request.input.verificationRequirementId}" is not an approved viewport requirement.` };
+    }
+    return null;
+  }
   if (!proposal || state.approval.approvedProposalDigest !== state.approval.proposalDigest || !requirement || requirement.type !== "command") {
     return { code: "VERIFICATION_REQUIREMENT_INVALID", message: `Verification requirement "${request.input.verificationRequirementId}" is not an approved command requirement.` };
   }
@@ -2563,6 +2630,11 @@ function verificationContractError(
     return { code: "VERIFICATION_CONTRACT_MISMATCH", message: `Verification requirement "${requirement.id}" must use its exact approved command, working directory, and timeout.` };
   }
   return null;
+}
+
+function approvedViewportRequirement(state: ProductionAgentState, requirementId: string) {
+  const requirement = state.approval.currentProposal?.verificationRequirements.find((item) => item.id === requirementId);
+  return requirement?.type === "viewport" ? requirement : undefined;
 }
 
 function failedToolResult(code: string, message: string): NonNullable<ProductionAgentState["lastToolResult"]> {
@@ -2591,7 +2663,7 @@ function toolAuditDraft(
         ? redactedDigest(`${request.input.oldText ?? ""}\u0000${request.input.newText}`)
         : request.name === "git" && request.input.subcommand === "commit"
           ? redactedDigest(request.input.message)
-          : null;
+          : request.name === "verify_viewport" ? redactedDigest(request.input.verificationRequirementId) : null;
   return {
     type: "tool_terminal" as const,
     operationId,
@@ -2607,7 +2679,7 @@ function toolAuditDraft(
       errorCode: typeof metadata.code === "string" ? metadata.code : null,
       exitCode: typeof metadata.exitCode === "number" ? metadata.exitCode : null,
       timedOut: metadata.timedOut === true,
-      verificationRequirementId: request.name === "run_shell" ? request.input.verificationRequirementId ?? null : null,
+      verificationRequirementId: request.name === "run_shell" ? request.input.verificationRequirementId ?? null : request.name === "verify_viewport" ? request.input.verificationRequirementId : null,
       sensitiveArgumentsDigest: sensitiveDigest,
     },
   };
@@ -2620,6 +2692,7 @@ function verificationAuditDraft(
 ) {
   const metadata = result.metadata ?? {};
   const satisfied = result.success && metadata.exitCode === 0 && metadata.timedOut !== true && metadata.gitCleanBefore === true && metadata.gitCleanAfter === true && metadata.gitTreeBefore === metadata.gitTreeAfter;
+  const screenshots = parseViewportManifest(metadata.viewportManifest);
   return {
     type: "verification_updated" as const,
     operationId,
@@ -2629,6 +2702,8 @@ function verificationAuditDraft(
       errorCode: satisfied ? null : verificationFailureCode(result),
       exitCode: typeof result.metadata?.exitCode === "number" ? result.metadata.exitCode : null,
       timedOut: result.metadata?.timedOut === true,
+      screenshotHashes: screenshots.map((item) => item.sha256),
+      screenshotPaths: screenshots.map((item) => item.path),
     },
   };
 }
@@ -2639,7 +2714,7 @@ function withStaleEvidence(
   result: NonNullable<ProductionAgentState["lastToolResult"]>,
 ): ProductionAgentState {
   const metadata = result.metadata ?? {};
-  const verifiedUnchangedTree = request.name === "run_shell" && !!request.input.verificationRequirementId &&
+  const verifiedUnchangedTree = ((request.name === "run_shell" && !!request.input.verificationRequirementId) || request.name === "verify_viewport") &&
     result.success && metadata.exitCode === 0 && metadata.timedOut !== true &&
     metadata.gitCleanBefore === true && metadata.gitCleanAfter === true &&
     metadata.gitCommitBefore === metadata.gitCommitAfter && metadata.gitTreeBefore === metadata.gitTreeAfter;
@@ -2658,7 +2733,9 @@ function installVerificationEvidence(
   result: NonNullable<ProductionAgentState["lastToolResult"]>,
   record: AuditRecord,
 ): void {
-  if (request.name !== "run_shell" || !request.input.verificationRequirementId) return;
+  if (request.name !== "run_shell" && request.name !== "verify_viewport") return;
+  const requirementId = request.input.verificationRequirementId;
+  if (!requirementId) return;
   if (!state.approval.approvedProposalDigest) return;
   const metadata = result.metadata ?? {};
   const commitBefore = typeof metadata.gitCommitBefore === "string" ? metadata.gitCommitBefore : null;
@@ -2667,9 +2744,17 @@ function installVerificationEvidence(
   const treeAfter = typeof metadata.gitTreeAfter === "string" ? metadata.gitTreeAfter : null;
   const exitCode = typeof metadata.exitCode === "number" ? metadata.exitCode : null;
   const timedOut = metadata.timedOut === true;
-  const satisfied = result.success && exitCode === 0 && !timedOut && metadata.gitCleanBefore === true && metadata.gitCleanAfter === true && commitBefore === commitAfter && treeBefore === treeAfter;
+  let satisfied = result.success && exitCode === 0 && !timedOut && metadata.gitCleanBefore === true && metadata.gitCleanAfter === true && commitBefore === commitAfter && treeBefore === treeAfter;
+  let screenshots: NonNullable<ProductionAgentState["verificationEvidence"][number]>["screenshots"] = [];
+  if (request.name === "verify_viewport" && typeof metadata.viewportManifest === "string") {
+    screenshots = parseViewportManifest(metadata.viewportManifest);
+    const requirement = approvedViewportRequirement(state, requirementId);
+    satisfied = satisfied && !!requirement && screenshots.length === requirement.cases.length;
+  } else if (request.name === "verify_viewport") {
+    satisfied = false;
+  }
   const evidence = {
-    requirementId: request.input.verificationRequirementId,
+    requirementId,
     operationId: record.operationId!,
     auditSequence: record.sequence,
     auditRecordDigest: record.digest,
@@ -2677,15 +2762,24 @@ function installVerificationEvidence(
     candidateCommit: commitAfter,
     candidateTree: treeAfter,
     status: satisfied ? "satisfied" as const : "failed" as const,
-    errorCode: satisfied ? null : verificationFailureCode(result),
+    errorCode: satisfied ? null : request.name === "verify_viewport" && screenshots.length === 0 ? "VIEWPORT_SCREENSHOT_MISSING" : verificationFailureCode(result),
     exitCode,
     timedOut,
-    screenshots: [],
+    screenshots,
   };
   state.verificationEvidence = [
     ...state.verificationEvidence.filter((item) => item.requirementId !== evidence.requirementId),
     evidence,
   ];
+}
+
+function parseViewportManifest(value: unknown): NonNullable<ProductionAgentState["verificationEvidence"][number]>["screenshots"] {
+  if (typeof value !== "string") return [];
+  try {
+    return ScreenshotEvidenceSchema.array().max(12).parse(JSON.parse(value));
+  } catch {
+    return [];
+  }
 }
 
 function verificationFailureCode(result: NonNullable<ProductionAgentState["lastToolResult"]>): string {

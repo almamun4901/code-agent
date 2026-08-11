@@ -54,6 +54,7 @@ describe("plan approval schema", () => {
     const viewport = { type: "viewport" as const, id: "viewport", label: "Responsive page", workingDirectory: ".", serverCommand: "bun run dev", port: 3000, cases: [{ route: "/", width: 375, height: 812, requiredVisibleSelectors: ["main"] }] };
     expect(PlanProposalSchema.safeParse({ ...valid, visualDirection: "Responsive application", verificationRequirements: [...valid.verificationRequirements, viewport] }).success).toBe(true);
     expect(protectedProposalDigest(valid)).not.toBe(protectedProposalDigest({ ...valid, verificationRequirements: [{ ...valid.verificationRequirements[0]!, command: "bun test --watch" }] }));
+    expect(PlanProposalSchema.safeParse({ ...valid, visualDirection: "Responsive", verificationRequirements: [{ ...viewport, cases: [{ ...viewport.cases[0]!, route: "https://example.com" }] }] }).success).toBe(false);
   });
 
   test("requires a matching digest while awaiting approval", () => {
@@ -184,6 +185,32 @@ describe("read-only plan discovery", () => {
 });
 
 describe("approval decisions", () => {
+  test("records approved viewport screenshots against the clean candidate tree", async () => {
+    const store = new MemoryProductionCheckpointStore();
+    const visual = viewportProposal();
+    const sessionCalls: string[] = [];
+    await expect(runProductionLoop({
+      canonicalRepoPath: "/tmp/approval-viewport",
+      task: "Verify frontend",
+      runIdentity: "4".repeat(64),
+      approvalMode: "auto",
+      checkpointStore: store,
+      callModel: queue([
+        discoveryTurn("propose_plan", visual),
+        executionTurn([repositoryAction("read", "read_file", { path: "README.md" })]),
+        executionTurn([repositoryAction("viewport", "verify_viewport", { verificationRequirementId: "responsive-page" })]),
+        executionTurn([rewritePlan("state", "Persist approval state.", "completed")]),
+      ]),
+      session: { async call(request: { name: string }) {
+        sessionCalls.push(request.name);
+        if (request.name !== "verify_viewport") return success();
+        return { ...success(), metadata: { ...success().metadata, verificationRequirementId: "responsive-page", viewportManifest: JSON.stringify([{ path: ".agent/evidence/proof.png", sha256: "c".repeat(64), bytes: 100, width: 375, height: 812, route: "/" }]) } };
+      } },
+    })).resolves.toMatchObject({ status: "finalizing" });
+    expect(sessionCalls).toEqual(["read_file", "verify_viewport"]);
+    expect(await store.load()).toMatchObject({ verificationEvidence: [{ requirementId: "responsive-page", status: "satisfied", screenshots: [{ path: ".agent/evidence/proof.png", width: 375, height: 812 }] }] });
+  });
+
   test("rejects checked-off work when approved evidence is missing", async () => {
     const store = new MemoryProductionCheckpointStore();
     await expect(runProductionLoop({
@@ -405,6 +432,16 @@ function proposal() {
     assumptions: ["Approval is local and single-user."],
     unresolvedQuestions: [],
     executionPlan: [{ id: "state", description: "Persist approval state." }],
+  };
+}
+
+function viewportProposal() {
+  const base = proposal();
+  return {
+    ...base,
+    visualDirection: "Responsive application",
+    acceptanceCriteria: [{ ...base.acceptanceCriteria[0]!, verificationRequirementIds: ["responsive-page"] }],
+    verificationRequirements: [{ type: "viewport" as const, id: "responsive-page", label: "Responsive page", workingDirectory: ".", serverCommand: "bun run dev", port: 3000, cases: [{ route: "/", width: 375, height: 812, requiredVisibleSelectors: ["main"] }] }],
   };
 }
 

@@ -11,7 +11,7 @@ import { dirname } from "node:path";
 import { z } from "zod";
 import type { ModelToolRequest, ToolResult } from "./contracts";
 
-const TOOL_NAMES = ["edit_file", "run_shell", "git"] as const;
+const TOOL_NAMES = ["edit_file", "run_shell", "verify_viewport", "git"] as const;
 const TEMP_PREFIX = ".mutation-journal.tmp-";
 
 const toolMetadataValueSchema = z.union([

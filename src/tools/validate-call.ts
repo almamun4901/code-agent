@@ -136,6 +136,10 @@ export function validateToolCall(value: unknown): ModelToolRequest {
       optionalInteger(input, "timeoutMs");
       optionalString(input, "verificationRequirementId");
       break;
+    case "verify_viewport":
+      rejectUnknownKeys(input, ["verificationRequirementId"], "verify_viewport input");
+      requireString(input, "verificationRequirementId", { nonEmpty: true });
+      break;
     case "git":
       if (
         input.subcommand !== "status" &&

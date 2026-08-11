@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { lstat, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,6 +11,8 @@ import {
   REMOTE_MUTATION_JOURNAL_PATH,
   createE2bTaskSession,
   recoverE2bTaskSession,
+  atomicEvidenceWrite,
+  validateViewportPng,
   type E2bSandbox,
   type E2bSandboxFactory,
 } from "../src/sandbox/e2b-session";
@@ -54,6 +57,39 @@ afterEach(async () => {
     ),
   );
 });
+
+describe("viewport screenshot delivery", () => {
+  test("validates PNG structure and writes owner-only evidence outside the worktree result", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "viewport-evidence-"));
+    temporaryRoots.push(root);
+    const png = structuralPng(375, 812);
+    validateViewportPng(png, 375, 812);
+    await atomicEvidenceWrite(root, ".agent/evidence/operation-0.png", png);
+    expect((await lstat(path.join(root, ".agent/evidence/operation-0.png"))).mode & 0o777).toBe(0o600);
+    expect(() => validateViewportPng(png, 1280, 720)).toThrow("dimensions");
+    expect(() => validateViewportPng(png.slice(0, 30), 375, 812)).toThrow();
+  });
+
+  test("rejects symlinked evidence directories and escaped paths", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "viewport-evidence-link-"));
+    const outside = await mkdtemp(path.join(os.tmpdir(), "viewport-outside-"));
+    temporaryRoots.push(root, outside);
+    await mkdir(path.join(root, ".agent"), { mode: 0o700 });
+    await symlink(outside, path.join(root, ".agent/evidence"));
+    await expect(atomicEvidenceWrite(root, ".agent/evidence/proof.png", structuralPng(375, 812))).rejects.toThrow("unsafe viewport evidence directory");
+    await expect(atomicEvidenceWrite(root, "../proof.png", structuralPng(375, 812))).rejects.toThrow("path is invalid");
+  });
+});
+
+function structuralPng(width: number, height: number): Uint8Array {
+  const bytes = new Uint8Array(8 + 25 + 13 + 12);
+  bytes.set([137, 80, 78, 71, 13, 10, 26, 10], 0);
+  const view = new DataView(bytes.buffer);
+  view.setUint32(8, 13); bytes.set(new TextEncoder().encode("IHDR"), 12); view.setUint32(16, width); view.setUint32(20, height); bytes[24] = 8; bytes[25] = 6;
+  let offset = 33; view.setUint32(offset, 1); bytes.set(new TextEncoder().encode("IDAT"), offset + 4); bytes[offset + 8] = 0;
+  offset += 13; view.setUint32(offset, 0); bytes.set(new TextEncoder().encode("IEND"), offset + 4);
+  return bytes;
+}
 
 async function fixture(): Promise<TemporaryRepository> {
   const repository = await createTemporaryRepository();
@@ -236,6 +272,7 @@ class FakeSandbox implements E2bSandbox {
   runCalls = 0;
   resultBundle: Uint8Array | undefined;
   resultSha = "";
+  viewportResult: "success" | "failure" | "tampered" = "success";
 
   async write(remotePath: string, data: string | ArrayBuffer): Promise<void> {
     if (this.writeError) throw this.writeError;
@@ -272,6 +309,22 @@ class FakeSandbox implements E2bSandbox {
         stdout: "",
       };
     }
+    if (command.startsWith("git -C /workspace/tasks/")) {
+      const sha = this.baseSha || "a".repeat(40);
+      return { exitCode: 0, stderr: "", stdout: `${sha}\n${sha}\n` };
+    }
+    if (command.includes("viewport-verifier.ts")) {
+      if (this.viewportResult === "failure") {
+        return { exitCode: 0, stderr: "", stdout: JSON.stringify({ success: false, code: "VIEWPORT_SELECTOR_MISSING" }) };
+      }
+      const input = [...this.writes.keys()].find((item) => item.startsWith("/tmp/agent-viewport-") && item.endsWith(".json"))!;
+      const operationId = input.slice("/tmp/agent-viewport-".length, -".json".length);
+      const file = `/tmp/agent-viewport-${operationId}/case-0.png`;
+      const png = structuralPng(375, 812);
+      this.writes.set(file, Uint8Array.from(png).buffer);
+      return { exitCode: 0, stderr: "", stdout: JSON.stringify({ success: true, screenshots: [{ file, sha256: this.viewportResult === "tampered" ? "f".repeat(64) : createHash("sha256").update(png).digest("hex"), bytes: png.byteLength, width: 375, height: 812, route: "/" }] }) };
+    }
+    if (command.includes("agent-run-shell --cancel")) return { exitCode: 0, stderr: "", stdout: "" };
     if (command.includes("/tmp/terminal-agent-result.bundle")) {
       if (!this.resultBundle || !this.resultSha) {
         return { exitCode: 1, stderr: "missing fake result", stdout: "" };
@@ -422,6 +475,36 @@ async function sessionFixture(options: {
 }
 
 describe("E2B task session", () => {
+  test("delivers approved viewport evidence without exposing browser execution to MCP", async () => {
+    const setup = await sessionFixture();
+    const store = new MemoryE2bSessionRecoveryStore();
+    const session = await setup.create({ recovery: { runIdentity: "viewport-run", store } });
+    const operationId = crypto.randomUUID();
+    const result = await session.call(
+      { name: "verify_viewport", input: { verificationRequirementId: "responsive" } },
+      { operationId, viewportRequirement: { type: "viewport", id: "responsive", label: "Responsive", workingDirectory: ".", serverCommand: "bun run dev", port: 3000, cases: [{ route: "/", width: 375, height: 812, requiredVisibleSelectors: ["main"] }] } },
+    );
+
+    expect(result).toMatchObject({ success: true, metadata: { verificationRequirementId: "responsive", gitCleanBefore: true, gitCleanAfter: true } });
+    expect(setup.client.calls).toHaveLength(0);
+    const artifact = path.join(setup.repository.worktreePath, ".agent/evidence", `${operationId}-0.png`);
+    expect((await stat(artifact)).mode & 0o777).toBe(0o600);
+    await session.close();
+  });
+
+  test("fails closed when viewport screenshot bytes do not match the verifier manifest", async () => {
+    const sandbox = new FakeSandbox();
+    sandbox.viewportResult = "tampered";
+    const setup = await sessionFixture({ sandbox });
+    const session = await setup.create({ recovery: { runIdentity: "viewport-tamper", store: new MemoryE2bSessionRecoveryStore() } });
+    const result = await session.call(
+      { name: "verify_viewport", input: { verificationRequirementId: "responsive" } },
+      { operationId: crypto.randomUUID(), viewportRequirement: { type: "viewport", id: "responsive", label: "Responsive", workingDirectory: ".", serverCommand: "bun run dev", port: 3000, cases: [{ route: "/", width: 375, height: 812, requiredVisibleSelectors: ["main"] }] } },
+    );
+    expect(result).toMatchObject({ success: false, metadata: { code: "VIEWPORT_SCREENSHOT_INTEGRITY_FAILED" } });
+    await session.close();
+  });
+
   test("uploads a bundle, provisions the exact worktree, and closes once", async () => {
     const setup = await sessionFixture();
     const session = await setup.create();

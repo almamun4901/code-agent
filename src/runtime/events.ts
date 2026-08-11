@@ -219,6 +219,9 @@ export function safeToolSummary(request: ModelToolRequest): string {
         safeRepositoryPath(request.input.cwd || ".", true) ?? "repository"
       }`;
       break;
+    case "verify_viewport":
+      summary = `requirement ${request.input.verificationRequirementId}`;
+      break;
     case "git":
       summary =
         request.input.subcommand === "diff" &&

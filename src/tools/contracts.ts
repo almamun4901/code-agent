@@ -37,6 +37,11 @@ export type RunShellInput = {
   verificationRequirementId?: string;
 };
 
+export type VerifyViewportInput = {
+  repoPath: string;
+  verificationRequirementId: string;
+};
+
 export type GitInput =
   | { repoPath: string; subcommand: "status" }
   | {
@@ -58,6 +63,7 @@ export type RootedToolCall =
   | { name: "ripgrep"; input: RipgrepInput }
   | { name: "tree_sitter_symbols"; input: TreeSitterSymbolsInput }
   | { name: "run_shell"; input: RunShellInput }
+  | { name: "verify_viewport"; input: VerifyViewportInput }
   | { name: "git"; input: GitInput };
 
 type WithoutRepoPath<T> = T extends { repoPath: string }
@@ -73,6 +79,7 @@ export type ModelToolRequest =
       input: WithoutRepoPath<TreeSitterSymbolsInput>;
     }
   | { name: "run_shell"; input: WithoutRepoPath<RunShellInput> }
+  | { name: "verify_viewport"; input: WithoutRepoPath<VerifyViewportInput> }
   | { name: "git"; input: WithoutRepoPath<GitInput> };
 
 export type ToolCall = ModelToolRequest;
@@ -82,6 +89,7 @@ export function isMutatingToolCall(call: ModelToolRequest): boolean {
     case "edit_file":
       return call.input.mode === "apply";
     case "run_shell":
+    case "verify_viewport":
       return true;
     case "git":
       return call.input.subcommand === "commit";

@@ -559,6 +559,37 @@ describe("direct versus MCP behavior parity", () => {
 });
 
 describe("MCP stdio lifecycle", () => {
+  test("returns bounded PreToolUse observations outside the tool result", async () => {
+    const repo = await fixture();
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    const server = createMcpToolServer({
+      worktreeRoot: repo.worktreePath,
+      preToolUse: async () => ({ outcome: "allow" }),
+    });
+    await server.connect(serverTransport);
+    const client = await McpToolClient.connect(clientTransport);
+    mcpClients.push(client);
+    const observations: Array<{ index: number; durationMs: number; outcome: string }> = [];
+
+    const result = await client.call({
+      name: "read_file",
+      input: { path: "src/sample.ts" },
+    }, {
+      observePreToolUse(observation) {
+        observations.push(observation);
+      },
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.metadata).not.toHaveProperty("preToolUse");
+    expect(observations.map(({ index, outcome }) => ({ index, outcome }))).toEqual([
+      { index: 0, outcome: "allow" },
+      { index: 1, outcome: "allow" },
+    ]);
+    expect(observations.every(({ durationMs }) => Number.isFinite(durationMs) && durationMs >= 0)).toBe(true);
+  });
+
   test("serializes concurrent tool execution within one server session", async () => {
     const repo = await fixture();
     const [clientTransport, serverTransport] =

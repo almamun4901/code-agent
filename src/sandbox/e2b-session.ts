@@ -510,7 +510,11 @@ class OwnedE2bTaskSession implements E2bTaskSession {
     await this.#recovery.store.save({ ...current, activeMutation });
     const result = request.name === "verify_viewport"
       ? await this.#verifyViewport(request.input.verificationRequirementId, options.viewportRequirement, operationId, options.signal)
-      : await this.client.call(request, { operationId, ...(options.signal ? { signal: options.signal } : {}) });
+      : await this.client.call(request, {
+          operationId,
+          ...(options.observePreToolUse ? { observePreToolUse: options.observePreToolUse } : {}),
+          ...(options.signal ? { signal: options.signal } : {}),
+        });
     await this.#recovery.store.save({
       ...current,
       activeMutation: {

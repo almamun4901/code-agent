@@ -5,6 +5,7 @@ import type {
   DispatcherContext,
   ModelToolRequest,
   ToolResult,
+  PreToolUseObservation,
 } from "../tools/contracts";
 import { isMutatingToolCall } from "../tools/contracts";
 import {
@@ -15,7 +16,10 @@ import {
 } from "../tools/mutation-journal";
 import { dispatchTool } from "../tools/dispatcher";
 import { finalizeToolResult } from "../tools/token-budget";
-import { MUTATION_OPERATION_META_KEY } from "./client";
+import {
+  MUTATION_OPERATION_META_KEY,
+  PRE_TOOL_USE_OBSERVATIONS_META_KEY,
+} from "./client";
 import {
   editFileInputSchema,
   gitInputSchema,
@@ -39,10 +43,16 @@ const mutatingAnnotations: ToolAnnotations = {
   openWorldHint: false,
 };
 
-function toMcpResult(result: ToolResult): CallToolResult {
+function toMcpResult(
+  result: ToolResult,
+  observations: PreToolUseObservation[] = [],
+): CallToolResult {
   return {
     content: [{ type: "text", text: JSON.stringify(result) }],
     isError: !result.success,
+    ...(observations.length > 0
+      ? { _meta: { [PRE_TOOL_USE_OBSERVATIONS_META_KEY]: observations } }
+      : {}),
   };
 }
 
@@ -83,12 +93,22 @@ export function createMcpToolServer(
     signal: AbortSignal,
   ): Promise<CallToolResult> {
     return executionQueue.run(async () => {
+      const observations: PreToolUseObservation[] = [];
+      const finish = (result: ToolResult) => toMcpResult(result, observations);
       const requestContext = {
         ...dispatchContext,
         abortSignal: signal,
+        observePreToolUse(observation: PreToolUseObservation) {
+          observations.push(observation);
+          try {
+            dispatchContext.observePreToolUse?.(observation);
+          } catch {
+            // Observation is best-effort and cannot alter tool execution.
+          }
+        },
       };
       if (!isMutatingToolCall(request)) {
-        return toMcpResult(await dispatchTool(request, requestContext));
+        return finish(await dispatchTool(request, requestContext));
       }
 
       const operationId = meta?.[MUTATION_OPERATION_META_KEY];
@@ -96,7 +116,7 @@ export function createMcpToolServer(
         typeof operationId !== "string" ||
         !z.string().uuid().safeParse(operationId).success
       ) {
-        return toMcpResult(
+        return finish(
           finalizeToolResult(
             false,
             {
@@ -118,9 +138,9 @@ export function createMcpToolServer(
       );
       if (existing) {
         if (existing.status === "completed" && existing.result) {
-          return toMcpResult(existing.result);
+          return finish(existing.result);
         }
-        return toMcpResult(
+        return finish(
           finalizeToolResult(
             false,
             {
@@ -137,7 +157,7 @@ export function createMcpToolServer(
 
       const result = await dispatchTool(request, requestContext);
       await completeMutation(mutationJournal, operationId, result);
-      return toMcpResult(result);
+      return finish(result);
     });
   }
 

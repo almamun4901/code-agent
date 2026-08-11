@@ -21,7 +21,7 @@ import {
 import type { E2bTaskSession } from "../sandbox/e2b-session";
 import type { MutationRecord } from "../tools/mutation-journal";
 import { toolResultWireSchema } from "../mcp/schemas";
-import type { ModelToolRequest } from "../tools/contracts";
+import type { ModelToolRequest, PreToolUseObservation } from "../tools/contracts";
 import { isMutatingToolCall } from "../tools/contracts";
 import { validateToolCall } from "../tools/validate-call";
 import { FileProductionCheckpointStore, type ProductionCheckpointStore } from "./checkpoint";
@@ -72,6 +72,7 @@ import {
   type AuditRecord,
 } from "./audit";
 import { revalidateViewportEvidenceFiles } from "./evidence-files";
+import { noOpTelemetry, type RunTelemetry } from "./telemetry";
 
 const MAX_PLAN_TASKS = 20;
 
@@ -106,6 +107,7 @@ export type ProductionLoopOptions = {
   approvalMode?: ApprovalMode;
   requestApproval?: RequestPlanApproval;
   auditJournal?: AuditJournal;
+  telemetry?: RunTelemetry;
 };
 
 const memoryAuditJournals = new WeakMap<object, MemoryAuditJournal>();
@@ -444,6 +446,7 @@ export async function prepareProductionLifecycle(options: {
   budgetLimits?: Partial<BudgetLimits>;
   onSessionStart?: () => void;
   approvalMode?: ApprovalMode;
+  telemetry?: RunTelemetry;
 }): Promise<ProductionAgentState> {
   const existing = await options.checkpointStore.load();
   const limits = { ...DEFAULT_BUDGET_LIMITS, ...(options.budgetLimits ?? {}) };
@@ -462,7 +465,7 @@ export async function prepareProductionLifecycle(options: {
         lifecycle: state.lifecycle,
         plan: state.plan,
         budget: budgetSnapshot(state),
-      });
+      }, options.telemetry);
     } catch (error) {
       if (existing && existing.lifecycle !== "running") throw error;
       state = {
@@ -478,7 +481,7 @@ export async function prepareProductionLifecycle(options: {
   if (state.promptStatus === "pending") {
     try {
       const promptResult = options.hooks
-        ? await options.hooks.runGating("UserPromptSubmit", { runIdentity: state.runIdentity, task: state.task })
+        ? await options.hooks.runGating("UserPromptSubmit", { runIdentity: state.runIdentity, task: state.task }, options.telemetry)
         : { appendedContext: "" };
       state = {
         ...state,
@@ -514,6 +517,7 @@ export async function commitReconciledProductionMutation(options: {
   mutation: MutationRecord;
   hooks?: LifecycleHooks;
   events?: AgentEventPublisher;
+  telemetry?: RunTelemetry;
 }): Promise<boolean> {
   const state = await options.checkpointStore.load();
   if (
@@ -534,6 +538,7 @@ export async function commitReconciledProductionMutation(options: {
     checkpointStore: options.checkpointStore,
     hooks: options.hooks,
     events: options.events,
+    telemetry: options.telemetry,
     ...(options.auditJournal ? { auditJournal: options.auditJournal } : {}),
   });
   return true;
@@ -685,7 +690,7 @@ async function maybeCompactDiscovery(
         contextTokens: estimate.tokens,
         checkpointBytes,
         compactionNumber: state.approval.discoveryCompactions + 1,
-      })
+      }, options.telemetry)
     : { appendedContext: "" };
   const observations = state.approval.discoveryTranscript
     .filter((message) => message.role === "user" && Array.isArray(message.content))
@@ -789,7 +794,26 @@ async function commitPendingDiscoveryTurn(
     options.events?.emit({ type: "tool_started", operationId: pending.action.operationId, toolName: request.name, summary: safeToolSummary(request) });
     let result;
     try {
-      result = await options.session.call(request, { operationId: pending.action.operationId, ...(options.signal ? { signal: options.signal } : {}) });
+      const telemetry = options.telemetry ?? noOpTelemetry;
+      result = await telemetry.withSpan("execute_tool", {
+        "gen_ai.operation.name": "execute_tool",
+        "gen_ai.tool.name": request.name,
+        "gen_ai.tool.call.id": pending.action.operationId,
+      }, async (span) => {
+        const toolResult = await options.session.call(request, {
+          operationId: pending.action!.operationId,
+          observePreToolUse: (observation) => recordRemotePreToolUse(telemetry, observation),
+          ...(options.signal ? { signal: options.signal } : {}),
+        });
+        span.setAttributes({
+          "agent.tool.success": toolResult.success,
+          "agent.tool.outcome": toolOutcome(toolResult),
+          ...(typeof toolResult.metadata?.code === "string"
+            ? { "error.type": toolResult.metadata.code }
+            : {}),
+        });
+        return toolResult;
+      }, { kind: "client" });
       discoveryDurationMs = Math.max(0, now() - startedAt);
       options.events?.emit({ type: "tool_finished", operationId: pending.action.operationId, durationMs: discoveryDurationMs, outcome: toolOutcome(result) });
     } catch (error) {
@@ -1086,7 +1110,24 @@ async function reserveAndCall(
 
   let turn: ModelTurn;
   try {
-    turn = await runtime.call(request, options.signal ? { signal: options.signal } : undefined);
+    const telemetry = options.telemetry ?? noOpTelemetry;
+    turn = await telemetry.withSpan("chat", {
+      "gen_ai.operation.name": "chat",
+      "gen_ai.provider.name": runtime.identity.provider,
+      "gen_ai.request.model": runtime.identity.model,
+      "agent.model.call.kind": kind,
+    }, async (span) => {
+      const response = await runtime.call(
+        request,
+        options.signal ? { signal: options.signal } : undefined,
+      );
+      span.setAttributes({
+        "gen_ai.response.model": response.actualIdentity?.model ?? runtime.identity.model,
+        "gen_ai.usage.input_tokens": response.usage.inputTokens,
+        "gen_ai.usage.output_tokens": response.usage.outputTokens,
+      });
+      return response;
+    }, { kind: "client" });
   } catch (error) {
     // The persisted reservation deliberately remains ambiguous across provider errors.
     throw error;
@@ -1199,7 +1240,7 @@ async function maybeCompact(
           contextTokens: estimate.tokens,
           checkpointBytes,
           compactionNumber: state.compaction.count + 1,
-        })
+        }, options.telemetry)
       : { appendedContext: "" };
   } catch (error) {
     await failState(
@@ -1382,7 +1423,7 @@ async function notify(state: ProductionAgentState, options: ProductionLoopOption
   message: string;
 }): Promise<void> {
   if (options.hooks) {
-    const warnings = await options.hooks.runObservers("Notification", context as never);
+    const warnings = await options.hooks.runObservers("Notification", context as never, options.telemetry);
     for (const warning of warnings) {
       options.events?.emit({
         type: "notification",
@@ -1454,6 +1495,7 @@ async function commitPendingTurn(
     const request = validateToolCall(pending.action.request);
     postToolName = request.name;
     postToolSummary = safeToolSummary(request);
+    const operationId = pending.action.operationId;
     const now = options.now ?? (() => performance.now());
     const startedAt = now();
     options.events?.emit({
@@ -1464,14 +1506,30 @@ async function commitPendingTurn(
     });
     let rawResult;
     try {
-      const contractError = verificationContractError(state, request);
-      rawResult = contractError
-        ? failedToolResult(contractError.code, contractError.message)
-        : await options.session.call(request, {
-            operationId: pending.action.operationId,
-            ...(request.name === "verify_viewport" ? { viewportRequirement: approvedViewportRequirement(state, request.input.verificationRequirementId) } : {}),
-            ...(options.signal ? { signal: options.signal } : {}),
-          });
+      const telemetry = options.telemetry ?? noOpTelemetry;
+      rawResult = await telemetry.withSpan("execute_tool", {
+        "gen_ai.operation.name": "execute_tool",
+        "gen_ai.tool.name": request.name,
+        "gen_ai.tool.call.id": operationId,
+      }, async (span) => {
+        const contractError = verificationContractError(state, request);
+        const result = contractError
+          ? failedToolResult(contractError.code, contractError.message)
+          : await options.session.call(request, {
+              operationId,
+              observePreToolUse: (observation) => recordRemotePreToolUse(telemetry, observation),
+              ...(request.name === "verify_viewport" ? { viewportRequirement: approvedViewportRequirement(state, request.input.verificationRequirementId) } : {}),
+              ...(options.signal ? { signal: options.signal } : {}),
+            });
+        span.setAttributes({
+          "agent.tool.success": result.success,
+          "agent.tool.outcome": toolOutcome(result),
+          ...(typeof result.metadata?.code === "string"
+            ? { "error.type": result.metadata.code }
+            : {}),
+        });
+        return result;
+      }, { kind: "client" });
       toolDurationMs = Math.max(0, now() - startedAt);
       options.events?.emit({
         type: "tool_finished",
@@ -1494,7 +1552,7 @@ async function commitPendingTurn(
           summary: safeToolSummary(request),
           durationMs: Math.max(0, now() - startedAt),
           outcome,
-        });
+        }, options.telemetry);
       }
       throw error;
     }
@@ -1579,7 +1637,7 @@ async function commitPendingTurn(
         runIdentity: state.runIdentity,
         proposedPlan: pending.plan,
         budget: budgetSnapshot(state),
-      });
+      }, options.telemetry);
     } catch (error) {
       if (error instanceof LifecycleHookError && !error.code.startsWith("HOOK_")) {
         const rejected: ProductionAgentState = {
@@ -1708,7 +1766,7 @@ async function commitPendingTurn(
       summary: postToolSummary,
       durationMs: toolDurationMs,
       outcome: lastToolResult ? toolOutcome(lastToolResult) : "failed",
-    });
+    }, options.telemetry);
     for (const warning of warnings) {
       options.events?.emit({ type: "notification", notification: { kind: "warning", code: warning.code, title: `${warning.hook} warning`, message: warning.message } });
     }
@@ -1718,6 +1776,24 @@ async function commitPendingTurn(
     plan: next.plan,
   });
   return next;
+}
+
+function recordRemotePreToolUse(
+  telemetry: RunTelemetry,
+  observation: PreToolUseObservation,
+): void {
+  telemetry.recordCompletedSpan({
+    name: "execute_hook",
+    durationMs: observation.durationMs,
+    outcome: observation.outcome === "allow" ? "ok" : observation.outcome === "cancelled" ? "cancelled" : "error",
+    attributes: {
+      "gen_ai.operation.name": "execute_hook",
+      "agent.hook.name": "PreToolUse",
+      "agent.hook.index": observation.index,
+      "agent.hook.duration_ms": observation.durationMs,
+      "agent.hook.outcome": observation.outcome,
+    },
+  });
 }
 
 function isAbortError(error: unknown): boolean {

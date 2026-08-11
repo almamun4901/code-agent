@@ -133,6 +133,12 @@ export type PreToolUse = (
   context: PreToolUseContext,
 ) => Promise<PreToolUseDecision>;
 
+export type PreToolUseObservation = {
+  index: number;
+  durationMs: number;
+  outcome: "allow" | "deny" | "failed" | "cancelled";
+};
+
 export type ToolExecutionQueue = {
   run<T>(operation: () => Promise<T>): Promise<T>;
 };
@@ -140,6 +146,7 @@ export type ToolExecutionQueue = {
 export type DispatcherContext = PreToolUseContext & {
   abortSignal?: AbortSignal;
   preToolUse?: PreToolUse;
+  observePreToolUse?: (observation: PreToolUseObservation) => void;
   executionQueue?: ToolExecutionQueue;
   tokenLimit?: number;
   tokenCodec?: TokenCodec;

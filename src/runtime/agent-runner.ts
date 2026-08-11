@@ -46,6 +46,11 @@ import {
   type AgentEventSink,
 } from "./events";
 import type { AuditJournal } from "./audit";
+import {
+  createRunTelemetryFromEnvironment,
+  type RunTelemetry,
+  type TelemetryOutcome,
+} from "./telemetry";
 
 const MAX_TASK_BYTES = 32 * 1024;
 const SESSION_END_TIMEOUT_MS = 5_000;
@@ -74,6 +79,7 @@ type AgentRunBaseOptions = {
   sessionRecoveryStore?: E2bSessionRecoveryStore;
   resultDeliveryStore?: ResultDeliveryStore;
   auditJournal?: AuditJournal;
+  telemetry?: RunTelemetry;
   openSession?: (context: {
     prepared: PreparedAgentRun;
     recoveryStore: E2bSessionRecoveryStore;
@@ -183,6 +189,11 @@ export async function prepareAgentRun(
 export async function runHeadlessAgent(
   options: HeadlessAgentRunOptions,
 ): Promise<ProductionLoopResult> {
+  const telemetry = options.telemetry ?? createRunTelemetryFromEnvironment();
+  telemetry.startRun({
+    "agent.run.approval_mode": options.approvalMode,
+  });
+  let telemetryOutcome: TelemetryOutcome = "error";
   const events = createAgentEventPublisher(options.eventSink);
   let started = false;
   let hooksStarted = false;
@@ -193,7 +204,7 @@ export async function runHeadlessAgent(
     if (started) events.emit({ type: "shutdown_started", reason });
   };
   const execution = await executeAgentRun(
-    options,
+    { ...options, telemetry },
     events,
     (event) => {
       if (event === "run_started") started = true;
@@ -214,7 +225,7 @@ export async function runHeadlessAgent(
         reason,
         cleanup: execution.cleanupError ? "failed" : "succeeded",
         ...((execution.runError || execution.cleanupError) ? { error: safeError(execution.runError ?? execution.cleanupError, [options.task, options.repoPath]) } : {}),
-      });
+      }, telemetry);
     } catch (error) {
       execution.cleanupError = execution.cleanupError
         ? new AggregateError([execution.cleanupError, error], "Cleanup and SessionEnd failed.")
@@ -239,20 +250,31 @@ export async function runHeadlessAgent(
       }),
     });
   }
-  if (execution.runError && execution.cleanupError) {
-    throw new AggregateError(
-      [execution.runError, execution.cleanupError],
-      "Agent run and sandbox cleanup both failed.",
-    );
+  try {
+    if (execution.runError && execution.cleanupError) {
+      throw new AggregateError(
+        [execution.runError, execution.cleanupError],
+        "Agent run and sandbox cleanup both failed.",
+      );
+    }
+    if (execution.runError) throw execution.runError;
+    if (execution.cleanupError) throw execution.cleanupError;
+    telemetryOutcome = "ok";
+    return execution.result!;
+  } finally {
+    if (options.signal?.aborted) telemetryOutcome = "cancelled";
+    await telemetry.finishRun(telemetryOutcome);
   }
-  if (execution.runError) throw execution.runError;
-  if (execution.cleanupError) throw execution.cleanupError;
-  return execution.result!;
 }
 
 export function startAgentRun(
   options: ControlledAgentRunOptions,
 ): AgentRunController {
+  const telemetry = options.telemetry ?? createRunTelemetryFromEnvironment();
+  telemetry.startRun({
+    "agent.run.approval_mode": options.approvalMode,
+  });
+  let telemetryOutcome: TelemetryOutcome = "error";
   const abortController = new AbortController();
   const approvalBroker = createApprovalBroker();
   const events = createAgentEventPublisher(options.eventSink);
@@ -287,6 +309,7 @@ export function startAgentRun(
   const executionPromise = executeAgentRun(
     {
       ...options,
+      telemetry,
       signal: abortController.signal,
       eventSink: undefined,
       requestApproval: options.requestApproval ?? (
@@ -348,7 +371,7 @@ export function startAgentRun(
     }
     if (hooksStarted && options.hooks) {
       try {
-        await options.hooks.runSessionEnd(context);
+        await options.hooks.runSessionEnd(context, telemetry);
       } catch (error) {
         cleanup = "failed";
         context.cleanup = "failed";
@@ -371,6 +394,11 @@ export function startAgentRun(
       };
     }
 
+    telemetryOutcome = reason === "completed"
+      ? "ok"
+      : reason === "cancelled"
+        ? "cancelled"
+        : "error";
     return finishResult(
       events,
       context,
@@ -379,8 +407,9 @@ export function startAgentRun(
     );
   });
 
-  const result = normalResult.finally(() => {
+  const result = normalResult.finally(async () => {
     options.signal?.removeEventListener("abort", linkedAbort);
+    await telemetry.finishRun(telemetryOutcome);
   });
 
   return {
@@ -468,6 +497,7 @@ async function executeAgentRun(
     runIdentity: prepared.runIdentity,
   });
   lifecycleEvent("run_started");
+  options.telemetry?.startRun({ "agent.run.id": prepared.runIdentity });
   if (options.signal?.aborted) {
     beginShutdown("cancelled");
     return { runError: abortError(options.signal.reason) };
@@ -528,6 +558,7 @@ async function executeAgentRun(
       checkpointStore,
       modelRuntime,
       hooks: options.hooks,
+      telemetry: options.telemetry,
       approvalMode,
       onSessionStart: () => lifecycleEvent("hooks_started"),
       ...(options.maxModelTurns === undefined ? {} : { budgetLimits: { maxModelCalls: options.maxModelTurns } }),
@@ -555,6 +586,7 @@ async function executeAgentRun(
         signal: options.signal,
         events,
         hooks: options.hooks,
+        telemetry: options.telemetry,
         approvalMode,
         requestApproval: options.requestApproval,
         ...(auditJournal ? { auditJournal } : {}),
@@ -606,6 +638,7 @@ async function executeAgentRun(
         signal: options.signal,
         events,
         hooks: options.hooks,
+        telemetry: options.telemetry,
         approvalMode,
         requestApproval: options.requestApproval,
         ...(auditJournal ? { auditJournal } : {}),
@@ -628,6 +661,7 @@ async function executeAgentRun(
           checkpointStore,
           mutation,
           hooks: options.hooks,
+          telemetry: options.telemetry,
           events,
           ...(auditJournal ? { auditJournal } : {}),
         });

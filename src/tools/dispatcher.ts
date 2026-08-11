@@ -4,6 +4,8 @@ import type {
   RawToolResult,
   RootedToolCall,
   ToolResult,
+  PreToolUse,
+  PreToolUseObservation,
 } from "./contracts";
 import { editFileTool } from "./edit-file";
 import { ToolExecutionError } from "./errors";
@@ -61,15 +63,9 @@ async function evaluatePolicy(
 ): Promise<void> {
   let decision;
   try {
-    decision = await defaultPreToolUse(request, {
-      worktreeRoot: context.worktreeRoot,
-      abortSignal: context.abortSignal,
-    });
+    decision = await evaluateOnePolicy(defaultPreToolUse, 0, request, context);
     if (decision.outcome === "allow" && context.preToolUse) {
-      decision = await context.preToolUse(request, {
-        worktreeRoot: context.worktreeRoot,
-        abortSignal: context.abortSignal,
-      });
+      decision = await evaluateOnePolicy(context.preToolUse, 1, request, context);
     }
   } catch (error) {
     if (
@@ -103,6 +99,40 @@ async function evaluatePolicy(
     );
   }
   throw new PolicyDeniedError(decision.reason, decision.code);
+}
+
+async function evaluateOnePolicy(
+  policy: PreToolUse,
+  index: number,
+  request: ModelToolRequest,
+  context: DispatcherContext,
+): Promise<Awaited<ReturnType<PreToolUse>>> {
+  const startedAt = performance.now();
+  let outcome: PreToolUseObservation["outcome"] = "failed";
+  try {
+    const decision = await policy(request, {
+      worktreeRoot: context.worktreeRoot,
+      abortSignal: context.abortSignal,
+    });
+    outcome = decision.outcome === "deny" ? "deny" : "allow";
+    return decision;
+  } catch (error) {
+    outcome = context.abortSignal?.aborted ||
+      (error instanceof Error && error.name === "AbortError")
+      ? "cancelled"
+      : "failed";
+    throw error;
+  } finally {
+    try {
+      context.observePreToolUse?.({
+        index,
+        durationMs: Math.max(0, performance.now() - startedAt),
+        outcome,
+      });
+    } catch {
+      // Telemetry transport cannot alter policy or tool behavior.
+    }
+  }
 }
 
 async function dispatchValidated(

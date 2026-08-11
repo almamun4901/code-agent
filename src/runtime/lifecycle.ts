@@ -1,6 +1,7 @@
 import type { TodoItem } from "../plan/schema";
 import type { ModelToolRequest } from "../tools/contracts";
 import type { ToolOutcome } from "./events";
+import { noOpTelemetry, type RunTelemetry } from "./telemetry";
 
 export const HOOK_TIMEOUT_MS = 5_000;
 export const MAX_HOOKS_PER_NAME = 16;
@@ -147,10 +148,11 @@ export class LifecycleHooks {
   async runGating<K extends "SessionStart" | "UserPromptSubmit" | "Stop" | "PreCompact">(
     name: K,
     context: HostHookContextMap[K],
+    telemetry: RunTelemetry = noOpTelemetry,
   ): Promise<{ results: HostHookResultMap[K][]; appendedContext: string }> {
     const results: HostHookResultMap[K][] = [];
     const additions: string[] = [];
-    await this.#runPhase(name, context, async (hook, signal, snapshot) => {
+    await this.#runPhase(name, context, telemetry, async (hook, signal, snapshot) => {
       const result = await hook(snapshot as never, signal) as HostHookResultMap[K];
       validateGatingResult(name, result);
       if (result && typeof result === "object" && "outcome" in result && result.outcome === "deny") {
@@ -170,6 +172,7 @@ export class LifecycleHooks {
   async runObservers<K extends "PostToolUse" | "Notification">(
     name: K,
     context: HostHookContextMap[K],
+    telemetry: RunTelemetry = noOpTelemetry,
   ): Promise<HookWarning[]> {
     const warnings: HookWarning[] = [];
     const hooks = this.#hooks.get(name) ?? [];
@@ -177,13 +180,13 @@ export class LifecycleHooks {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort("HOOK_TIMEOUT"), this.#timeoutMs);
     try {
-      for (const hook of hooks) {
+      for (const [index, hook] of hooks.entries()) {
         if (warnings.length >= MAX_HOOKS_PER_NAME) break;
         try {
-          await Promise.race([
+          await invokeHook(telemetry, name, index, () => Promise.race([
             hook(snapshot as never, controller.signal),
             abortPromise(controller.signal),
-          ]);
+          ]));
         } catch (error) {
           warnings.push(controller.signal.aborted
             ? { hook: name, code: "HOOK_TIMEOUT", message: `${name} hook phase timed out.` }
@@ -196,8 +199,11 @@ export class LifecycleHooks {
     return warnings;
   }
 
-  async runSessionEnd(context: SessionEndHookContext): Promise<void> {
-    await this.#runPhase("SessionEnd", context, async (hook, signal, snapshot) => {
+  async runSessionEnd(
+    context: SessionEndHookContext,
+    telemetry: RunTelemetry = noOpTelemetry,
+  ): Promise<void> {
+    await this.#runPhase("SessionEnd", context, telemetry, async (hook, signal, snapshot) => {
       await hook(snapshot, signal);
     });
   }
@@ -205,6 +211,7 @@ export class LifecycleHooks {
   async #runPhase<K extends HostHookName>(
     name: K,
     context: HostHookContextMap[K],
+    telemetry: RunTelemetry,
     invoke: (hook: HostHook<HostHookName>, signal: AbortSignal, snapshot: Readonly<HostHookContextMap[K]>) => Promise<void>,
   ): Promise<void> {
     const hooks = this.#hooks.get(name) ?? [];
@@ -213,12 +220,12 @@ export class LifecycleHooks {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort("HOOK_TIMEOUT"), this.#timeoutMs);
     try {
-      for (const hook of hooks) {
+      for (const [index, hook] of hooks.entries()) {
         try {
-          await Promise.race([
+          await invokeHook(telemetry, name, index, () => Promise.race([
             invoke(hook, controller.signal, snapshot),
             abortPromise(controller.signal),
-          ]);
+          ]));
         } catch (error) {
           if (controller.signal.aborted) {
             throw new LifecycleHookError(name, "HOOK_TIMEOUT", `${name} hook phase timed out.`);
@@ -231,6 +238,34 @@ export class LifecycleHooks {
       clearTimeout(timeout);
     }
   }
+}
+
+async function invokeHook<T>(
+  telemetry: RunTelemetry,
+  name: HostHookName,
+  index: number,
+  operation: () => Promise<T> | T,
+): Promise<T> {
+  return telemetry.withSpan("execute_hook", {
+    "gen_ai.operation.name": "execute_hook",
+    "agent.hook.name": name,
+    "agent.hook.index": index,
+  }, async (span) => {
+    try {
+      const result = await operation();
+      span.setAttributes({ "agent.hook.outcome": "ok" });
+      return result;
+    } catch (error) {
+      span.setAttributes({
+        "agent.hook.outcome": isAbortError(error) ? "cancelled" : "error",
+      });
+      throw error;
+    }
+  });
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
 }
 
 function validateGatingResult(name: HostHookName, result: unknown): void {

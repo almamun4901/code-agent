@@ -7,6 +7,7 @@ import {
 import {
   isMutatingToolCall,
   type ModelToolRequest,
+  type PreToolUseObservation,
   type ToolResult,
 } from "../tools/contracts";
 import { toolResultWireSchema } from "./schemas";
@@ -14,10 +15,13 @@ import { toolResultWireSchema } from "./schemas";
 const MCP_TOOL_TIMEOUT_MS = 60_000;
 export const MUTATION_OPERATION_META_KEY =
   "terminal-native-coding-agent/operation-id";
+export const PRE_TOOL_USE_OBSERVATIONS_META_KEY =
+  "terminal-native-coding-agent/pre-tool-use-observations";
 
 export type McpToolCallOptions = {
   operationId?: string;
   signal?: AbortSignal;
+  observePreToolUse?: (observation: PreToolUseObservation) => void;
 };
 
 export class McpResultValidationError extends Error {
@@ -101,6 +105,23 @@ export class McpToolClient {
       );
     }
 
+    const observations = result._meta?.[PRE_TOOL_USE_OBSERVATIONS_META_KEY];
+    if (observations !== undefined) {
+      if (!Array.isArray(observations)) {
+        throw new McpResultValidationError("MCP PreToolUse observations must be an array.");
+      }
+      for (const observation of observations) {
+        if (!isPreToolUseObservation(observation)) {
+          throw new McpResultValidationError("MCP PreToolUse observation is invalid.");
+        }
+        try {
+          options.observePreToolUse?.(observation);
+        } catch {
+          // Telemetry projection failures never change the tool result.
+        }
+      }
+    }
+
     return parsed.data;
   }
 
@@ -114,4 +135,13 @@ export class McpToolClient {
       throw new McpResultValidationError("MCP tool client is closed.");
     }
   }
+}
+
+function isPreToolUseObservation(value: unknown): value is PreToolUseObservation {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const observation = value as Record<string, unknown>;
+  return Object.keys(observation).length === 3 &&
+    Number.isInteger(observation.index) && Number(observation.index) >= 0 &&
+    typeof observation.durationMs === "number" && Number.isFinite(observation.durationMs) && observation.durationMs >= 0 &&
+    (observation.outcome === "allow" || observation.outcome === "deny" || observation.outcome === "failed" || observation.outcome === "cancelled");
 }

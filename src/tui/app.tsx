@@ -16,7 +16,16 @@ export function AgentApp({ state, width, onApprovalDecision }: AgentAppProps) {
   const terminalWidth = useTerminalWidth(width);
   const now = useElapsedClock(state.tools.some((tool) => !tool.outcome));
   const plan = <PlanPane plan={state.plan} />;
-  const tools = <ToolPane tools={state.tools} now={now} />;
+  const [selectedTool, setSelectedTool] = useState(0);
+  const [showToolDetail, setShowToolDetail] = useState(false);
+  useEffect(() => setSelectedTool(Math.max(0, state.tools.length - 1)), [state.tools.length]);
+  useInput((input, key) => {
+    if (state.approval || state.tools.length === 0) return;
+    if (input === "j" || key.downArrow) setSelectedTool((value) => Math.min(state.tools.length - 1, value + 1));
+    if (input === "k" || key.upArrow) setSelectedTool((value) => Math.max(0, value - 1));
+    if (input === "d" || key.return) setShowToolDetail((value) => !value);
+  }, { isActive: !state.approval });
+  const tools = <ToolPane tools={state.tools} now={now} selected={selectedTool} showDetail={showToolDetail} />;
   const budget = <BudgetPane state={state} />;
 
   if (state.approval) {
@@ -146,9 +155,13 @@ function PlanPane({ plan }: { plan: TodoItem[] }) {
 function ToolPane({
   tools,
   now,
+  selected,
+  showDetail,
 }: {
   tools: ToolActivity[];
   now: number;
+  selected: number;
+  showDetail: boolean;
 }) {
   const recent = tools.slice(-8);
   const latestFailure = [...tools].reverse().find(
@@ -173,13 +186,17 @@ function ToolPane({
                 key={tool.operationId}
                 color={toolColor(tool.outcome)}
               >
-                {toolIcon(tool.outcome)} {tool.toolName} ·{" "}
+                {tools[selected]?.operationId === tool.operationId ? ">" : " "} {toolIcon(tool.outcome)} {tool.toolName} ·{" "}
                 {sanitizeTerminalText(tool.summary)} ·{" "}
                 {tool.outcome ?? "active"} ·{" "}
                 {formatDuration(elapsed)}
               </Text>
             );
           })}
+      {showDetail && tools[selected]
+        ? <Text dimColor>{toolDetail(tools[selected]!)}</Text>
+        : null}
+      {tools.length > 0 ? <Text dimColor>j/k select · d details</Text> : null}
     </Pane>
   );
 }
@@ -191,6 +208,9 @@ function BudgetPane({ state }: { state: TuiState }) {
         Status: {statusLabel(state.status)}
         {state.cleanup ? ` · cleanup ${state.cleanup}` : ""}
       </Text>
+      <Text>Evidence {Object.values(state.evidence.statuses).filter((status) => status === "satisfied").length} / {state.evidence.total}</Text>
+      {state.evidence.latestProblem ? <Text color="yellow">Latest evidence: {sanitizeTerminalText(state.evidence.latestProblem)}</Text> : null}
+      {state.evidence.deliveredCommit ? <Text>Delivered {state.evidence.deliveredCommit.slice(0, 12)} · completion {state.evidence.completed ? "verified" : "pending"}</Text> : null}
       <Text>
         Model calls {state.usage.modelCalls} / {state.usage.maxModelCalls}
       </Text>
@@ -308,6 +328,20 @@ function formatDuration(durationMs: number): string {
   return durationMs < 1_000
     ? `${Math.round(durationMs)}ms`
     : `${(durationMs / 1_000).toFixed(1)}s`;
+}
+
+function toolDetail(tool: ToolActivity): string {
+  const detail = tool.detail;
+  return sanitizeTerminalText([
+    `operation ${tool.operationId}`,
+    tool.auditSequence ? `audit ${tool.auditSequence}` : "audit pending",
+    `duration ${formatDuration(tool.durationMs ?? 0)}`,
+    `outcome ${tool.outcome ?? "active"}`,
+    detail?.errorCode ? `error ${detail.errorCode}` : "",
+    detail?.exitCode !== null && detail?.exitCode !== undefined ? `exit ${detail.exitCode}` : "",
+    detail?.timedOut ? "timed out" : "",
+    detail?.outputDigest ? `output ${detail.outputDigest}` : "",
+  ].filter(Boolean).join(" · "));
 }
 
 function statusLabel(status: TuiState["status"]): string {

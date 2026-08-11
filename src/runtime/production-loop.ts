@@ -9,8 +9,6 @@ import type {
   ToolResultBlock,
   ToolUseBlock,
 } from "../model/contracts";
-import { lstat, readFile } from "node:fs/promises";
-import path from "node:path";
 import {
   catalogCostMicroUsd,
   createInjectedModelRuntime,
@@ -29,6 +27,7 @@ import { validateToolCall } from "../tools/validate-call";
 import { FileProductionCheckpointStore, type ProductionCheckpointStore } from "./checkpoint";
 import {
   type AgentEventPublisher,
+  type AgentEventInput,
   safeToolSummary,
   toolOutcome,
   usageFromCounters,
@@ -72,6 +71,7 @@ import {
   type AuditJournal,
   type AuditRecord,
 } from "./audit";
+import { revalidateViewportEvidenceFiles } from "./evidence-files";
 
 const MAX_PLAN_TASKS = 20;
 
@@ -324,6 +324,7 @@ export async function runProductionLoop(
     lifecycle: state.lifecycle,
     plan: state.plan,
     usage: usageFromCounters(state.counters, state),
+    evidence: eventEvidenceSummary(state),
   });
 
   if (state.lifecycle === "failed") {
@@ -841,7 +842,7 @@ async function commitPendingDiscoveryTurn(
       [toolAuditDraft(pending.action.operationId, request, committedDiscoveryResult, discoveryDurationMs)],
     );
     Object.assign(next, committed.state);
-    options.events?.emit({ type: "tool_audited", operationId: pending.action.operationId, auditSequence: committed.records[0]!.sequence, auditDigest: committed.records[0]!.digest });
+    options.events?.emit(toolAuditedEvent(committed.records[0]!));
   } else {
     await options.checkpointStore.save(next);
   }
@@ -1677,7 +1678,7 @@ async function commitPendingTurn(
       (committedState, records) => installVerificationEvidence(committedState, request, lastToolResult!, records.at(-1)!),
     );
     Object.assign(next, committed.state);
-    options.events?.emit({ type: "tool_audited", operationId: pending.action.operationId, auditSequence: committed.records[0]!.sequence, auditDigest: committed.records[0]!.digest });
+    options.events?.emit(toolAuditedEvent(committed.records[0]!));
     const updatedEvidence = committed.state.verificationEvidence.find((item) => item.operationId === pending.action!.operationId);
     if (updatedEvidence) options.events?.emit({ type: "verification_updated", requirementId: updatedEvidence.requirementId, status: updatedEvidence.status });
   } else if (next.lifecycle === "finalizing") {
@@ -2485,6 +2486,8 @@ export async function completeProductionFinalization(options: {
   delivery: ResultDeliveryReceipt;
   events?: AgentEventPublisher;
 }): Promise<ProductionLoopResult> {
+  // finalizing -> revalidate candidate + artifacts -> bind delivery + audit
+  //            -> persist completion receipt -> completed -> sandbox cleanup
   const state = await options.checkpointStore.load();
   if (!state || state.lifecycle !== "finalizing") {
     throw new ProductionTurnProtocolError("FINALIZATION_STATE_INVALID: completion requires a finalizing checkpoint.");
@@ -2498,7 +2501,7 @@ export async function completeProductionFinalization(options: {
     throw new ProductionTurnProtocolError("FINALIZATION_APPROVAL_MISMATCH: approved proposal is unavailable.");
   }
   const candidateTree = completionCandidateTree(state);
-  await revalidateViewportEvidence(state);
+  await revalidateViewportEvidenceFiles(state);
   if (options.delivery.runIdentity !== state.runIdentity || options.delivery.resultTreeSha !== candidateTree) {
     throw new ProductionTurnProtocolError("DELIVERED_TREE_MISMATCH: delivered result does not match the checked candidate tree.");
   }
@@ -2539,52 +2542,6 @@ export async function completeProductionFinalization(options: {
   return { ...toResult(committed.state), delivery: options.delivery };
 }
 
-async function revalidateViewportEvidence(state: ProductionAgentState): Promise<void> {
-  const evidenceRoot = path.resolve(state.canonicalRepoPath, ".agent/evidence");
-  for (const evidence of state.verificationEvidence.filter((item) => item.status === "satisfied")) {
-    for (const screenshot of evidence.screenshots) {
-      const target = path.resolve(state.canonicalRepoPath, screenshot.path);
-      if (!target.startsWith(`${evidenceRoot}${path.sep}`)) {
-        throw new ProductionTurnProtocolError("VIEWPORT_SCREENSHOT_PATH_MISMATCH: screenshot escaped the evidence directory.");
-      }
-      let stats;
-      try { stats = await lstat(target); } catch {
-        throw new ProductionTurnProtocolError(`VIEWPORT_SCREENSHOT_MISSING: ${screenshot.path}`);
-      }
-      if (stats.isSymbolicLink() || !stats.isFile() || stats.size !== screenshot.bytes) {
-        throw new ProductionTurnProtocolError(`VIEWPORT_SCREENSHOT_INTEGRITY_FAILED: ${screenshot.path}`);
-      }
-      const bytes = new Uint8Array(await readFile(target));
-      if (await sha256Bytes(bytes) !== screenshot.sha256 || !validPngStructure(bytes, screenshot.width, screenshot.height)) {
-        throw new ProductionTurnProtocolError(`VIEWPORT_SCREENSHOT_INTEGRITY_FAILED: ${screenshot.path}`);
-      }
-    }
-  }
-}
-
-async function sha256Bytes(bytes: Uint8Array): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", Uint8Array.from(bytes).buffer);
-  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-
-function validPngStructure(bytes: Uint8Array, width: number, height: number): boolean {
-  const signature = [137, 80, 78, 71, 13, 10, 26, 10];
-  if (bytes.byteLength < 33 || !signature.every((value, index) => bytes[index] === value)) return false;
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  if (new TextDecoder().decode(bytes.slice(12, 16)) !== "IHDR" || view.getUint32(16) !== width || view.getUint32(20) !== height) return false;
-  let offset = 8;
-  let sawIdat = false;
-  while (offset + 12 <= bytes.byteLength) {
-    const length = view.getUint32(offset);
-    if (length > bytes.byteLength - offset - 12) return false;
-    const type = new TextDecoder().decode(bytes.slice(offset + 4, offset + 8));
-    if (type === "IDAT") sawIdat = true;
-    if (type === "IEND") return sawIdat && length === 0 && offset + 12 === bytes.byteLength;
-    offset += length + 12;
-  }
-  return false;
-}
-
 function completionCandidateTree(state: ProductionAgentState): string {
   const trees = new Set(state.verificationEvidence.filter((item) => item.status === "satisfied" && item.candidateTree).map((item) => item.candidateTree!));
   if (trees.size !== 1) throw new ProductionTurnProtocolError("COMPLETION_EVIDENCE_TREE_MISMATCH: required evidence does not identify one candidate tree.");
@@ -2611,6 +2568,7 @@ function verificationContractError(
   request: ModelToolRequest,
 ): { code: string; message: string } | null {
   if (request.name !== "run_shell" && request.name !== "verify_viewport") return null;
+  if (request.name === "run_shell" && !request.input.verificationRequirementId) return null;
   const proposal = state.approval.currentProposal;
   const requirement = proposal?.verificationRequirements.find((item) => item.id === request.input.verificationRequirementId);
   if (request.name === "verify_viewport") {
@@ -2630,6 +2588,36 @@ function verificationContractError(
     return { code: "VERIFICATION_CONTRACT_MISMATCH", message: `Verification requirement "${requirement.id}" must use its exact approved command, working directory, and timeout.` };
   }
   return null;
+}
+
+function eventEvidenceSummary(state: ProductionAgentState) {
+  const statuses = Object.fromEntries(state.verificationEvidence.map((item) => [item.requirementId, item.status])) as Record<string, "satisfied" | "failed" | "stale">;
+  const latestProblem = [...state.verificationEvidence].reverse().find((item) => item.status !== "satisfied");
+  const candidateTrees = new Set(state.verificationEvidence.filter((item) => item.status === "satisfied" && item.candidateTree).map((item) => item.candidateTree!));
+  return {
+    statuses,
+    satisfied: Object.values(statuses).filter((status) => status === "satisfied").length,
+    total: state.approval.currentProposal?.verificationRequirements.length ?? 0,
+    ...(latestProblem ? { latestProblem: `${latestProblem.requirementId}: ${latestProblem.status}` } : {}),
+    ...(candidateTrees.size === 1 ? { candidateTree: [...candidateTrees][0]! } : {}),
+    ...(state.completion ? { deliveredCommit: state.completion.resultCommit } : {}),
+    completed: state.lifecycle === "completed" && state.legacyCompletionStatus === "verified",
+  };
+}
+
+function toolAuditedEvent(record: AuditRecord): AgentEventInput {
+  return {
+    type: "tool_audited",
+    operationId: record.operationId!,
+    auditSequence: record.sequence,
+    auditDigest: record.digest,
+    detail: {
+      errorCode: typeof record.payload.errorCode === "string" ? record.payload.errorCode : null,
+      exitCode: typeof record.payload.exitCode === "number" ? record.payload.exitCode : null,
+      timedOut: record.payload.timedOut === true,
+      outputDigest: typeof record.payload.outputDigest === "string" ? record.payload.outputDigest : "",
+    },
+  };
 }
 
 function approvedViewportRequirement(state: ProductionAgentState, requirementId: string) {

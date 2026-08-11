@@ -70,6 +70,18 @@ describe("completion audit journal", () => {
     expect(digest).toMatch(/^sha256:[a-f0-9]{64}$/);
     expect(digest).not.toContain(secret);
   });
+
+  test("inspects the maximum committed journal in under 500ms", async () => {
+    const repo = await temporaryRepo();
+    const journal = new FileAuditJournal(repo);
+    const records = chain(1_024);
+    await journal.append(records);
+    const started = performance.now();
+    expect(await journal.recover({ sequence: 1_024, digest: records.at(-1)!.digest })).toHaveLength(1_024);
+    const duration = performance.now() - started;
+    expect(duration).toBeLessThan(500);
+    console.info(`Maximum audit inspection: ${duration.toFixed(1)}ms.`);
+  });
 });
 
 async function temporaryRepo(): Promise<string> {

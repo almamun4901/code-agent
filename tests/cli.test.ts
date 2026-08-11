@@ -6,8 +6,36 @@ import type {
   AgentRunResult,
   ControlledAgentRunOptions,
 } from "../src/runtime/agent-runner";
+import type { InspectionResult } from "../src/runtime/inspect";
 
 describe("agent command", () => {
+  test("prints stable JSON inspection and routes operation lookup without starting a run", async () => {
+    const stdout = new MemoryOutput();
+    const operationId = "123e4567-e89b-42d3-a456-426614174000";
+    let received: { repo: string; operation?: string } | undefined;
+    const exitCode = await runCli(["inspect", ".", "--json", "--operation", operationId], {
+      stdout,
+      stderr: new MemoryOutput(),
+      inspect: async (repo, operation) => {
+        received = { repo, ...(operation ? { operation } : {}) };
+        return inspection();
+      },
+      startRun() { throw new Error("must not start"); },
+    });
+    expect(exitCode).toBe(0);
+    expect(received).toEqual({ repo: path.resolve("."), operation: operationId });
+    expect(JSON.parse(stdout.value)).toMatchObject({ version: 1, audit: { integrity: "valid" } });
+  });
+
+  test("returns usage 2 for invalid inspect arguments and integrity 1 for inspection failure", async () => {
+    const invalidError = new MemoryOutput();
+    expect(await runCli(["inspect", ".", "--operation", "not-a-uuid"], { stdout: new MemoryOutput(), stderr: invalidError })).toBe(2);
+    expect(invalidError.value).toContain("Usage: agent");
+    const integrityError = new MemoryOutput();
+    expect(await runCli(["inspect", "."], { stdout: new MemoryOutput(), stderr: integrityError, inspect: async () => { throw new Error("AUDIT_HASH_MISMATCH"); } })).toBe(1);
+    expect(integrityError.value).toContain("AUDIT_HASH_MISMATCH");
+  });
+
   test("prints the first non-TTY frame before runtime initialization", async () => {
     const order: string[] = [];
     const stdout = new MemoryOutput(() => order.push("output"));
@@ -191,5 +219,18 @@ function completed(): AgentRunResult {
     reason: "completed",
     cleanup: "succeeded",
     exitCode: 0,
+  };
+}
+
+function inspection(): InspectionResult {
+  return {
+    version: 1,
+    run: { identity: "a".repeat(64), lifecycle: "finalizing", completionStatus: null, proposalRevision: 1 },
+    verification: [],
+    tools: [],
+    audit: { integrity: "valid", sequence: 0, digest: "0".repeat(64), committedRecords: 0 },
+    git: { candidateTree: null, deliveredBranch: null, deliveredCommit: null, deliveredTree: null, baseCommit: null, baseTree: null, changedPaths: [], diffSummary: null },
+    completion: null,
+    blockedReason: "FINALIZATION_DELIVERY_PENDING",
   };
 }

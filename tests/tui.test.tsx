@@ -187,6 +187,27 @@ describe("responsive Ink application", () => {
     expect(frame).toContain("DENIED: Policy blocked");
   });
 
+  test("shows evidence progress and toggles bounded audited tool details", async () => {
+    let state = reduceAgentEvent(initialTuiState, event({
+      type: "state_loaded", lifecycle: "running", plan: [], usage: initialTuiState.usage,
+      evidence: { statuses: { checks: "satisfied" }, satisfied: 1, total: 2, latestProblem: "viewport: stale", completed: false },
+    }));
+    state = reduceAgentEvent(state, event({ type: "tool_started", operationId: "operation", toolName: "run_shell", summary: "verification checks" }));
+    state = reduceAgentEvent(state, event({ type: "tool_finished", operationId: "operation", durationMs: 21, outcome: "failed" }));
+    state = reduceAgentEvent(state, event({ type: "tool_audited", operationId: "operation", auditSequence: 7, auditDigest: "a".repeat(64), detail: { errorCode: "TEST_FAILED", exitCode: 1, timedOut: false, outputDigest: "b".repeat(64) } }));
+    const view = render(<AgentApp state={state} width={120} />);
+    expect(view.lastFrame()).toContain("Evidence 1 / 2");
+    expect(view.lastFrame()).toContain("viewport:");
+    expect(view.lastFrame()).toContain("stale");
+    view.stdin.write("d");
+    await Bun.sleep(0);
+    expect(view.lastFrame()).toContain("operation operation");
+    expect(view.lastFrame()).toContain("audit 7");
+    expect(view.lastFrame()).toContain("TEST_FAILED");
+    expect(view.lastFrame()).toContain("exit 1");
+    view.unmount();
+  });
+
   test("renders the complete proposal and submits approve or revision feedback", async () => {
     const state = reduceAgentEvent(initialTuiState, event({
       type: "approval_requested",

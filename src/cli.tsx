@@ -14,6 +14,7 @@ import {
   type TuiState,
 } from "./tui/state";
 import { formatStaticEvent } from "./tui/static-output";
+import { formatInspection, inspectRepository, type InspectionResult } from "./runtime/inspect";
 
 type OutputStream = {
   isTTY?: boolean;
@@ -27,6 +28,7 @@ export type CliDependencies = {
     options: ControlledAgentRunOptions,
   ) => AgentRunController;
   installSigint?: (handler: () => void) => () => void;
+  inspect?: (repoPath: string, operationId?: string) => Promise<InspectionResult>;
 };
 
 export async function runCli(
@@ -38,8 +40,18 @@ export async function runCli(
   const parsed = parseArguments(argv);
   if (!parsed.ok) {
     stderr.write(`${parsed.message}\n`);
-    stderr.write('Usage: agent run <repo> "<task>" [--auto-approve]\n');
+    stderr.write(usage());
     return 2;
+  }
+  if (parsed.command === "inspect") {
+    try {
+      const report = await (dependencies.inspect ?? inspectRepository)(path.resolve(parsed.repo), parsed.operationId);
+      stdout.write(parsed.json ? `${JSON.stringify(report)}\n` : formatInspection(report));
+      return 0;
+    } catch (error) {
+      stderr.write(`${errorMessage(error)}\n`);
+      return 1;
+    }
   }
 
   let state: TuiState = initialTuiState;
@@ -47,7 +59,7 @@ export async function runCli(
   const isTty = stdout.isTTY === true;
   if (!isTty && !parsed.autoApprove) {
     stderr.write("Non-interactive runs require explicit --auto-approve.\n");
-    stderr.write('Usage: agent run <repo> "<task>" [--auto-approve]\n');
+    stderr.write(usage());
     return 2;
   }
   let controller: AgentRunController | undefined;
@@ -121,16 +133,29 @@ export async function runCli(
       `Result delivered to local branch ${delivery.branch} (${delivery.resultSha.slice(0, 12)})\n`,
     );
   }
+  if (!isTty) stdout.write(`agent inspect ${shellArgument(path.resolve(parsed.repo))}\n`);
   return result.exitCode;
 }
 
 type ParsedArguments =
-  | { ok: true; repo: string; task: string; autoApprove: boolean }
+  | { ok: true; command: "run"; repo: string; task: string; autoApprove: boolean }
+  | { ok: true; command: "inspect"; repo: string; json: boolean; operationId?: string }
   | { ok: false; message: string };
 
 function parseArguments(argv: string[]): ParsedArguments {
+  if (argv[0] === "inspect") {
+    if (!argv[1]) return { ok: false, message: "A repository is required." };
+    let json = false;
+    let operationId: string | undefined;
+    for (let index = 2; index < argv.length; index += 1) {
+      if (argv[index] === "--json" && !json) json = true;
+      else if (argv[index] === "--operation" && !operationId && argv[index + 1] && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(argv[index + 1]!)) operationId = argv[++index];
+      else return { ok: false, message: `Invalid inspect argument "${argv[index] ?? ""}".` };
+    }
+    return { ok: true, command: "inspect", repo: argv[1], json, ...(operationId ? { operationId } : {}) };
+  }
   if (argv[0] !== "run") {
-    return { ok: false, message: 'Expected the "run" command.' };
+    return { ok: false, message: 'Expected the "run" or "inspect" command.' };
   }
   const autoApprove = argv[3] === "--auto-approve";
   if ((argv.length !== 3 && !(argv.length === 4 && autoApprove)) || !argv[1]) {
@@ -142,7 +167,11 @@ function parseArguments(argv: string[]): ParsedArguments {
   if (!argv[2]?.trim()) {
     return { ok: false, message: "Task must not be blank." };
   }
-  return { ok: true, repo: argv[1], task: argv[2], autoApprove };
+  return { ok: true, command: "run", repo: argv[1], task: argv[2], autoApprove };
+}
+
+function usage(): string {
+  return 'Usage: agent run <repo> "<task>" [--auto-approve]\n       agent inspect <repo> [--json] [--operation <uuid>]\n';
 }
 
 function installProcessSigint(handler: () => void): () => void {
@@ -152,4 +181,8 @@ function installProcessSigint(handler: () => void): () => void {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "Unknown error.";
+}
+
+function shellArgument(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
 }

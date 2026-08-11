@@ -16,6 +16,9 @@ export type ToolActivity = {
   startedAt: string;
   durationMs?: number;
   outcome?: ToolOutcome;
+  auditSequence?: number;
+  auditDigest?: string;
+  detail?: { errorCode: string | null; exitCode: number | null; timedOut: boolean; outputDigest: string };
 };
 
 export type TuiState = {
@@ -41,12 +44,21 @@ export type TuiState = {
     mode: ApprovalMode;
     reapprovalReason?: string;
   };
+  evidence: {
+    statuses: Record<string, "satisfied" | "failed" | "stale">;
+    total: number;
+    latestProblem?: string;
+    candidateTree?: string;
+    deliveredCommit?: string;
+    completed: boolean;
+  };
 };
 
 export const initialTuiState: TuiState = {
   status: "initializing",
   plan: [],
   tools: [],
+  evidence: { statuses: {}, total: 0, completed: false },
   usage: {
     modelTurns: 0,
     modelCalls: 0,
@@ -80,6 +92,14 @@ export function reduceAgentEvent(
           : event.lifecycle,
         plan: structuredClone(event.plan),
         usage: event.usage,
+        evidence: event.evidence ? {
+          statuses: event.evidence.statuses,
+          total: event.evidence.total,
+          ...(event.evidence.latestProblem ? { latestProblem: event.evidence.latestProblem } : {}),
+          ...(event.evidence.candidateTree ? { candidateTree: event.evidence.candidateTree } : {}),
+          ...(event.evidence.deliveredCommit ? { deliveredCommit: event.evidence.deliveredCommit } : {}),
+          completed: event.evidence.completed,
+        } : state.evidence,
       };
     case "plan_committed":
       return { ...state, plan: structuredClone(event.plan) };
@@ -87,6 +107,7 @@ export function reduceAgentEvent(
       return {
         ...state,
         status: "awaiting_approval",
+        evidence: { statuses: {}, total: event.proposal.verificationRequirements.length, completed: false },
         approval: structuredClone({
           proposal: event.proposal,
           proposalDigest: event.proposalDigest,
@@ -132,11 +153,15 @@ export function reduceAgentEvent(
         ),
       };
     case "tool_audited":
-      return state;
-    case "verification_updated":
+      return { ...state, tools: state.tools.map((tool) => tool.operationId === event.operationId ? { ...tool, auditSequence: event.auditSequence, auditDigest: event.auditDigest, ...(event.detail ? { detail: event.detail } : {}) } : tool) };
+    case "verification_updated": {
+      const statuses = { ...state.evidence.statuses, [event.requirementId]: event.status };
+      return { ...state, evidence: { ...state.evidence, statuses, latestProblem: event.status === "satisfied" ? state.evidence.latestProblem : `${event.requirementId}: ${event.status}` } };
+    }
     case "finalization_started":
+      return { ...state, status: "finalizing", evidence: { ...state.evidence, candidateTree: event.candidateTree } };
     case "completion_verified":
-      return state;
+      return { ...state, evidence: { ...state.evidence, deliveredCommit: event.resultCommit, completed: true } };
     case "usage_updated":
       return { ...state, usage: event.usage };
     case "notification":

@@ -46,6 +46,7 @@ export type AgentEvent =
       lifecycle: "running" | "finalizing" | "completed" | "cancelled" | "failed";
       plan: TodoItem[];
       usage: AgentUsage;
+      evidence?: { statuses: Record<string, "satisfied" | "failed" | "stale">; satisfied: number; total: number; latestProblem?: string; candidateTree?: string; deliveredCommit?: string; completed: boolean };
     })
   | (AgentEventBase & {
       type: "plan_committed";
@@ -82,6 +83,7 @@ export type AgentEvent =
       operationId: string;
       auditSequence: number;
       auditDigest: string;
+      detail?: { errorCode: string | null; exitCode: number | null; timedOut: boolean; outputDigest: string };
     })
   | (AgentEventBase & {
       type: "verification_updated";

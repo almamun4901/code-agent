@@ -1,8 +1,8 @@
 # Step 9 — Redacted OpenTelemetry and Langfuse
 
-**Implementation status:** runtime, transport, offline coverage, and temporary
-self-hosted Langfuse acceptance are complete on `feat/otel-telemetry`; review,
-landing, and merged-main reverification remain.
+**Implementation status:** runtime, transport, offline coverage, temporary
+self-hosted Langfuse acceptance, and pre-landing review are complete on
+`feat/otel-telemetry`; landing and merged-main reverification remain.
 
 ## Scope
 

@@ -59,6 +59,7 @@ import {
   type PlanProposal,
   type RequestPlanApproval,
 } from "./approval";
+import { EMPTY_AUDIT_DIGEST } from "./audit";
 
 const MAX_PLAN_TASKS = 20;
 
@@ -519,7 +520,7 @@ function createBootstrapState(
     throw new PlanApprovalRequiredError("approval-mode-required");
   }
   return {
-    version: 3,
+    version: 4,
     approval: createInitialApprovalState(options.approvalMode),
     runIdentity: options.runIdentity,
     canonicalRepoPath: options.canonicalRepoPath,
@@ -544,6 +545,10 @@ function createBootstrapState(
     terminalCode: null,
     terminalError: null,
     lastToolResult: null,
+    auditCursor: { sequence: 0, digest: EMPTY_AUDIT_DIGEST },
+    verificationEvidence: [],
+    completion: null,
+    legacyCompletionStatus: null,
   };
 }
 
@@ -1844,7 +1849,7 @@ async function initializeState(
     throw new PlanApprovalRequiredError("approval-mode-required");
   }
   const state: ProductionAgentState = {
-    version: 3,
+    version: 4,
     approval: {
       ...createInitialApprovalState(options.approvalMode),
       discoveryTranscript: [{ role: "user", content: discoveryPrompt(options.task) }],
@@ -1860,6 +1865,10 @@ async function initializeState(
     lastToolSucceeded: null,
     pendingTurn: null,
     pendingModelCall: null,
+    auditCursor: { sequence: 0, digest: EMPTY_AUDIT_DIGEST },
+    verificationEvidence: [],
+    completion: null,
+    legacyCompletionStatus: null,
     limits,
     pricing,
     context: { lastEstimateTokens: 0, estimateSource: null, requestFingerprint: null },
@@ -2399,12 +2408,21 @@ function proposalInputSchema(): ModelToolDefinition["inputSchema"] {
       technologyChoices: { type: "array", items: { type: "object", properties: { name: { type: "string" }, rationale: { type: "string" } }, required: ["name", "rationale"], additionalProperties: false } },
       includedScope: { type: "array", items: { type: "string" } },
       excludedScope: { type: "array", items: { type: "string" } },
-      acceptanceCriteria: { type: "array", items: { type: "object", properties: { id: { type: "string" }, criterion: { type: "string" }, verification: { type: "string" } }, required: ["id", "criterion", "verification"], additionalProperties: false } },
+      acceptanceCriteria: { type: "array", items: { type: "object", properties: { id: { type: "string" }, criterion: { type: "string" }, verification: { type: "string" }, verificationRequirementIds: { type: "array", items: { type: "string" } } }, required: ["id", "criterion", "verification", "verificationRequirementIds"], additionalProperties: false } },
+      verificationRequirements: {
+        type: "array",
+        items: {
+          oneOf: [
+            { type: "object", properties: { type: { const: "command" }, id: { type: "string" }, label: { type: "string" }, workingDirectory: { type: "string" }, command: { type: "string" }, timeoutMs: { type: "integer", minimum: 1, maximum: 30000 } }, required: ["type", "id", "label", "workingDirectory", "command", "timeoutMs"], additionalProperties: false },
+            { type: "object", properties: { type: { const: "viewport" }, id: { type: "string" }, label: { type: "string" }, workingDirectory: { type: "string" }, serverCommand: { type: "string" }, port: { type: "integer", minimum: 1024, maximum: 65535 }, cases: { type: "array", items: { type: "object", properties: { route: { type: "string" }, width: { type: "integer" }, height: { type: "integer" }, requiredVisibleSelectors: { type: "array", items: { type: "string" } } }, required: ["route", "width", "height", "requiredVisibleSelectors"], additionalProperties: false } } }, required: ["type", "id", "label", "workingDirectory", "serverCommand", "port", "cases"], additionalProperties: false },
+          ],
+        },
+      },
       assumptions: { type: "array", items: { type: "string" } },
       unresolvedQuestions: { type: "array", items: { type: "string" } },
       executionPlan: { type: "array", items: { type: "object", properties: { id: { type: "string" }, description: { type: "string" } }, required: ["id", "description"], additionalProperties: false } },
     },
-    required: ["approach", "productDirection", "visualDirection", "technologyChoices", "includedScope", "excludedScope", "acceptanceCriteria", "assumptions", "unresolvedQuestions", "executionPlan"],
+    required: ["approach", "productDirection", "visualDirection", "technologyChoices", "includedScope", "excludedScope", "acceptanceCriteria", "verificationRequirements", "assumptions", "unresolvedQuestions", "executionPlan"],
     additionalProperties: false,
   };
 }

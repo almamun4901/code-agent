@@ -345,7 +345,7 @@ function modelTurn(
 
 function preapprovedStore(prepared: { canonicalRepoPath: string; task: string; runIdentity: string }): MemoryProductionCheckpointStore {
   const state: ProductionAgentState = {
-    version: 3,
+    version: 4,
     ...prepared,
     approval: createLegacyExecutionApprovalState(),
     promptStatus: "accepted",
@@ -368,6 +368,7 @@ function preapprovedStore(prepared: { canonicalRepoPath: string; task: string; r
     terminalCode: null,
     terminalError: null,
     lastToolResult: null,
+    auditCursor: { sequence: 0, digest: "0".repeat(64) }, verificationEvidence: [], completion: null, legacyCompletionStatus: null,
   };
   return new MemoryProductionCheckpointStore(state);
 }

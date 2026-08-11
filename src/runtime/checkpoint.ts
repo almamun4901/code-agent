@@ -9,13 +9,16 @@ import {
 } from "node:fs/promises";
 import { constants } from "node:fs";
 import { join, resolve } from "node:path";
+import { z } from "zod";
 import {
   DEFAULT_BUDGET_LIMITS,
   LegacyProductionAgentStateSchema,
+  LegacyV3ProductionAgentStateSchema,
   PreApprovalProductionAgentStateSchema,
   ProductionAgentStateSchema,
   type ProductionAgentState,
 } from "./schema";
+import { EMPTY_AUDIT_DIGEST, FileAuditJournal } from "./audit";
 import {
   createInitialApprovalState,
   createLegacyTerminalApprovalState,
@@ -84,7 +87,9 @@ export class FileProductionCheckpointStore
     }
 
     try {
-      return decodeProductionCheckpoint(JSON.parse(serialized));
+      const state = decodeProductionCheckpoint(JSON.parse(serialized));
+      await new FileAuditJournal(resolve(this.agentDirectory, "..")).recover(state.auditCursor);
+      return state;
     } catch (error) {
       if (error instanceof ProductionCheckpointError) throw error;
       throw new ProductionCheckpointError(
@@ -259,6 +264,23 @@ function boundedCheckpoint(state: ProductionAgentState): {
 export function decodeProductionCheckpoint(value: unknown): ProductionAgentState {
   const current = ProductionAgentStateSchema.safeParse(value);
   if (current.success) return current.data;
+  const v3 = LegacyV3ProductionAgentStateSchema.safeParse(value);
+  if (v3.success) {
+    const state = v3.data;
+    if (state.lifecycle === "running" && hasPreCompletionExecution(state)) {
+      throw new ProductionCheckpointError(
+        "COMPLETION_MIGRATION_REQUIRED: active checkpoint contains pre-8C execution history and cannot establish trusted completion evidence; start a fresh task.",
+      );
+    }
+    return ProductionAgentStateSchema.parse({
+      ...state,
+      version: 4,
+      auditCursor: { sequence: 0, digest: EMPTY_AUDIT_DIGEST },
+      verificationEvidence: [],
+      completion: null,
+      legacyCompletionStatus: state.lifecycle === "completed" ? "legacy_unverified" : null,
+    });
+  }
   const preApproval = PreApprovalProductionAgentStateSchema.safeParse(value);
   if (preApproval.success) {
     const state = preApproval.data;
@@ -276,9 +298,14 @@ export function decodeProductionCheckpoint(value: unknown): ProductionAgentState
     }
     return ProductionAgentStateSchema.parse({
       ...state,
+      version: 4,
       approval: state.lifecycle === "running"
         ? createInitialApprovalState()
         : createLegacyTerminalApprovalState(),
+      auditCursor: { sequence: 0, digest: EMPTY_AUDIT_DIGEST },
+      verificationEvidence: [],
+      completion: null,
+      legacyCompletionStatus: state.lifecycle === "completed" ? "legacy_unverified" : null,
     });
   }
   const legacy = LegacyProductionAgentStateSchema.safeParse(value);
@@ -295,7 +322,7 @@ export function decodeProductionCheckpoint(value: unknown): ProductionAgentState
   }
   return ProductionAgentStateSchema.parse({
     ...legacy.data,
-    version: 3,
+    version: 4,
     approval: createInitialApprovalState(),
     promptStatus: "accepted",
     appendedPromptContext: "",
@@ -320,7 +347,21 @@ export function decodeProductionCheckpoint(value: unknown): ProductionAgentState
       stopRejections: 0,
     },
     terminalCode: null,
+    auditCursor: { sequence: 0, digest: EMPTY_AUDIT_DIGEST },
+    verificationEvidence: [],
+    completion: null,
+    legacyCompletionStatus: null,
   });
+}
+
+function hasPreCompletionExecution(state: z.infer<typeof LegacyV3ProductionAgentStateSchema>): boolean {
+  return state.approval.phase === "executing"
+    || state.counters.modelCalls !== 0
+    || state.counters.committedTurns !== 0
+    || state.counters.toolCalls !== 0
+    || state.plan.length !== 0
+    || state.pendingTurn !== null
+    || state.pendingModelCall !== null;
 }
 
 function isMissingError(error: unknown): boolean {

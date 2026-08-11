@@ -22,6 +22,7 @@ export type TuiState = {
   status:
     | "initializing"
     | "running"
+    | "finalizing"
     | "awaiting_approval"
     | "stopping"
     | "completed"

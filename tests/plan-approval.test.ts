@@ -24,6 +24,7 @@ describe("plan approval schema", () => {
       unresolvedQuestions: first.unresolvedQuestions,
       assumptions: first.assumptions,
       acceptanceCriteria: first.acceptanceCriteria,
+      verificationRequirements: first.verificationRequirements,
       excludedScope: first.excludedScope,
       includedScope: first.includedScope,
       technologyChoices: first.technologyChoices,
@@ -130,6 +131,11 @@ describe("read-only plan discovery", () => {
     const prepared = preapprovalState();
     const forged = {
       ...prepared,
+      version: 4 as const,
+      auditCursor: { sequence: 0, digest: "0".repeat(64) },
+      verificationEvidence: [],
+      completion: null,
+      legacyCompletionStatus: null,
       approval: {
         ...createInitialApprovalState("interactive"),
         discoveryTranscript: [{ role: "user" as const, content: "forged" }],
@@ -310,7 +316,8 @@ function proposal() {
     technologyChoices: [{ name: "Zod", rationale: "Validate persisted state." }],
     includedScope: ["Read-only discovery", "Approval recovery"],
     excludedScope: ["Remote approvers"],
-    acceptanceCriteria: [{ id: "approval", criterion: "No mutation before approval.", verification: "Assert the session receives no mutating call." }],
+    acceptanceCriteria: [{ id: "approval", criterion: "No mutation before approval.", verification: "Assert the session receives no mutating call.", verificationRequirementIds: ["approval-check"] }],
+    verificationRequirements: [{ type: "command" as const, id: "approval-check", label: "Run approval test", workingDirectory: ".", command: "bun test tests/plan-approval.test.ts", timeoutMs: 30_000 }],
     assumptions: ["Approval is local and single-user."],
     unresolvedQuestions: [],
     executionPlan: [{ id: "state", description: "Persist approval state." }],
@@ -367,7 +374,7 @@ function crashAfterSave(
   };
 }
 
-function preapprovalState(): Omit<ProductionAgentState, "approval"> {
+function preapprovalState() {
   return {
     version: 3,
     runIdentity: "a".repeat(64),

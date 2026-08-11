@@ -406,11 +406,12 @@ function session() {
 
 function baseState(): ProductionAgentState {
   return {
-    version: 3, ...prepared, approval: createLegacyExecutionApprovalState(), promptStatus: "accepted", appendedPromptContext: "", lifecycle: "running", plan: [], transcript: [{ role: "user", content: "Complete the following repository task:\nImplement safely\n\nFirst create a concrete plan, then perform one safe action per turn." }], lastToolSucceeded: null, pendingTurn: null, pendingModelCall: null,
+    version: 4, ...prepared, approval: createLegacyExecutionApprovalState(), promptStatus: "accepted", appendedPromptContext: "", lifecycle: "running", plan: [], transcript: [{ role: "user", content: "Complete the following repository task:\nImplement safely\n\nFirst create a concrete plan, then perform one safe action per turn." }], lastToolSucceeded: null, pendingTurn: null, pendingModelCall: null,
     limits: { maxModelCalls: 50, compactAtTokens: 150_000, maxContextTokens: 200_000, maxProjectedCostMicroUsd: 5_000_000, compactAtCheckpointBytes: 1_572_864, maxCheckpointBytes: 2 * 1024 * 1024 },
     pricing: { catalogVersion: 1, identity: { provider: "injected", model: "claude-haiku-4-5" }, inputRateMicroUsdPerMillion: 1_000_000, outputRateMicroUsdPerMillion: 5_000_000 },
     context: { lastEstimateTokens: 0, estimateSource: null, requestFingerprint: null }, cost: { projectedMicroUsd: 0, observedMicroUsd: 0, observedAvailable: false, driftMicroUsd: 0 }, compaction: { count: 0, lastPreTokens: 0, lastPostTokens: 0, baselineCommittedTurns: 0, baselineProtocolRetries: 0, baselineToolCalls: 0, baselinePlanRewrites: 0, baselineStopRejections: 0 }, notificationKeys: [], lastNotification: null,
     counters: { modelTurns: 0, modelCalls: 0, agentCalls: 0, compactionCalls: 0, stopRejections: 0, committedTurns: 0, protocolRetries: 0, toolCalls: 0, planRewrites: 0, inputTokens: 0, outputTokens: 0 }, consecutiveInvalidAttempts: 0, terminalCode: null, terminalError: null, lastToolResult: null,
+    auditCursor: { sequence: 0, digest: "0".repeat(64) }, verificationEvidence: [], completion: null, legacyCompletionStatus: null,
   };
 }
 

@@ -19,10 +19,44 @@ const scopedItemSchema = z.object({
   name: boundedText(256),
   rationale: boundedText(2_048),
 }).strict();
+const repositoryRelativePath = boundedText(512).refine(
+  (value) => value === "." || (!value.startsWith("/") && !value.split("/").includes("..")),
+  "Working directory must be a repository-relative path without parent traversal.",
+);
+const verificationRequirementBaseSchema = z.object({
+  id: boundedText(128),
+  label: boundedText(256),
+  workingDirectory: repositoryRelativePath,
+});
+export const CommandVerificationRequirementSchema = verificationRequirementBaseSchema.extend({
+  type: z.literal("command"),
+  command: boundedText(4_096),
+  timeoutMs: z.number().int().min(1).max(30_000),
+}).strict();
+const viewportCaseSchema = z.object({
+  route: boundedText(512).refine(
+    (value) => value.startsWith("/") && !value.startsWith("//") && !value.includes("://"),
+    "Viewport route must be an origin-relative path.",
+  ),
+  width: z.number().int().min(320).max(2_560),
+  height: z.number().int().min(480).max(1_600),
+  requiredVisibleSelectors: z.array(boundedText(512)).max(10),
+}).strict();
+export const ViewportVerificationRequirementSchema = verificationRequirementBaseSchema.extend({
+  type: z.literal("viewport"),
+  serverCommand: boundedText(4_096),
+  port: z.number().int().min(1_024).max(65_535),
+  cases: z.array(viewportCaseSchema).min(1).max(12),
+}).strict();
+export const VerificationRequirementSchema = z.discriminatedUnion("type", [
+  CommandVerificationRequirementSchema,
+  ViewportVerificationRequirementSchema,
+]);
 const acceptanceCriterionSchema = z.object({
   id: boundedText(128),
   criterion: boundedText(2_048),
   verification: boundedText(2_048),
+  verificationRequirementIds: z.array(boundedText(128)).min(1).max(20),
 }).strict();
 const executionTaskSchema = z.object({
   id: boundedText(128),
@@ -37,12 +71,29 @@ export const PlanProposalSchema = z.object({
   includedScope: z.array(boundedText(2_048)).min(1).max(30),
   excludedScope: z.array(boundedText(2_048)).max(30),
   acceptanceCriteria: z.array(acceptanceCriterionSchema).min(1).max(30),
+  verificationRequirements: z.array(VerificationRequirementSchema).min(1).max(30),
   assumptions: z.array(boundedText(2_048)).max(30),
   unresolvedQuestions: z.array(boundedText(2_048)).max(20),
   executionPlan: z.array(executionTaskSchema).min(1).max(20),
 }).strict().superRefine((proposal, context) => {
   uniqueIds(proposal.acceptanceCriteria, "acceptance criterion", context);
+  uniqueIds(proposal.verificationRequirements, "verification requirement", context);
   uniqueIds(proposal.executionPlan, "execution task", context);
+  const requirementIds = new Set(proposal.verificationRequirements.map((requirement) => requirement.id));
+  for (const [criterionIndex, criterion] of proposal.acceptanceCriteria.entries()) {
+    for (const [referenceIndex, requirementId] of criterion.verificationRequirementIds.entries()) {
+      if (!requirementIds.has(requirementId)) {
+        context.addIssue({
+          code: "custom",
+          path: ["acceptanceCriteria", criterionIndex, "verificationRequirementIds", referenceIndex],
+          message: `Acceptance criterion references unknown verification requirement "${requirementId}".`,
+        });
+      }
+    }
+  }
+  if (proposal.visualDirection !== "not_applicable" && !proposal.verificationRequirements.some((item) => item.type === "viewport")) {
+    context.addIssue({ code: "custom", path: ["verificationRequirements"], message: "Visual proposals require at least one viewport verification requirement." });
+  }
   if (utf8Bytes(proposal) > 8 * 1024) {
     context.addIssue({ code: "custom", message: "Plan proposal exceeds 8 KiB." });
   }
@@ -123,6 +174,9 @@ export const ApprovalStateSchema = z.object({
 });
 
 export type PlanProposal = z.infer<typeof PlanProposalSchema>;
+export type VerificationRequirement = z.infer<typeof VerificationRequirementSchema>;
+export type CommandVerificationRequirement = z.infer<typeof CommandVerificationRequirementSchema>;
+export type ViewportVerificationRequirement = z.infer<typeof ViewportVerificationRequirementSchema>;
 export type ApprovalDecision = z.infer<typeof ApprovalDecisionSchema>;
 export type ApprovalState = z.infer<typeof ApprovalStateSchema>;
 export type ApprovalMode = "interactive" | "auto";
@@ -181,6 +235,7 @@ export function protectedProposalDigest(proposal: PlanProposal): string {
     includedScope: proposal.includedScope,
     excludedScope: proposal.excludedScope,
     acceptanceCriteria: proposal.acceptanceCriteria,
+    verificationRequirements: proposal.verificationRequirements,
     assumptions: proposal.assumptions,
     unresolvedQuestions: proposal.unresolvedQuestions,
   }));

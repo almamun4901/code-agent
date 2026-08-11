@@ -1038,7 +1038,7 @@ describe("production checkpoint", () => {
     const store = new FileProductionCheckpointStore(repo.worktreePath);
     await store.save(initialState(prepared));
     expect(await store.load()).toMatchObject({
-      version: 3,
+      version: 4,
       task: "Persist",
     });
     await writeFile(store.statePath, '{"version":1}\n');
@@ -1146,7 +1146,8 @@ function queuedModel(turns: ModelTurn[]): CallModel {
             technologyChoices: [],
             includedScope: ["Complete the requested task"],
             excludedScope: ["Unrelated changes"],
-            acceptanceCriteria: [{ id: "done", criterion: "The requested task is complete.", verification: "Run the focused test." }],
+            acceptanceCriteria: [{ id: "done", criterion: "The requested task is complete.", verification: "Run the focused test.", verificationRequirementIds: ["focused-test"] }],
+            verificationRequirements: [{ type: "command", id: "focused-test", label: "Run focused test", workingDirectory: ".", command: "bun test", timeoutMs: 30_000 }],
             assumptions: [],
             unresolvedQuestions: [],
             executionPlan: (input.plan ?? [{ id: "work", description: "Complete the task" }]).map(({ id, description }) => ({ id, description })),
@@ -1209,7 +1210,7 @@ function initialState(
   },
 ): ProductionAgentState {
   return {
-    version: 3,
+    version: 4,
     approval: createLegacyExecutionApprovalState(),
     ...prepared,
     promptStatus: "accepted",
@@ -1256,6 +1257,7 @@ function initialState(
     terminalError: null,
     terminalCode: null,
     lastToolResult: null,
+    auditCursor: { sequence: 0, digest: "0".repeat(64) }, verificationEvidence: [], completion: null, legacyCompletionStatus: null,
   };
 }
 

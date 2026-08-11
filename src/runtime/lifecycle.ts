@@ -38,7 +38,7 @@ export type LifecycleBudgetSnapshot = {
 export type SessionStartContext = {
   mode: "fresh" | "resumed";
   runIdentity: string;
-  lifecycle: "running" | "completed" | "cancelled" | "failed";
+  lifecycle: "running" | "finalizing" | "completed" | "cancelled" | "failed";
   plan: TodoItem[];
   budget: LifecycleBudgetSnapshot;
 };

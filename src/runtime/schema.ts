@@ -107,15 +107,62 @@ const pendingModelCallSchema = z.object({
   response: pendingResponseSchema.nullable(),
 }).strict();
 
+export const AuditCursorSchema = z.object({
+  sequence: z.number().int().min(0).max(1_024),
+  digest: z.string().regex(/^[a-f0-9]{64}$/),
+}).strict();
+
+const screenshotEvidenceSchema = z.object({
+  path: z.string().min(1).max(1_024),
+  sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  bytes: z.number().int().positive().max(2 * 1024 * 1024),
+  width: z.number().int().min(320).max(2_560),
+  height: z.number().int().min(480).max(1_600),
+  route: z.string().min(1).max(512),
+}).strict();
+
+export const VerificationEvidenceSchema = z.object({
+  requirementId: z.string().min(1).max(128),
+  operationId: z.string().uuid(),
+  auditSequence: z.number().int().positive().max(1_024),
+  auditRecordDigest: z.string().regex(/^[a-f0-9]{64}$/),
+  proposalDigest: z.string().regex(/^[a-f0-9]{64}$/),
+  candidateCommit: z.string().regex(/^[a-f0-9]{40,64}$/),
+  candidateTree: z.string().regex(/^[a-f0-9]{40,64}$/),
+  status: z.enum(["satisfied", "failed", "stale"]),
+  errorCode: z.string().min(1).max(64).nullable(),
+  exitCode: z.number().int().nullable(),
+  timedOut: z.boolean(),
+  screenshots: z.array(screenshotEvidenceSchema).max(12),
+}).strict();
+
+export const CompletionReceiptSchema = z.object({
+  version: z.literal(1),
+  runIdentity: z.string().regex(/^[a-f0-9]{64}$/),
+  approvedProposalDigest: z.string().regex(/^[a-f0-9]{64}$/),
+  verificationContractDigest: z.string().regex(/^[a-f0-9]{64}$/),
+  candidateTree: z.string().regex(/^[a-f0-9]{40,64}$/),
+  auditCursor: AuditCursorSchema,
+  evidence: z.array(z.object({
+    requirementId: z.string().min(1).max(128),
+    sequence: z.number().int().positive().max(1_024),
+    recordDigest: z.string().regex(/^[a-f0-9]{64}$/),
+  }).strict()).min(1).max(30),
+  resultDeliveryReceiptDigest: z.string().regex(/^[a-f0-9]{64}$/),
+  resultCommit: z.string().regex(/^[a-f0-9]{40,64}$/),
+  resultTree: z.string().regex(/^[a-f0-9]{40,64}$/),
+  completedAt: z.string().datetime(),
+}).strict();
+
 const ProductionAgentStateBaseSchema = z.object({
-  version: z.literal(3),
+  version: z.literal(4),
   runIdentity: z.string().regex(/^[a-f0-9]{64}$/),
   canonicalRepoPath: z.string().startsWith("/"),
   task: z.string().min(1),
   approval: ApprovalStateSchema,
   promptStatus: z.enum(["pending", "accepted", "denied"]),
   appendedPromptContext: z.string(),
-  lifecycle: z.enum(["running", "completed", "cancelled", "failed"]),
+  lifecycle: z.enum(["running", "finalizing", "completed", "cancelled", "failed"]),
   plan: z.array(TodoItemSchema).max(20),
   transcript: z.array(ConversationMessageSchema),
   lastToolSucceeded: z.boolean().nullable(),
@@ -163,9 +210,19 @@ const ProductionAgentStateBaseSchema = z.object({
   terminalCode: z.string().min(1).max(64).nullable(),
   terminalError: z.string().min(1).nullable(),
   lastToolResult: toolResultSchema.nullable(),
+  auditCursor: AuditCursorSchema,
+  verificationEvidence: z.array(VerificationEvidenceSchema).max(30),
+  completion: CompletionReceiptSchema.nullable(),
+  legacyCompletionStatus: z.enum(["verified", "legacy_unverified"]).nullable(),
 }).strict();
 
-export const PreApprovalProductionAgentStateSchema = ProductionAgentStateBaseSchema.omit({ approval: true });
+export const LegacyV3ProductionAgentStateSchema = ProductionAgentStateBaseSchema.omit({
+  auditCursor: true,
+  verificationEvidence: true,
+  completion: true,
+  legacyCompletionStatus: true,
+}).extend({ version: z.literal(3), lifecycle: z.enum(["running", "completed", "cancelled", "failed"]) }).strict();
+export const PreApprovalProductionAgentStateSchema = LegacyV3ProductionAgentStateSchema.omit({ approval: true });
 
 export const ProductionAgentStateSchema = ProductionAgentStateBaseSchema.superRefine((state, context) => {
   if (state.counters.modelTurns !== state.counters.modelCalls) {
@@ -195,12 +252,21 @@ export const ProductionAgentStateSchema = ProductionAgentStateBaseSchema.superRe
   if (state.lifecycle === "cancelled" && state.approval.phase !== "cancelled") {
     context.addIssue({ code: "custom", message: "Cancelled lifecycle requires cancelled approval state." });
   }
+  if (state.lifecycle !== "completed" && state.completion !== null) {
+    context.addIssue({ code: "custom", message: "Only completed checkpoints may contain a completion receipt." });
+  }
+  if (state.lifecycle === "finalizing" && (state.pendingTurn !== null || state.pendingModelCall !== null)) {
+    context.addIssue({ code: "custom", message: "Finalizing checkpoints cannot contain pending model work." });
+  }
 });
 
 export type ProductionAgentState = z.infer<typeof ProductionAgentStateSchema>;
 export type PendingProductionTurn = NonNullable<ProductionAgentState["pendingTurn"]>;
 export type PendingModelCall = NonNullable<ProductionAgentState["pendingModelCall"]>;
 export type CompactionSummary = z.infer<typeof CompactionSummarySchema>;
+export type AuditCursor = z.infer<typeof AuditCursorSchema>;
+export type VerificationEvidence = z.infer<typeof VerificationEvidenceSchema>;
+export type CompletionReceipt = z.infer<typeof CompletionReceiptSchema>;
 
 export const LegacyProductionAgentStateSchema = z.object({
   version: z.literal(2),

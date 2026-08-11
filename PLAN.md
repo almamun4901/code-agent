@@ -103,6 +103,9 @@ transport) until the logic they wrap is already trustworthy.
 ```
 
 
+Roadmap status (updated 2026-08-11): Steps 0–9 are complete on merged
+`main`; Step 10 is not started.
+
 | #   | Step                      | Depends on | What it proves                                                        | Definition of done                                                                                                                                                                                                                             | Est. hours |
 | --- | ------------------------- | ---------- | --------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
 | 0   | Fake loop                 | —          | The plan/act/observe/recover state machine shape is right             | Hardcoded plan → hardcoded tool call → hardcoded observation cycles N times in a plain script, no deps                                                                                                                                         | 2          |
@@ -212,5 +215,5 @@ order above.
 | 8A — Result delivery          | complete                                              |
 | 8B — Plan approval            | complete                                              |
 | 8C — Completion evidence      | complete                                              |
-| 9 — Telemetry                 | in progress                                           |
+| 9 — Telemetry                 | complete                                              |
 | 10 — Eval + PR posting        | not started                                           |

@@ -9,7 +9,7 @@
 
 ## Current state (updated: 2026-08-11)
 
-**Overall:** Steps 0–8A, mutation recovery, the routed provider boundary, and
+**Overall:** Steps 0–9, mutation recovery, the routed provider boundary, and
 the host-side production runner are complete and merged. Successful E2B work
 now reaches a deterministic local result branch through a bounded, validated,
 transactional Git delivery before cleanup. A fresh Anthropic calculator run
@@ -20,9 +20,11 @@ review, merged-main offline verification, live interactive revision/restart,
 explicit auto approval, result delivery, cancellation, and cleanup all pass.
 Gate 8C is complete and merged. Trusted audit/checkpoint evidence, exact Git
 delivery receipts, resumable finalization, and real Chromium viewport checks
-passed their offline and live gates. The merged `main` passed typecheck, 306
-offline tests, manual preflight, fake-loop recovery, dependency audit, and diff
-checks. Step 9 telemetry is now the active roadmap step.
+passed their offline and live gates. Step 9 is complete on merged `main` with
+redacted, fail-open OpenTelemetry export to self-hosted Langfuse. The merged
+tree passed typecheck, 318 offline tests with 14 skips, manual preflight,
+fake-loop recovery, dependency audit, diff checks, review, and repeated live
+Langfuse acceptance. Step 10 evaluation and PR posting are next.
 
 **Step-by-step:**
 
@@ -40,7 +42,7 @@ checks. Step 9 telemetry is now the active roadmap step.
 | 8A — Result delivery | complete | Bounded Git delivery, durable recovery receipt, safe local result branch, shared artifact ownership, and live dogfood pass on merged `main` |
 | 8B — Plan approval | complete | Durable discovery/approval/reapproval, CLI/TUI controls, migration, recovery, review, merged-main verification, and live interactive/auto E2B acceptance pass |
 | 8C — Completion evidence | complete | Checkpoint v4, approved checks, audit binding, real viewport evidence, resumable finalization, receipt v2, inspection CLI, review, live acceptance, and merged-main verification pass |
-| 9 — Telemetry | in progress | Direct redacted OpenTelemetry export to self-hosted Langfuse is next |
+| 9 — Telemetry | complete | Redacted model/tool/hook spans, direct Langfuse export, offline contract coverage, live acceptance, review, and merged-main verification pass |
 | 10 — Eval + PR posting | not started | — |
 
 ---
@@ -65,6 +67,11 @@ checks. Step 9 telemetry is now the active roadmap step.
   Checkpoint v4 moves to `finalizing` only after every approved requirement is
   bound to one clean Git tree and reaches `completed` only after independently
   revalidated delivery and a durable receipt. See ADR 0022.
+- Telemetry is a redacted asynchronous projection of checkpoint and audit
+  truth, never an authority for recovery or completion. Each run owns a
+  non-global tracer provider and local async context; export goes directly to
+  Langfuse OTLP/HTTP, requires HTTPS except at literal loopback addresses, and
+  fails open within a bounded shutdown. See ADR 0023.
 - tree-sitter: scoping to 2–3 languages actually present in the eval subset
   for v1, not all 17 up front.
 - Model turns are atomic at the trust boundary: validate the complete
@@ -1110,6 +1117,34 @@ checks. Step 9 telemetry is now the active roadmap step.
 - Next session should start with: Create a fresh Step 9 branch from updated
   `main`, record the direct OTLP/Langfuse telemetry decision, then implement
   redacted spans for every model call, tool call, and lifecycle hook invocation.
+
+### 2026-08-11 — Redacted telemetry and Langfuse
+
+- What was done: Added one `invoke_agent` root span with child spans for every
+  model call, tool call, and lifecycle-hook invocation; direct Langfuse v4
+  OTLP/HTTP export; strict content redaction; bounded fail-open batching; and
+  bounded MCP metadata for remote PreToolUse observations. Added exact
+  topology, coverage, redaction, failure-isolation, cancellation, concurrency,
+  batch-timeout, exporter-contract, and malformed-metadata tests. Documented
+  the runtime contract and ADR 0023.
+- What broke / had to be reworked: Review found cleartext remote credential
+  exposure, global tracer-provider lifecycle interference, malformed telemetry
+  metadata changing authoritative tool results, unbounded remote observations,
+  incorrect failed/cancelled span outcomes, cleanup failures losing precedence,
+  and missing contract/topology tests. Each issue was fixed and covered by a
+  focused regression test.
+- Decisions made this session: Keep the provider per run and out of global OTel
+  state; preserve parentage with run-local async context; allow HTTP only for
+  literal loopback acceptance; keep checkpoint and audit records canonical;
+  and permit telemetry to fail only within its bounded asynchronous projection.
+- Current status of the step in progress: Step 9 is complete, merged, and
+  pushed on `main`. Typecheck, 318 offline tests with 14 skips, manual preflight,
+  fake-loop recovery, dependency audit, diff checks, specialist review, and
+  repeated temporary self-hosted Langfuse acceptance pass. Acceptance
+  containers and named volumes were removed.
+- Next session should start with: Create a fresh branch from updated `main` for
+  Step 10, inspect the evaluation and GitHub PR requirements, dry-run one eval
+  task, and reserve the frontier model for the actual evaluation run.
 
 ---
 

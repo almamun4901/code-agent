@@ -8,8 +8,8 @@ creation.
 
 ## Current status
 
-Steps 0–8C are complete. Step 9 telemetry is implemented on its feature branch
-and is undergoing final acceptance and landing. Durable plan approval is implemented, reviewed,
+Steps 0–9 are complete. Step 10 evaluation and GitHub PR delivery are next.
+Durable plan approval is implemented, reviewed,
 merged, offline-verified, and proven through credentialed live E2B acceptance.
 The deterministic fake loop, live Claude loop with fake tools, six real local
 tools, crash-safe plan persistence, MCP stdio transport,

@@ -639,6 +639,31 @@ describe("host-side production runner", () => {
     };
     const lifecycle: string[] = [];
     const observed: AgentEvent[] = [];
+    const telemetrySpans: Array<{
+      name: string;
+      attributes: Record<string, string | number | boolean | undefined>;
+      outcome?: TelemetryOutcome;
+    }> = [];
+    const telemetry: RunTelemetry = {
+      startRun() {},
+      async withSpan(name, attributes, operation) {
+        const recorded = { name, attributes: { ...attributes }, outcome: undefined as TelemetryOutcome | undefined };
+        try {
+          return await operation({
+            setAttributes(next) {
+              Object.assign(recorded.attributes, next);
+            },
+            setOutcome(outcome) {
+              recorded.outcome = outcome;
+            },
+          });
+        } finally {
+          telemetrySpans.push(recorded);
+        }
+      },
+      recordCompletedSpan() {},
+      async finishRun() {},
+    };
     const controller = startAgentRun({
       repoPath: repo.worktreePath,
       task: "Cancel safely",
@@ -654,6 +679,7 @@ describe("host-side production runner", () => {
       ]),
       openSession: async () =>
         session as unknown as E2bTaskSession,
+      telemetry,
       eventSink: (event) => observed.push(event),
       sessionEnd: async (context) => {
         lifecycle.push(`sessionEnd:${context.reason}`);
@@ -681,6 +707,15 @@ describe("host-side production runner", () => {
       observed.filter((event) => event.type === "run_finished"),
     ).toHaveLength(1);
     expect(observed.map((event) => event.type)).toContain("tool_finished");
+    expect(telemetrySpans.find((span) => span.name === "execute_tool")).toEqual({
+      name: "execute_tool",
+      attributes: expect.objectContaining({
+        "agent.tool.success": false,
+        "agent.tool.outcome": "cancelled",
+        "error.type": "TOOL_CANCELLED",
+      }),
+      outcome: "cancelled",
+    });
   });
 
   test("cancels an active model request before sandbox cleanup", async () => {
@@ -818,7 +853,20 @@ describe("host-side production runner", () => {
     const repo = await repository();
     const session = new FakeSession();
     const checkpointStore = new MemoryProductionCheckpointStore();
+    const abortController = new AbortController();
+    let telemetryOutcome: TelemetryOutcome | undefined;
+    const telemetry: RunTelemetry = {
+      startRun() {},
+      async withSpan(_name, _attributes, operation) {
+        return operation({ setAttributes() {}, setOutcome() {} });
+      },
+      recordCompletedSpan() {},
+      async finishRun(outcome) {
+        telemetryOutcome = outcome;
+      },
+    };
     session.deliverImpl = async () => {
+      abortController.abort("late delivery cancellation");
       throw new Error("delivery interrupted");
     };
 
@@ -827,6 +875,8 @@ describe("host-side production runner", () => {
       task: "Preserve an undelivered result",
       templateId: "template:test",
       approvalMode: "auto",
+      signal: abortController.signal,
+      telemetry,
       checkpointStore,
       sessionRecoveryStore: new MemoryE2bSessionRecoveryStore(),
       callModel: queuedModel([
@@ -841,6 +891,7 @@ describe("host-side production runner", () => {
 
     expect(session.lifecycle).toEqual(["reconcile", "deliver", "preserve"]);
     expect(await checkpointStore.load()).toMatchObject({ lifecycle: "finalizing", completion: null });
+    expect(telemetryOutcome).toBe("error");
   });
 
   test("fails cleanup when SessionEnd exceeds its bound", async () => {

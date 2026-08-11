@@ -315,6 +315,34 @@ describe("OpenTelemetry projection", () => {
     await telemetry.finishRun("ok");
     expect(performance.now() - startedAt).toBeLessThan(80);
   });
+
+  test("batches concurrent spans without crossing run-local trace contexts", async () => {
+    const exporters = [new RetainingInMemorySpanExporter(), new RetainingInMemorySpanExporter()];
+    const telemetry = exporters.map((exporter) => new OpenTelemetryRunTelemetry({ exporter }));
+    telemetry[0]!.startRun({ "agent.run.id": "c".repeat(64) });
+    telemetry[1]!.startRun({ "agent.run.id": "d".repeat(64) });
+
+    await Promise.all(telemetry.flatMap((run) => Array.from({ length: 12 }, () =>
+      run.withSpan("chat", { "gen_ai.operation.name": "chat" }, async () => {
+        await Promise.resolve();
+      })
+    )));
+    await Promise.all(telemetry.map((run) => run.finishRun("ok")));
+
+    const traces = exporters.map((exporter) => exporter.getFinishedSpans());
+    expect(traces[0]).toHaveLength(13);
+    expect(traces[1]).toHaveLength(13);
+    const traceIds = traces.map((spans) => new Set(spans.map((span) => span.spanContext().traceId)));
+    expect(traceIds[0]!.size).toBe(1);
+    expect(traceIds[1]!.size).toBe(1);
+    expect([...traceIds[0]!][0]).not.toBe([...traceIds[1]!][0]);
+    for (const spans of traces) {
+      const root = spans.find((span) => span.name === "invoke_agent")!;
+      expect(spans.filter((span) => span.name === "chat").every(
+        (span) => span.parentSpanContext?.spanId === root.spanContext().spanId,
+      )).toBe(true);
+    }
+  });
 });
 
 class RetainingInMemorySpanExporter extends InMemorySpanExporter {

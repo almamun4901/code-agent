@@ -250,6 +250,13 @@ export async function runHeadlessAgent(
       }),
     });
   }
+  telemetryOutcome = execution.cleanupError
+    ? "error"
+    : reason === "completed"
+      ? "ok"
+      : reason === "cancelled"
+        ? "cancelled"
+        : "error";
   try {
     if (execution.runError && execution.cleanupError) {
       throw new AggregateError(
@@ -259,10 +266,8 @@ export async function runHeadlessAgent(
     }
     if (execution.runError) throw execution.runError;
     if (execution.cleanupError) throw execution.cleanupError;
-    telemetryOutcome = "ok";
     return execution.result!;
   } finally {
-    if (options.signal?.aborted) telemetryOutcome = "cancelled";
     await telemetry.finishRun(telemetryOutcome);
   }
 }

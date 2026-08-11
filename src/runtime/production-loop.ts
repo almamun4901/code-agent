@@ -72,7 +72,7 @@ import {
   type AuditRecord,
 } from "./audit";
 import { revalidateViewportEvidenceFiles } from "./evidence-files";
-import { noOpTelemetry, type RunTelemetry, type TelemetryOutcome } from "./telemetry";
+import { noOpTelemetry, type RunTelemetry, type TelemetryOutcome, type TelemetrySpan } from "./telemetry";
 
 const MAX_PLAN_TASKS = 20;
 
@@ -800,11 +800,17 @@ async function commitPendingDiscoveryTurn(
         "gen_ai.tool.name": request.name,
         "gen_ai.tool.call.id": pending.action.operationId,
       }, async (span) => {
-        const toolResult = await options.session.call(request, {
-          operationId: pending.action!.operationId,
-          observePreToolUse: (observation) => recordRemotePreToolUse(telemetry, observation),
-          ...(options.signal ? { signal: options.signal } : {}),
-        });
+        let toolResult: ToolResult;
+        try {
+          toolResult = await options.session.call(request, {
+            operationId: pending.action!.operationId,
+            observePreToolUse: (observation) => recordRemotePreToolUse(telemetry, observation),
+            ...(options.signal ? { signal: options.signal } : {}),
+          });
+        } catch (error) {
+          recordToolException(span, error, options.signal);
+          throw error;
+        }
         span.setAttributes({
           "agent.tool.success": toolResult.success,
           "agent.tool.outcome": toolOutcome(toolResult),
@@ -1516,14 +1522,20 @@ async function commitPendingTurn(
         "gen_ai.tool.call.id": operationId,
       }, async (span) => {
         const contractError = verificationContractError(state, request);
-        const result = contractError
-          ? failedToolResult(contractError.code, contractError.message)
-          : await options.session.call(request, {
-              operationId,
-              observePreToolUse: (observation) => recordRemotePreToolUse(telemetry, observation),
-              ...(request.name === "verify_viewport" ? { viewportRequirement: approvedViewportRequirement(state, request.input.verificationRequirementId) } : {}),
-              ...(options.signal ? { signal: options.signal } : {}),
-            });
+        let result: ToolResult;
+        try {
+          result = contractError
+            ? failedToolResult(contractError.code, contractError.message)
+            : await options.session.call(request, {
+                operationId,
+                observePreToolUse: (observation) => recordRemotePreToolUse(telemetry, observation),
+                ...(request.name === "verify_viewport" ? { viewportRequirement: approvedViewportRequirement(state, request.input.verificationRequirementId) } : {}),
+                ...(options.signal ? { signal: options.signal } : {}),
+              });
+        } catch (error) {
+          recordToolException(span, error, options.signal);
+          throw error;
+        }
         span.setAttributes({
           "agent.tool.success": result.success,
           "agent.tool.outcome": toolOutcome(result),
@@ -1817,6 +1829,20 @@ function telemetryToolErrorType(
   if (outcome === "denied") return "TOOL_DENIED";
   if (outcome === "cancelled") return "TOOL_CANCELLED";
   return "TOOL_ERROR";
+}
+
+function recordToolException(
+  span: TelemetrySpan,
+  error: unknown,
+  signal: AbortSignal | undefined,
+): void {
+  const cancelled = signal?.aborted || isAbortError(error);
+  span.setAttributes({
+    "agent.tool.success": false,
+    "agent.tool.outcome": cancelled ? "cancelled" : "failed",
+    "error.type": cancelled ? "TOOL_CANCELLED" : "TOOL_ERROR",
+  });
+  span.setOutcome(cancelled ? "cancelled" : "error");
 }
 
 function isAbortError(error: unknown): boolean {
